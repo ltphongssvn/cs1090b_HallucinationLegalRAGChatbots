@@ -20,7 +20,7 @@ _collect_manifest_data() {
         fi
     done
 
-    # Capture uv version at shell level — not available inside Python
+    # uv version
     local uv_version="unknown"
     if [ -n "${UV:-}" ] && "$UV" --version &>/dev/null; then
         uv_version=$("$UV" --version 2>/dev/null || echo "unknown")
@@ -28,14 +28,21 @@ _collect_manifest_data() {
         uv_version=$(uv --version 2>/dev/null || echo "unknown")
     fi
 
-    # Capture cluster provenance at shell level
+    # Cluster / host provenance
     local host_name; host_name=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown")
     local slurm_job_id="${SLURM_JOB_ID:-none}"
     local slurm_job_name="${SLURM_JOB_NAME:-none}"
     local slurm_nodelist="${SLURM_JOB_NODELIST:-none}"
 
-    # Full uv pip freeze — complete installed package snapshot for exact reproduction.
-    # This goes beyond installed_packages (core subset) to capture every transitive dep.
+    # CUDA environment variables — affect which CUDA libs are loaded at runtime.
+    # LD_LIBRARY_PATH in particular determines whether the correct libcuda.so and
+    # libcudart.so are found; a wrong path causes silent ABI mismatches that are
+    # very hard to diagnose post-hoc without this record.
+    local cuda_home="${CUDA_HOME:-NOT SET}"
+    local cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-NOT SET}"
+    local ld_library_path="${LD_LIBRARY_PATH:-NOT SET}"
+
+    # Full uv pip freeze snapshot
     local freeze_output=""
     if [ -n "${UV:-}" ] && "$UV" pip list --format=freeze &>/dev/null 2>&1; then
         freeze_output=$("$UV" pip list --format=freeze 2>/dev/null || echo "unavailable")
@@ -84,7 +91,6 @@ def _get_pkgs(pkgs):
     return out
 
 def _parse_freeze(freeze_str):
-    # Convert pip freeze output into {package: version} dict for structured storage
     result = {}
     for line in freeze_str.strip().splitlines():
         line = line.strip()
@@ -95,6 +101,43 @@ def _parse_freeze(freeze_str):
         else:
             result[line] = 'unknown-format'
     return result
+
+def _get_cpu_info():
+    # CPU metadata — useful for profiling non-GPU bottlenecks and understanding
+    # DataLoader worker capacity. Captured via /proc/cpuinfo + /proc/meminfo
+    # (Linux-specific; gracefully degrades on other platforms).
+    info = {
+        'physical_cores': 'unknown',
+        'logical_cores':  'unknown',
+        'cpu_model':      'unknown',
+        'ram_total_gb':   'unknown',
+    }
+    try:
+        import multiprocessing
+        info['logical_cores'] = multiprocessing.cpu_count()
+    except Exception:
+        pass
+    try:
+        with open('/proc/cpuinfo') as f:
+            lines = f.read().splitlines()
+        models = [l.split(':')[1].strip() for l in lines if l.startswith('model name')]
+        if models: info['cpu_model'] = models[0]
+        physical = len({l.split(':')[1].strip() for l in lines if l.startswith('physical id')})
+        cores_per = len({l.split(':')[1].strip() for l in lines if l.startswith('core id')})
+        if physical > 0 and cores_per > 0:
+            info['physical_cores'] = physical * cores_per
+    except Exception:
+        pass
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    kb = int(line.split()[1])
+                    info['ram_total_gb'] = round(kb / 1024 / 1024, 1)
+                    break
+    except Exception:
+        pass
+    return info
 
 gpus=[]
 if torch.cuda.is_available():
@@ -122,9 +165,22 @@ data={
     'slurm_job_id':   '${slurm_job_id}',
     'slurm_job_name': '${slurm_job_name}',
     'slurm_nodelist': '${slurm_nodelist}',
+    # --- CPU / RAM metadata ---
+    # Useful for profiling DataLoader worker capacity and non-GPU bottlenecks.
+    'cpu': _get_cpu_info(),
     # --- Python ---
     'python':         sys.version,
+    'python_path':    sys.path,  # sys.path snapshot — reveals import resolution issues
     'platform':       platform.platform(),
+    # --- CUDA environment variables ---
+    # These determine which CUDA shared libraries are loaded at runtime.
+    # LD_LIBRARY_PATH in particular controls libcuda.so / libcudart.so resolution —
+    # a wrong path causes silent ABI mismatches that are very hard to diagnose later.
+    'cuda_env': {
+        'CUDA_HOME':            '${cuda_home}',
+        'CUDA_VISIBLE_DEVICES': '${cuda_visible_devices}',
+        'LD_LIBRARY_PATH':      '${ld_library_path}',
+    },
     # --- Reproducibility env vars ---
     'repro_env':{
         'PYTHONHASHSEED':         os.environ.get('PYTHONHASHSEED','NOT SET'),
@@ -176,14 +232,13 @@ data={
     'spacy_model_version':nlp.meta.get('version'),
     'spacy_model_sha256': '${SPACY_MODEL_SHA256}',
     'faiss':              _get_faiss(),
-    # --- Core package versions (quick lookup subset) ---
+    # --- Package snapshots ---
     'installed_packages': _get_pkgs([
         'torch','transformers','datasets','faiss-cpu','spacy',
         'scikit-learn','numpy','pandas','langchain','gensim',
         'sentence-transformers','networkx','pytest','mypy','hypothesis',
     ]),
-    # --- Full freeze snapshot (all transitive deps — for exact reproduction) ---
-    'freeze_snapshot': freeze_parsed,
+    'freeze_snapshot':     freeze_parsed,
     'freeze_snapshot_raw': freeze_raw,
 }
 print(json.dumps(data))
@@ -212,8 +267,10 @@ data=json.load(sys.stdin)
 with open('logs/environment_manifest.json','w') as f:
     json.dump(data,f,indent=2)
 pkg_count = len(data.get('freeze_snapshot', {}))
+cpu = data.get('cpu', {})
 print(f'  \033[0;32m✓\033[0m manifest → logs/environment_manifest.json')
 print(f'    freeze snapshot: {pkg_count} packages')
+print(f'    cpu: {cpu.get(\"cpu_model\",\"unknown\")} | cores: {cpu.get(\"logical_cores\",\"?\")} | RAM: {cpu.get(\"ram_total_gb\",\"?\")}GB')
 "
 }
 
@@ -225,6 +282,7 @@ write_manifest() {
         _msg_dry_run "write environment manifest" "${PROJECT_ROOT}/logs/environment_manifest.json"
         _msg_info "Would record: git=${git_sha} | host=$(hostname 2>/dev/null) | slurm_job=${SLURM_JOB_ID:-none}"
         _msg_info "Would record: hardware_match=${HARDWARE_MATCH} | detected=${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
+        _msg_info "Would record: CUDA_HOME=${CUDA_HOME:-NOT SET} | LD_LIBRARY_PATH=${LD_LIBRARY_PATH:0:60}..."
         step_end "write_manifest" "DRY"; return
     fi
 
@@ -245,5 +303,6 @@ write_manifest() {
     _msg_info "git: ${git_sha} | branch: ${git_branch} | dirty: ${git_dirty}"
     _msg_info "uv: ${UV:-uv} | host: $(hostname 2>/dev/null) | slurm_job: ${SLURM_JOB_ID:-none}"
     _msg_info "uv.lock sha256: ${uvlock_sha256}"
+    _msg_info "CUDA_HOME: ${CUDA_HOME:-NOT SET} | CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-NOT SET}"
     _msg_info "hardware_match: ${HARDWARE_MATCH} | detected: ${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
 }
