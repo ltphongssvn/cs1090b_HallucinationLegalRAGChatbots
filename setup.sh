@@ -91,6 +91,10 @@ verify_python() {
 
 sync_dependencies() {
     echo " Syncing dependencies from uv.lock (--frozen)..."
+    # --dev is the default in uv >=0.4 but kept explicit here to:
+    # (1) document intent — dev tools (pytest, mypy, hypothesis) are required,
+    # (2) guard against future uv default changes,
+    # (3) signal to collaborators that this is a deliberate inclusion.
     $UV sync --frozen --dev
 }
 
