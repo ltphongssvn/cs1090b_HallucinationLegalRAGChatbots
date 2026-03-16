@@ -1,0 +1,154 @@
+# Makefile
+# Path: cs1090b_HallucinationLegalRAGChatbots/Makefile
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+export PYTHONHASHSEED=0
+.DEFAULT_GOAL := help
+
+SRC_DIR    ?= src
+TESTS_DIR  ?= tests
+MARKER     ?= not gpu
+VENV_BIN   := .venv/bin
+PYTEST     := $(VENV_BIN)/python -m pytest $(TESTS_DIR)/ --strict-markers -v
+LOG_DIR    := logs
+REPRO_LOG  := $(LOG_DIR)/repro_$(shell date +%Y%m%d_%H%M%S).log
+BATS       := $(shell command -v bats 2>/dev/null || echo $(TESTS_DIR)/shell/bats-core/bin/bats)
+
+.PHONY: setup cpu test test-all test-unit test-contract test-integration \
+        test-regression test-gpu test-cov test-shell test-all-with-shell \
+        lint fmt format typecheck check ci repro clean clean-all \
+        dvc-init install-hooks help
+
+setup:
+	bash setup.sh
+	$(MAKE) install-hooks
+
+cpu:
+	SKIP_GPU=1 bash setup.sh
+	$(MAKE) install-hooks
+
+dry-run:
+	DRY_RUN=1 bash setup.sh
+
+install-hooks:
+	@printf '#!/usr/bin/env bash\nset -euo pipefail\nmake check\n' > .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo " pre-push hook installed — make check enforced before every push"
+
+# --- Shell tests (bats-core) ---
+test-shell:
+	@if [ ! -x "$(BATS)" ]; then \
+		echo "ERROR: bats not found at '$(BATS)'"; \
+		echo "       Install: npm install -g bats"; \
+		echo "       or: git clone https://github.com/bats-core/bats-core $(TESTS_DIR)/shell/bats-core"; \
+		exit 1; \
+	fi
+	@echo "Running shell tests via bats..."
+	$(BATS) --tap \
+		$(TESTS_DIR)/shell/test_lib.bats \
+		$(TESTS_DIR)/shell/test_bootstrap_env.bats \
+		$(TESTS_DIR)/shell/test_preflight.bats
+
+# Parametric entry point: make test MARKER=contract
+test: setup
+	$(PYTEST) -m "$(MARKER)"
+
+test-all: setup
+	$(PYTEST) -n auto
+
+test-all-with-shell: test-shell test-all
+
+test-unit:
+	$(MAKE) test MARKER=unit
+
+test-contract:
+	$(MAKE) test MARKER=contract
+
+test-integration:
+	$(MAKE) test MARKER=integration
+
+test-regression:
+	$(MAKE) test MARKER=regression
+
+test-gpu:
+	$(MAKE) test MARKER=gpu
+
+test-cov:
+	$(PYTEST) -n auto --cov=$(SRC_DIR) --cov-report=html --cov-report=xml
+
+lint:
+	$(VENV_BIN)/python -m ruff check $(SRC_DIR)/ $(TESTS_DIR)/
+
+format:
+	$(VENV_BIN)/python -m ruff check --fix $(SRC_DIR)/ $(TESTS_DIR)/
+	$(VENV_BIN)/python -m ruff format $(SRC_DIR)/ $(TESTS_DIR)/
+
+fmt: format
+
+typecheck:
+	$(VENV_BIN)/python -m mypy $(SRC_DIR)/
+
+check: lint typecheck test-unit test-contract
+
+ci: setup check
+
+repro: clean-all setup
+	@mkdir -p $(LOG_DIR)
+	@echo "Repro run started: $$(date)" | tee $(REPRO_LOG)
+	$(PYTEST) -n auto 2>&1 | tee -a $(REPRO_LOG); \
+	EXIT=$$?; \
+	if [ $$EXIT -ne 0 ]; then \
+		echo "REPRO FAILED — see $(REPRO_LOG)"; \
+		exit $$EXIT; \
+	fi
+	@echo "Repro run completed: $$(date)" | tee -a $(REPRO_LOG)
+	@echo "Full reproducibility run complete — log: $(REPRO_LOG)"
+
+clean:
+	rm -rf .pytest_cache .mypy_cache .coverage htmlcov coverage.xml
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+clean-all: clean
+	rm -rf .venv
+	@echo "WARNING: .venv removed — run make setup to rebuild"
+
+dvc-init:
+	@if [ ! -d "data/raw/cl_federal_appellate_bulk" ]; then \
+		echo "ERROR: DATA_DIR does not exist. Run Cell 2 pipeline first."; \
+		exit 1; \
+	fi
+	$(VENV_BIN)/dvc status 2>/dev/null || $(VENV_BIN)/dvc init
+	$(VENV_BIN)/dvc add data/raw/cl_federal_appellate_bulk
+
+help:
+	@echo "Usage: make <target> [MARKER=<pytest-marker>]"
+	@echo ""
+	@echo "  Setup:"
+	@echo "    setup              — full bootstrap + install pre-push hook (GPU)"
+	@echo "    cpu                — bootstrap without GPU checks (SKIP_GPU=1)"
+	@echo "    dry-run            — preview all side effects (DRY_RUN=1 bash setup.sh)"
+	@echo "    install-hooks      — install git pre-push hook"
+	@echo ""
+	@echo "  Tests:"
+	@echo "    test               — run tests matching MARKER (default: 'not gpu')"
+	@echo "    test-all           — full Python suite in parallel"
+	@echo "    test-shell         — shell script tests via bats-core"
+	@echo "    test-all-with-shell— shell + full Python suite"
+	@echo "    test-unit          — shortcut: MARKER=unit"
+	@echo "    test-contract      — shortcut: MARKER=contract"
+	@echo "    test-integration   — shortcut: MARKER=integration"
+	@echo "    test-regression    — shortcut: MARKER=regression"
+	@echo "    test-gpu           — shortcut: MARKER=gpu"
+	@echo "    test-cov           — parallel tests with HTML+XML coverage"
+	@echo ""
+	@echo "  Quality:"
+	@echo "    lint               — ruff check"
+	@echo "    format             — ruff --fix + ruff format"
+	@echo "    typecheck          — mypy check"
+	@echo "    check              — lint + typecheck + unit + contract"
+	@echo "    ci                 — setup + check (CI entry point)"
+	@echo ""
+	@echo "  Maintenance:"
+	@echo "    repro              — clean-all + setup + test-all with timestamped log"
+	@echo "    clean              — remove caches (preserves .venv)"
+	@echo "    clean-all          — remove caches + .venv"
+	@echo "    dvc-init           — initialize DVC tracking for data dir"

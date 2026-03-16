@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # scripts/validate_tests.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/validate_tests.sh
-# Responsibility: test discovery, unit test gate, environment smoke tests.
+# Responsibility: test discovery, unit test gate, environment smoke tests,
+#                 and shell script tests via bats-core.
 # Sourced by setup.sh — defines functions only, no top-level execution.
 
 run_env_smoke_tests() {
@@ -53,25 +54,87 @@ print(f'  \033[0;32m✓\033[0m spacy {spacy.__version__} | model {v} | entities:
 "
 }
 
+run_shell_tests() {
+    # Run bats-core tests for shell scripts.
+    # bats-core must be installed — install via: npm install -g bats
+    # or: brew install bats-core
+    # or: git clone bats-core into tests/shell/bats-core and use local install.
+    echo " Running shell script tests (bats-core)..."
+
+    local bats_bin=""
+    # Prefer project-local bats install, then PATH
+    if [ -x "${PROJECT_ROOT}/tests/shell/bats-core/bin/bats" ]; then
+        bats_bin="${PROJECT_ROOT}/tests/shell/bats-core/bin/bats"
+    elif command -v bats &>/dev/null; then
+        bats_bin="$(command -v bats)"
+    fi
+
+    if [ -z "$bats_bin" ]; then
+        _msg_warn "bats-core not found" \
+            "bats binary not found on PATH or at tests/shell/bats-core/bin/bats" \
+            "action-required" \
+            "Install: npm install -g bats   or: git clone https://github.com/bats-core/bats-core tests/shell/bats-core"
+        echo " Shell tests SKIPPED — bats-core not installed."
+        return 0
+    fi
+
+    _msg_info "bats: $("$bats_bin" --version)"
+    _msg_info "Running: tests/shell/test_lib.bats tests/shell/test_bootstrap_env.bats tests/shell/test_preflight.bats"
+
+    local shell_test_files=(
+        "${PROJECT_ROOT}/tests/shell/test_lib.bats"
+        "${PROJECT_ROOT}/tests/shell/test_bootstrap_env.bats"
+        "${PROJECT_ROOT}/tests/shell/test_preflight.bats"
+    )
+
+    # Verify test files exist before running
+    local missing=()
+    for f in "${shell_test_files[@]}"; do
+        [ ! -f "$f" ] && missing+=("$f")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        _msg_warn "Shell test files missing" \
+            "Not found: ${missing[*]}" \
+            "informational" \
+            "Re-run bash setup.sh to regenerate, or check git status"
+        return 0
+    fi
+
+    if "$bats_bin" --tap "${shell_test_files[@]}"; then
+        _msg_ok "All shell tests passed"
+    else
+        _msg_error "Shell tests failed" \
+            "One or more bats tests in tests/shell/ failed" \
+            "A broken shell helper (guard, messaging, dry-run) will cause silent failures in setup.sh" \
+            "Run manually: bats tests/shell/   or: STEP=run_shell_tests bash setup.sh"
+        exit 1
+    fi
+}
+
 verify_tests() {
     _require_uv; _require_python
     echo " Verifying test suite..."
+
+    # --- Shell tests (bats-core) ---
+    run_shell_tests
+
+    # --- Python unit tests ---
     local UNIT_COUNT
     UNIT_COUNT=$("$UV" run pytest tests/ --co -q -m unit 2>/dev/null | grep -c "^tests/" || true)
     if [ "${UNIT_COUNT}" -gt 0 ]; then
-        _msg_info "Found ${UNIT_COUNT} unit tests — running as environment verification gate..."
+        _msg_info "Found ${UNIT_COUNT} Python unit tests — running as environment verification gate..."
         "$UV" run pytest tests/ -m unit -q --tb=short && \
-            _msg_ok "Unit tests passed — environment verified end-to-end" || {
-            _msg_error "Unit tests failed" "${UNIT_COUNT} unit tests but one or more failed" \
+            _msg_ok "Python unit tests passed — environment verified end-to-end" || {
+            _msg_error "Python unit tests failed" "${UNIT_COUNT} unit tests but one or more failed" \
                 "Failing unit tests indicate broken environment — do not proceed to training" \
                 ".venv/bin/pytest tests/ -m unit -v --tb=long"
             exit 1
         }
     else
-        _msg_info "No unit tests yet — collection check..."
+        _msg_info "No Python unit tests yet — collection check..."
         "$UV" run pytest tests/ --co -q 2>/dev/null && \
-            _msg_ok "Test collection ok — no unit tests to run yet" || \
-            _msg_warn "Test collection failed" "pytest --co could not collect tests" \
+            _msg_ok "Python test collection ok — no unit tests to run yet" || \
+            _msg_warn "Python test collection failed" "pytest --co could not collect tests" \
                 "informational" ".venv/bin/python -c 'import src.environment; import src.repro'"
     fi
 }
