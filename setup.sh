@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# setup.sh
+# Path: cs1090b_HallucinationLegalRAGChatbots/setup.sh
+#
+# Usage:        bash setup.sh
+# Debug:        DEBUG=1 bash setup.sh
+# Skip GPU:     SKIP_GPU=1 bash setup.sh
+set -euo pipefail
+[ "${DEBUG:-0}" = "1" ] && set -x
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+PYTHON="$PROJECT_ROOT/.venv/bin/python"
+
+trap 'echo "ERROR: setup.sh failed at line $LINENO — environment may be incomplete"' ERR
+
+check_uv() {
+    if ! command -v uv &>/dev/null && ! command -v ~/.local/bin/uv &>/dev/null; then
+        echo "ERROR: uv not found. Install via: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    UV=$(command -v uv 2>/dev/null || echo ~/.local/bin/uv)
+    echo " uv: $($UV --version)"
+}
+
+check_lockfile() {
+    if [ ! -f "$PROJECT_ROOT/pyproject.toml" ]; then
+        echo "ERROR: pyproject.toml not found — are you in the project root?"
+        exit 1
+    fi
+    if [ ! -f "$PROJECT_ROOT/uv.lock" ]; then
+        echo "ERROR: uv.lock not found — lockfile must be committed to the repo."
+        echo "       To generate deliberately: uv lock && git add uv.lock && git commit -m 'chore: pin uv.lock'"
+        exit 1
+    fi
+    echo " uv.lock sha256: $(sha256sum "$PROJECT_ROOT/uv.lock" | cut -d' ' -f1)"
+}
+
+log_gpu() {
+    if command -v nvidia-smi &>/dev/null; then
+        echo " GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+        echo " CUDA driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+    else
+        echo "WARNING: nvidia-smi not found — GPU training unavailable"
+    fi
+}
+
+ensure_venv() {
+    if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (3,11,9) else 1)" 2>/dev/null; then
+        echo " .venv already exists with Python 3.11.9 — skipping creation"
+    else
+        echo " Creating .venv with Python 3.11.9..."
+        rm -rf "$PROJECT_ROOT/.venv"
+        $UV venv .venv --python 3.11.9 --seed
+    fi
+}
+
+verify_python() {
+    $PYTHON -c "import sys; assert sys.version_info[:3] == (3,11,9), f'Expected 3.11.9 got {sys.version}'"
+    echo " Python: $($PYTHON --version)"
+    echo " Executable: $($PYTHON -c 'import sys; print(sys.executable)')"
+}
+
+sync_dependencies() {
+    echo " Syncing dependencies from uv.lock (--frozen)..."
+    $UV sync --frozen --dev
+}
+
+run_env_smoke_tests() {
+    echo " Running environment smoke tests..."
+    $PYTHON -c "
+import torch
+ver = torch.__version__
+assert ver.startswith('2.') and 'cu' in ver, f'Expected torch 2.x+cuXXX got {ver}'
+print(f'  torch {ver}')
+"
+    $PYTHON -c "import transformers; print(f'  transformers {transformers.__version__}')"
+    $PYTHON -c "import faiss; print(f'  faiss ok')"
+    $PYTHON -c "import spacy; print(f'  spacy {spacy.__version__}')"
+}
+
+run_gpu_smoke_tests() {
+    if [ "${SKIP_GPU:-0}" = "1" ]; then
+        echo " SKIP_GPU=1 — skipping GPU smoke tests (CPU-only mode)"
+        return
+    fi
+    echo " Running GPU smoke tests..."
+    $PYTHON -c "
+import torch
+assert torch.cuda.is_available(), 'CUDA not available — wrong torch wheel'
+assert torch.version.cuda.startswith('11.7'), f'Expected CUDA 11.7 got {torch.version.cuda}'
+cap = torch.cuda.get_device_capability()
+assert cap >= (8, 0), f'L4 requires compute capability >=8.0, got {cap}'
+print(f'  CUDA {torch.version.cuda} ok — compute capability {cap}')
+"
+}
+
+download_nlp_models() {
+    echo " Downloading spaCy en_core_web_sm..."
+    $PYTHON -m spacy download en_core_web_sm --quiet
+}
+
+write_manifest() {
+    echo " Writing environment manifest..."
+    mkdir -p "$PROJECT_ROOT/logs"
+    $PYTHON -c "
+import json, torch, transformers, spacy, sys, platform
+from datetime import datetime
+manifest = {
+    'timestamp': datetime.utcnow().isoformat() + 'Z',
+    'python': sys.version,
+    'torch': torch.__version__,
+    'cuda': torch.version.cuda,
+    'cuda_available': torch.cuda.is_available(),
+    'compute_capability': torch.cuda.get_device_capability() if torch.cuda.is_available() else None,
+    'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    'transformers': transformers.__version__,
+    'spacy': spacy.__version__,
+    'platform': platform.platform(),
+}
+with open('logs/environment_manifest.json', 'w') as f:
+    json.dump(manifest, f, indent=2)
+print('  manifest written to logs/environment_manifest.json')
+"
+}
+
+register_kernel() {
+    echo " Registering Jupyter kernel..."
+    $PYTHON -m ipykernel install --user --name hallucination-legal-rag --display-name "HallucinationLegalRAG (3.11.9)"
+    $PYTHON -c "
+import subprocess, json
+result = subprocess.run(['jupyter', 'kernelspec', 'list', '--json'], capture_output=True, text=True)
+kernels = json.loads(result.stdout).get('kernelspecs', {})
+assert 'hallucination-legal-rag' in kernels, 'Kernel registration failed'
+print('  kernel verified in kernelspec list')
+" || echo "WARNING: Could not verify kernel — jupyter may not be on PATH"
+}
+
+verify_tests() {
+    echo " Verifying pytest test collection..."
+    $UV run pytest --co -q || echo "WARNING: No tests collected yet"
+}
+
+echo "============================================================"
+echo " cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap"
+echo "============================================================"
+check_uv
+check_lockfile
+log_gpu
+ensure_venv
+verify_python
+sync_dependencies
+run_env_smoke_tests
+run_gpu_smoke_tests
+download_nlp_models
+write_manifest
+register_kernel
+verify_tests
+echo "============================================================"
+echo " Environment ready."
+echo " Activate:  source .venv/bin/activate"
+echo " Kernel:    HallucinationLegalRAG (3.11.9)"
+echo " Manifest:  logs/environment_manifest.json"
+echo " CPU mode:  SKIP_GPU=1 bash setup.sh"
+echo "============================================================"
