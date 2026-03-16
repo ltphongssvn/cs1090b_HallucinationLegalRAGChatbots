@@ -34,7 +34,7 @@ SPACY_MODEL_URL="https://github.com/explosion/spacy-models/releases/download/${S
 SPACY_MODEL_SHA256="5e97b9ec4f95153b992896c5c45b1a00c3fcde7f764426c5370f2f11e71abef2"
 
 # ===========================================================================
-# Runtime state — sentinel "UNDETECTED" distinguishes not-yet-detected from N/A
+# Runtime state
 # ===========================================================================
 DETECTED_GPU_NAME="UNDETECTED"
 DETECTED_GPU_COUNT="UNDETECTED"
@@ -42,10 +42,10 @@ DETECTED_DRIVER_CUDA="UNDETECTED"
 DETECTED_TORCH_CUDA="UNDETECTED"
 DETECTED_CUDNN="UNDETECTED"
 HARDWARE_MATCH="true"
-UV=""  # set by check_uv(); all callers must invoke _require_uv() first
+UV=""
 
 # ===========================================================================
-# Colors — disabled if not a TTY
+# Colors
 # ===========================================================================
 if [ -t 1 ]; then
     C_RESET="\033[0m"; C_BOLD="\033[1m"; C_GREEN="\033[0;32m"
@@ -62,11 +62,17 @@ fi
 SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
 _step_start_time=0
 SETUP_START_TIME=$(date +%s)
+_CURRENT_STEP="(none)"  # tracks the active step for signal handler context
 
-step_begin() { _step_start_time=$(date +%s); echo -e "${C_BOLD}${C_CYAN}▶ $1${C_RESET}"; }
+step_begin() {
+    _CURRENT_STEP="$1"
+    _step_start_time=$(date +%s)
+    echo -e "${C_BOLD}${C_CYAN}▶ $1${C_RESET}"
+}
 
 step_end() {
     local name="$1" status="${2:-PASS}" duration=$(( $(date +%s) - _step_start_time ))
+    _CURRENT_STEP="(none)"
     SUMMARY_STEPS+=("$name"); SUMMARY_DURATION+=("${duration}s")
     case "$status" in
         PASS) SUMMARY_STATUS+=("${C_GREEN}PASS${C_RESET}") ;;
@@ -129,34 +135,69 @@ _msg_ok()   { echo -e "  ${C_GREEN}✓${C_RESET} $1"; }
 _msg_info() { echo -e "  ${C_BLUE}ℹ${C_RESET} $1"; }
 _msg_skip() { echo -e "  ${C_DIM}⊘ $1${C_RESET}"; }
 
-# _msg_dry_run <action> <target>
-# Prints what a mutating step WOULD do in DRY_RUN=1 mode.
-# Use this at the top of any step that writes files, installs packages,
-# or deletes directories — then return 0 to skip the actual operation.
 _msg_dry_run() {
     local action="$1" target="$2"
     echo -e "  ${C_MAGENTA}⊡ DRY RUN${C_RESET} — would ${action}: ${C_DIM}${target}${C_RESET}"
 }
 
-# _is_dry_run — returns 0 (true) if DRY_RUN=1, 1 (false) otherwise.
-# Use in mutating steps: _is_dry_run && { _msg_dry_run ...; return 0; }
 _is_dry_run() { [ "${DRY_RUN:-0}" = "1" ]; }
 
 # ===========================================================================
-# ERR trap
+# Strict failure handling — ERR trap + signal handlers
 # ===========================================================================
+
 _on_error() {
+    # ERR trap: called on any non-zero exit from a simple command.
+    # Prints structured context before showing the summary.
     local line="$1" cmd="$2"
     echo -e "\n${C_RED}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_RED}${C_BOLD}  SETUP FAILED — unexpected error${C_RESET}"
     echo -e "${C_RED}${C_BOLD}============================================================${C_RESET}"
-    echo -e "${C_RED}  Line:    ${line}${C_RESET}"
-    echo -e "${C_RED}  Command: ${cmd}${C_RESET}"
-    echo -e "${C_DIM}  Hint:    DEBUG=1 bash setup.sh for full trace${C_RESET}"
-    echo -e "${C_DIM}  Hint:    STEP=<fn_name> bash setup.sh to re-run just the failing step${C_RESET}"
-    echo -e "${C_DIM}  Hint:    Check logs/environment_manifest.json if it exists${C_RESET}\n"
+    echo -e "${C_RED}  Line:         ${line}${C_RESET}"
+    echo -e "${C_RED}  Command:      ${cmd}${C_RESET}"
+    echo -e "${C_RED}  Active step:  ${_CURRENT_STEP}${C_RESET}"
+    echo -e "${C_DIM}  Hint: DEBUG=1 bash setup.sh for full set -x trace${C_RESET}"
+    echo -e "${C_DIM}  Hint: STEP=${_CURRENT_STEP} bash setup.sh to re-run just the failing step${C_RESET}"
+    echo -e "${C_DIM}  Hint: Check logs/environment_manifest.json if it exists${C_RESET}\n"
     print_summary
 }
+
+_on_sigint() {
+    # SIGINT handler: user pressed Ctrl+C during setup.
+    # Prints which step was interrupted so the user knows exactly where to resume.
+    echo -e "\n\n${C_YELLOW}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_YELLOW}${C_BOLD}  SETUP INTERRUPTED — Ctrl+C received${C_RESET}"
+    echo -e "${C_YELLOW}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_YELLOW}  Interrupted during step: ${_CURRENT_STEP}${C_RESET}"
+    echo -e "${C_DIM}  The environment may be in a partial state.${C_RESET}"
+    echo -e "${C_CYAN}  To resume from the interrupted step:${C_RESET}"
+    echo -e "${C_CYAN}    STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}"
+    echo -e "${C_CYAN}  To restart from the beginning:${C_RESET}"
+    echo -e "${C_CYAN}    bash setup.sh${C_RESET}\n"
+    print_summary
+    exit 130  # Standard exit code for SIGINT (128 + 2)
+}
+
+_on_sigterm() {
+    # SIGTERM handler: process was killed (e.g. cluster job timeout, OOM killer).
+    # Distinguishable from SIGINT so the user knows it was not their Ctrl+C.
+    echo -e "\n\n${C_RED}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_RED}${C_BOLD}  SETUP TERMINATED — SIGTERM received${C_RESET}"
+    echo -e "${C_RED}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_RED}  Terminated during step: ${_CURRENT_STEP}${C_RESET}"
+    echo -e "${C_DIM}  Possible causes: cluster job timeout, OOM killer, or external kill${C_RESET}"
+    echo -e "${C_CYAN}  Check cluster logs, then resume:${C_RESET}"
+    echo -e "${C_CYAN}    STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}\n"
+    print_summary
+    exit 143  # Standard exit code for SIGTERM (128 + 15)
+}
+
+# Register signal handlers.
+# These are registered here in lib.sh so they are active as soon as lib.sh
+# is sourced — before any step runs. The ERR trap is registered in setup.sh
+# after sourcing because it references _CURRENT_STEP which is defined here.
+trap '_on_sigint'  INT
+trap '_on_sigterm' TERM
 
 # ===========================================================================
 # Defensive guards
