@@ -126,7 +126,7 @@ download_nlp_models() {
     echo " Installing spaCy ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned)..."
     mkdir -p "$SPACY_CACHE_DIR"
 
-    # Check if model version already installed — skip if so
+    # Check if correct model version already installed — skip if so
     if $PYTHON -c "
 import spacy, sys
 try:
@@ -266,6 +266,13 @@ print(f'  CUDA {torch.version.cuda} — GPU tensor op on cuda:0 ok')
 write_manifest() {
     echo " Writing environment manifest..."
     mkdir -p "$PROJECT_ROOT/logs"
+
+    # Capture git SHA and uv.lock hash at shell level — more reliable than from Python
+    GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
+    GIT_BRANCH=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    GIT_DIRTY=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | xargs)
+    UVLOCK_SHA256=$(sha256sum "$PROJECT_ROOT/uv.lock" | cut -d' ' -f1)
+
     $PYTHON -c "
 import json, torch, transformers, spacy, sys, platform, subprocess
 from datetime import datetime
@@ -290,6 +297,22 @@ def get_driver_cuda():
         return 'nvidia-smi not found'
     return 'unknown'
 
+def get_driver_version():
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'],
+            capture_output=True, text=True)
+        return result.stdout.strip().splitlines()[0] if result.stdout.strip() else 'unknown'
+    except FileNotFoundError:
+        return 'nvidia-smi not found'
+
+def get_faiss_version():
+    try:
+        import faiss
+        return getattr(faiss, '__version__', 'installed — version attr unavailable')
+    except ImportError:
+        return 'not installed'
+
 gpus = []
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
@@ -304,25 +327,37 @@ if torch.cuda.is_available():
 nlp = spacy.load('${SPACY_MODEL}')
 manifest = {
     'timestamp': datetime.utcnow().isoformat() + 'Z',
+    # --- Repo provenance ---
+    'git_sha': '${GIT_SHA}',
+    'git_branch': '${GIT_BRANCH}',
+    'git_dirty_files': int('${GIT_DIRTY}'),
+    'uv_lock_sha256': '${UVLOCK_SHA256}',
+    # --- Python ---
     'python': sys.version,
+    'platform': platform.platform(),
+    # --- Torch & CUDA ---
     'torch': torch.__version__,
     'torch_cuda_runtime': torch.version.cuda,
     'driver_cuda': get_driver_cuda(),
+    'driver_version': get_driver_version(),
     'cudnn': str(torch.backends.cudnn.version()) if torch.cuda.is_available() else None,
     'cuda_toolkit_nvcc': get_nvcc_version(),
     'cuda_available': torch.cuda.is_available(),
     'gpu_count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
     'gpus': gpus,
+    # --- NLP / RAG libraries ---
     'transformers': transformers.__version__,
     'spacy': spacy.__version__,
     'spacy_model': '${SPACY_MODEL}',
     'spacy_model_version': nlp.meta.get('version'),
     'spacy_model_sha256': '${SPACY_MODEL_SHA256}',
-    'platform': platform.platform(),
+    'faiss': get_faiss_version(),
 }
 with open('logs/environment_manifest.json', 'w') as f:
     json.dump(manifest, f, indent=2)
 print('  manifest written to logs/environment_manifest.json')
+print(f'  git sha: ${GIT_SHA} | branch: ${GIT_BRANCH} | dirty files: ${GIT_DIRTY}')
+print(f'  uv.lock sha256: ${UVLOCK_SHA256}')
 "
 }
 
