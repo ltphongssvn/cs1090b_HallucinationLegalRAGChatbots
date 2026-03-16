@@ -57,6 +57,15 @@ SPACY_MODEL_SHA256="5e97b9ec4f95153b992896c5c45b1a00c3fcde7f764426c5370f2f11e71a
 SPACY_CACHE_DIR="$PROJECT_ROOT/.cache/spacy"
 SPACY_WHEEL="$SPACY_CACHE_DIR/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
 
+# Runtime-detected hardware — populated by detect_hardware(), used by
+# run_gpu_smoke_tests() and write_manifest() so detection happens once.
+DETECTED_GPU_NAME=""
+DETECTED_GPU_COUNT=""
+DETECTED_DRIVER_CUDA=""
+DETECTED_TORCH_CUDA=""
+DETECTED_CUDNN=""
+HARDWARE_MATCH="true"
+
 trap 'echo "ERROR: setup.sh failed at line $LINENO — environment may be incomplete"' ERR
 
 check_uv() {
@@ -82,17 +91,23 @@ check_lockfile() {
 }
 
 log_gpu() {
+    # Pre-venv: driver-level info only via nvidia-smi.
+    # Full torch-level details logged in detect_hardware() after venv is ready.
     echo " Hardware target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME} | CUDA runtime ${TARGET_TORCH_CUDA_RUNTIME} | driver CUDA ${TARGET_DRIVER_CUDA}"
     if command -v nvidia-smi &>/dev/null; then
-        echo " --- nvidia-smi per-GPU summary ---"
+        echo " --- nvidia-smi per-GPU summary (pre-venv) ---"
         nvidia-smi --query-gpu=index,name,memory.total,driver_version \
             --format=csv,noheader | while IFS=',' read -r idx name mem drv; do
             echo "  GPU $idx:$(echo "$name" | xargs) | VRAM:$(echo "$mem" | xargs) | Driver:$(echo "$drv" | xargs)"
         done
-        DRIVER_CUDA=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
-        echo " Driver CUDA (max supported): $DRIVER_CUDA"
+        DRIVER_CUDA_DETECTED=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
+        echo " Driver CUDA (max supported): $DRIVER_CUDA_DETECTED"
         echo " NOTE: torch wheel compiled against CUDA runtime ${TARGET_TORCH_CUDA_RUNTIME} (cu117)."
-        echo "       Driver CUDA $DRIVER_CUDA is forward-compatible — this is expected and correct."
+        echo "       Driver CUDA $DRIVER_CUDA_DETECTED is forward-compatible — this is expected and correct."
+        if [ "$DRIVER_CUDA_DETECTED" != "$TARGET_DRIVER_CUDA" ]; then
+            echo "WARNING: detected driver CUDA $DRIVER_CUDA_DETECTED != target ${TARGET_DRIVER_CUDA}."
+            echo "         Update TARGET_DRIVER_CUDA in setup.sh if this node is intentionally different."
+        fi
     else
         echo "WARNING: nvidia-smi not found — GPU training unavailable"
     fi
@@ -101,19 +116,94 @@ log_gpu() {
     else
         echo "WARNING: nvcc not on PATH — CUDA toolkit version unverified"
     fi
-    if [ -f "$PYTHON" ]; then
-        $PYTHON -c "
-import torch
+}
+
+detect_hardware() {
+    # Post-venv: detect actual GPU properties via torch and compare against
+    # TARGET_* constants. Populates DETECTED_* shell vars for reuse in
+    # run_gpu_smoke_tests() and write_manifest() — detection runs exactly once.
+    #
+    # Design: emit structured WARNING lines for mismatches rather than
+    # hard-failing here. run_gpu_smoke_tests() enforces the hard gate.
+    # This separation gives collaborators full visibility before the hard stop.
+    echo " Detecting hardware (post-venv, torch-level)..."
+
+    DETECTED_HW=$($PYTHON -c "
+import torch, json, sys
+
+result = {
+    'cuda_available': torch.cuda.is_available(),
+    'gpu_count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    'torch_cuda': torch.version.cuda or 'unknown',
+    'cudnn': str(torch.backends.cudnn.version()) if torch.cuda.is_available() else 'N/A',
+    'gpus': [],
+}
 if torch.cuda.is_available():
-    print(f'  torch CUDA runtime: {torch.version.cuda}')
-    print(f'  cuDNN:              {torch.backends.cudnn.version()}')
-    print(f'  visible GPUs:       {torch.cuda.device_count()}')
     for i in range(torch.cuda.device_count()):
-        cap = torch.cuda.get_device_capability(i)
-        name = torch.cuda.get_device_name(i)
-        vram = round(torch.cuda.get_device_properties(i).total_memory / 1e9, 2)
-        print(f'    [{i}] {name} | cap {cap} | {vram} GB')
-" 2>/dev/null || true
+        props = torch.cuda.get_device_properties(i)
+        result['gpus'].append({
+            'index': i,
+            'name': props.name,
+            'vram_gb': round(props.total_memory / 1e9, 2),
+            'compute_capability': list(torch.cuda.get_device_capability(i)),
+        })
+print(json.dumps(result))
+")
+
+    # Parse detected values into shell vars
+    DETECTED_GPU_COUNT=$(echo "$DETECTED_HW" | $PYTHON -c "import json,sys; d=json.load(sys.stdin); print(d['gpu_count'])")
+    DETECTED_TORCH_CUDA=$(echo "$DETECTED_HW" | $PYTHON -c "import json,sys; d=json.load(sys.stdin); print(d['torch_cuda'])")
+    DETECTED_CUDNN=$(echo "$DETECTED_HW" | $PYTHON -c "import json,sys; d=json.load(sys.stdin); print(d['cudnn'])")
+    DETECTED_GPU_NAME=$(echo "$DETECTED_HW" | $PYTHON -c "
+import json,sys
+d=json.load(sys.stdin)
+names = list({g['name'] for g in d['gpus']})
+print(', '.join(names) if names else 'N/A')
+")
+    if command -v nvidia-smi &>/dev/null; then
+        DETECTED_DRIVER_CUDA=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
+    else
+        DETECTED_DRIVER_CUDA="unknown"
+    fi
+
+    echo " --- Detected hardware vs targets ---"
+    echo "  GPU name:       detected='${DETECTED_GPU_NAME}'"
+    echo "                  target contains '${TARGET_GPU_NAME}'"
+    echo "  GPU count:      detected=${DETECTED_GPU_COUNT}  target=${TARGET_GPU_COUNT}"
+    echo "  torch CUDA:     detected=${DETECTED_TORCH_CUDA}  target=${TARGET_TORCH_CUDA_RUNTIME}"
+    echo "  driver CUDA:    detected=${DETECTED_DRIVER_CUDA}  target=${TARGET_DRIVER_CUDA}"
+    echo "  cuDNN:          detected=${DETECTED_CUDNN}"
+
+    # Per-GPU detail
+    echo "$DETECTED_HW" | $PYTHON -c "
+import json, sys
+d = json.load(sys.stdin)
+for g in d['gpus']:
+    print(f\"  GPU[{g['index']}]: {g['name']} | {g['vram_gb']}GB | cap {g['compute_capability']}\")
+"
+
+    # Compare and warn — do NOT hard-fail here, run_gpu_smoke_tests() does that
+    if [ "${TARGET_GPU_NAME}" != "" ] && ! echo "${DETECTED_GPU_NAME}" | grep -q "${TARGET_GPU_NAME}"; then
+        echo "WARNING: GPU name mismatch — detected '${DETECTED_GPU_NAME}', target '${TARGET_GPU_NAME}'."
+        echo "         You may be on the wrong cluster node. run_gpu_smoke_tests() will hard-fail."
+        HARDWARE_MATCH="false"
+    fi
+    if [ "${DETECTED_GPU_COUNT}" != "${TARGET_GPU_COUNT}" ]; then
+        echo "WARNING: GPU count mismatch — detected ${DETECTED_GPU_COUNT}, target ${TARGET_GPU_COUNT}."
+        echo "         Check CUDA_VISIBLE_DEVICES or cluster allocation."
+        HARDWARE_MATCH="false"
+    fi
+    if ! echo "${DETECTED_TORCH_CUDA}" | grep -q "^${TARGET_TORCH_CUDA_RUNTIME}"; then
+        echo "WARNING: torch CUDA runtime mismatch — detected ${DETECTED_TORCH_CUDA}, target ${TARGET_TORCH_CUDA_RUNTIME}."
+        echo "         Wrong torch wheel may be installed. Run: bash setup.sh to re-sync."
+        HARDWARE_MATCH="false"
+    fi
+
+    if [ "$HARDWARE_MATCH" = "true" ]; then
+        echo " Hardware detection complete — all values match targets."
+    else
+        echo "WARNING: Hardware mismatches detected above."
+        echo "         Continuing to run_gpu_smoke_tests() for hard validation."
     fi
 }
 
@@ -219,8 +309,6 @@ print('  All critical package versions verified — no drift detected')
 }
 
 write_repro_env() {
-    # Write .env with all reproducibility constants from the block above.
-    # RANDOM_SEED is now explicit here — not a magic number inside a heredoc.
     echo " Writing reproducibility .env..."
     cat > "$PROJECT_ROOT/.env" << ENVEOF
 # .env
@@ -251,8 +339,6 @@ for var, expected in checks.items():
 }
 
 write_repro_module() {
-    # Generate src/repro.py — the canonical parity module.
-    # RANDOM_SEED is injected from the constants block above, not hardcoded.
     echo " Writing src/repro.py — notebook/CLI parity module..."
     mkdir -p "$PROJECT_ROOT/src"
     cat > "$PROJECT_ROOT/src/repro.py" << PYEOF
@@ -270,14 +356,6 @@ write_repro_module() {
 # Usage in CLI scripts:
 #   from src.repro import configure
 #   configure()
-#
-# What it does:
-#   1. Loads .env (sets PYTHONHASHSEED, CUBLAS_WORKSPACE_CONFIG, TOKENIZERS_PARALLELISM, RANDOM_SEED)
-#   2. Seeds Python random, numpy, and torch with RANDOM_SEED
-#   3. Enables torch.use_deterministic_algorithms(True, warn_only=False)
-#   4. Sets cudnn.benchmark=False and cudnn.deterministic=True
-#   5. Verifies all settings took effect — raises AssertionError if not
-#   6. Returns a config dict for logging/manifest inclusion
 #
 # RANDOM_SEED is read from .env (set by setup.sh constants block).
 # To change seed for sensitivity experiments: update RANDOM_SEED in setup.sh,
@@ -441,45 +519,37 @@ verify_numerical_stability() {
 import os, torch
 
 cublas_cfg = os.environ.get('CUBLAS_WORKSPACE_CONFIG', '')
-assert cublas_cfg == '${REPRO_CUBLAS_CFG}', (
-    f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be ${REPRO_CUBLAS_CFG} for deterministic cuBLAS.'
-)
+assert cublas_cfg == '${REPRO_CUBLAS_CFG}', \
+    f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be ${REPRO_CUBLAS_CFG}'
 print(f'  CUBLAS_WORKSPACE_CONFIG={cublas_cfg} — ok')
 
 torch.use_deterministic_algorithms(True, warn_only=False)
-assert torch.are_deterministic_algorithms_enabled(), \
-    'torch.use_deterministic_algorithms(True) did not take effect'
+assert torch.are_deterministic_algorithms_enabled()
 print(f'  torch.use_deterministic_algorithms: enabled (warn_only=False)')
 
 torch.backends.cudnn.benchmark = False
-assert not torch.backends.cudnn.benchmark, \
-    'cudnn.benchmark=True — non-deterministic algorithm selection is active'
-print(f'  cudnn.benchmark: False — deterministic algorithm selection')
+assert not torch.backends.cudnn.benchmark
+print(f'  cudnn.benchmark: False')
 
 torch.backends.cudnn.deterministic = True
-assert torch.backends.cudnn.deterministic, \
-    'cudnn.deterministic=False — cuDNN may produce non-deterministic results'
-print(f'  cudnn.deterministic: True — bit-exact cuDNN ops enabled')
+assert torch.backends.cudnn.deterministic
+print(f'  cudnn.deterministic: True')
 
 hashseed = os.environ.get('PYTHONHASHSEED', 'not set')
-assert hashseed == '${REPRO_PYTHONHASHSEED}', \
-    f'PYTHONHASHSEED={hashseed!r} — must be ${REPRO_PYTHONHASHSEED}'
-print(f'  PYTHONHASHSEED={hashseed} — deterministic hash randomization')
+assert hashseed == '${REPRO_PYTHONHASHSEED}', f'PYTHONHASHSEED={hashseed!r}'
+print(f'  PYTHONHASHSEED={hashseed}')
 
 tok_par = os.environ.get('TOKENIZERS_PARALLELISM', 'not set')
-assert tok_par == '${REPRO_TOKENIZERS_PAR}', \
-    f'TOKENIZERS_PARALLELISM={tok_par!r} — must be ${REPRO_TOKENIZERS_PAR}'
-print(f'  TOKENIZERS_PARALLELISM={tok_par} — tokenizer fork safety enabled')
+assert tok_par == '${REPRO_TOKENIZERS_PAR}', f'TOKENIZERS_PARALLELISM={tok_par!r}'
+print(f'  TOKENIZERS_PARALLELISM={tok_par}')
 
 random_seed = os.environ.get('RANDOM_SEED', 'not set')
-assert random_seed == '${RANDOM_SEED}', \
-    f'RANDOM_SEED={random_seed!r} — must be ${RANDOM_SEED}'
-print(f'  RANDOM_SEED={random_seed} — all seedable libraries will use this value')
+assert random_seed == '${RANDOM_SEED}', f'RANDOM_SEED={random_seed!r}'
+print(f'  RANDOM_SEED={random_seed}')
 
 print()
 print('  Numerical stability configuration verified.')
 print('  NOTE: Notebooks must call: from src.repro import configure; configure()')
-print('        This is the ONLY correct way to ensure notebook/CLI parity.')
 "
 }
 
@@ -577,7 +647,14 @@ run_gpu_smoke_tests() {
         echo " SKIP_GPU=1 — skipping GPU smoke tests (CPU-only mode)"
         return
     fi
-    echo " Running GPU smoke tests (target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME}, cu117 wheel, driver CUDA ${TARGET_DRIVER_CUDA})..."
+
+    # Use DETECTED_* vars populated by detect_hardware() — avoids re-querying torch.
+    # If hardware mismatches were already flagged as warnings, this is the hard gate.
+    echo " Running GPU smoke tests — enforcing TARGET_* constraints..."
+    if [ "$HARDWARE_MATCH" = "false" ]; then
+        echo "WARNING: Hardware mismatches were detected above — hard-failing now."
+    fi
+
     $PYTHON -c "
 import torch
 
@@ -586,11 +663,12 @@ TARGET_GPU_COUNT   = ${TARGET_GPU_COUNT}
 TARGET_CAP         = (${TARGET_COMPUTE_CAP_MAJOR}, ${TARGET_COMPUTE_CAP_MINOR})
 TARGET_VRAM_GB_MIN = ${TARGET_VRAM_GB_MIN}
 TARGET_TORCH_CUDA  = '${TARGET_TORCH_CUDA_RUNTIME}'
+TARGET_DRIVER_CUDA = '${TARGET_DRIVER_CUDA}'
 
 assert torch.cuda.is_available(), 'CUDA not available — wrong torch wheel'
 assert torch.version.cuda.startswith(TARGET_TORCH_CUDA), (
     f'Expected torch CUDA runtime {TARGET_TORCH_CUDA} (cu117 wheel) got {torch.version.cuda}. '
-    f'NOTE: driver CUDA (${TARGET_DRIVER_CUDA}) != torch runtime CUDA ({TARGET_TORCH_CUDA}) — expected.'
+    f'NOTE: driver CUDA ({TARGET_DRIVER_CUDA}) != torch runtime CUDA ({TARGET_TORCH_CUDA}) — expected.'
 )
 n = torch.cuda.device_count()
 assert n >= TARGET_GPU_COUNT, f'Expected {TARGET_GPU_COUNT}x NVIDIA {TARGET_GPU_NAME} GPUs, got {n}'
@@ -671,6 +749,7 @@ def get_installed_versions(pkgs):
             versions[pkg] = 'not installed'
     return versions
 
+# Actual GPU properties — reuse what detect_hardware() already queried
 gpus = []
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
@@ -686,13 +765,13 @@ nlp = spacy.load('${SPACY_MODEL}')
 manifest = {
     'timestamp': datetime.utcnow().isoformat() + 'Z',
     # --- Repo provenance ---
-    'git_sha': '${GIT_SHA}',
-    'git_branch': '${GIT_BRANCH}',
-    'git_dirty_files': int('${GIT_DIRTY}'),
-    'uv_lock_sha256': '${UVLOCK_SHA256}',
+    'git_sha':          '${GIT_SHA}',
+    'git_branch':       '${GIT_BRANCH}',
+    'git_dirty_files':  int('${GIT_DIRTY}'),
+    'uv_lock_sha256':   '${UVLOCK_SHA256}',
     # --- Python ---
-    'python': sys.version,
-    'platform': platform.platform(),
+    'python':           sys.version,
+    'platform':         platform.platform(),
     # --- Reproducibility env vars ---
     'repro_env': {
         'PYTHONHASHSEED':          os.environ.get('PYTHONHASHSEED'),
@@ -719,6 +798,15 @@ manifest = {
         'driver_cuda':        '${TARGET_DRIVER_CUDA}',
         'python_version':     '${TARGET_PYTHON_VERSION}',
     },
+    # --- Detected hardware (actual, from detect_hardware()) ---
+    'hardware_detected': {
+        'gpu_name':           '${DETECTED_GPU_NAME}',
+        'gpu_count':          '${DETECTED_GPU_COUNT}',
+        'torch_cuda_runtime': '${DETECTED_TORCH_CUDA}',
+        'driver_cuda':        '${DETECTED_DRIVER_CUDA}',
+        'cudnn':              '${DETECTED_CUDNN}',
+        'hardware_match':     '${HARDWARE_MATCH}',
+    },
     # --- Torch & CUDA (actual) ---
     'torch':              torch.__version__,
     'torch_cuda_runtime': torch.version.cuda,
@@ -730,12 +818,12 @@ manifest = {
     'gpu_count':          torch.cuda.device_count() if torch.cuda.is_available() else 0,
     'gpus':               gpus,
     # --- NLP / RAG libraries ---
-    'transformers':          transformers.__version__,
-    'spacy':                 spacy.__version__,
-    'spacy_model':           '${SPACY_MODEL}',
-    'spacy_model_version':   nlp.meta.get('version'),
-    'spacy_model_sha256':    '${SPACY_MODEL_SHA256}',
-    'faiss':                 get_faiss_version(),
+    'transformers':        transformers.__version__,
+    'spacy':               spacy.__version__,
+    'spacy_model':         '${SPACY_MODEL}',
+    'spacy_model_version': nlp.meta.get('version'),
+    'spacy_model_sha256':  '${SPACY_MODEL_SHA256}',
+    'faiss':               get_faiss_version(),
     # --- Full installed package snapshot for drift auditing ---
     'installed_packages': get_installed_versions([
         'torch', 'transformers', 'datasets', 'faiss-cpu', 'spacy',
@@ -749,8 +837,7 @@ print('  manifest written to logs/environment_manifest.json')
 print(f'  git sha: ${GIT_SHA} | branch: ${GIT_BRANCH} | dirty files: ${GIT_DIRTY}')
 print(f'  uv.lock sha256: ${UVLOCK_SHA256}')
 print(f'  repro: PYTHONHASHSEED=${REPRO_PYTHONHASHSEED} CUBLAS=${REPRO_CUBLAS_CFG} RANDOM_SEED=${RANDOM_SEED}')
-print(f'  stability: deterministic_algorithms=True cudnn.benchmark=False cudnn.deterministic=True')
-print(f'  parity module: src/repro.py — from src.repro import configure; configure()')
+print(f'  hardware_match: ${HARDWARE_MATCH} | detected: ${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}')
 "
 }
 
@@ -801,18 +888,19 @@ echo " Parity:       src/repro.py — from src.repro import configure; configure
 echo "============================================================"
 check_uv
 check_lockfile
-log_gpu
+log_gpu           # pre-venv: driver-level only, no torch
 ensure_venv
 verify_python
 sync_dependencies
 check_dependency_drift
+detect_hardware   # post-venv: torch-level, populates DETECTED_* vars, warns on mismatch
 write_repro_env
 write_repro_module
 verify_numerical_stability
 download_nlp_models
 run_env_smoke_tests
-run_gpu_smoke_tests
-write_manifest
+run_gpu_smoke_tests   # hard gate: enforces TARGET_* using DETECTED_* context
+write_manifest        # records both hardware_target and hardware_detected sections
 register_kernel
 verify_tests
 echo "============================================================"
