@@ -4,10 +4,12 @@
 # Responsibility: notebook integration — repro env, repro module, stability, kernel.
 # Sourced by setup.sh — defines functions only, no top-level execution.
 #
-# Mutating steps and their DRY_RUN behaviour:
-#   write_repro_env    — would write .env
-#   write_repro_module — would write src/repro.py
-#   register_kernel    — would install Jupyter kernelspec
+# Mutating steps and their mode behaviour:
+#   write_repro_env:    DRY_RUN=1 — preview only
+#   write_repro_module: DRY_RUN=1 — preview only
+#   register_kernel:    DRY_RUN=1 — preview only
+#                       NO_JUPYTER=1 — skip entirely (headless/CI environments
+#                                      where Jupyter is not installed or not needed)
 
 write_repro_env() {
     _require_project_root
@@ -228,7 +230,7 @@ print('  \033[0;32m✓\033[0m src/repro.configure() verified')
 
 verify_numerical_stability() {
     _require_python; _require_repro_env
-    # Read-only verification step — no DRY_RUN guard needed
+    # Read-only verification — no DRY_RUN or NO_JUPYTER guard needed
     echo " Verifying numerical/runtime stability..."
     $PYTHON -c "
 import os, torch, sys
@@ -261,6 +263,15 @@ print('  \033[2mNOTE: Notebooks must call: from src.repro import configure; conf
 
 register_kernel() {
     _require_python
+
+    # NO_JUPYTER=1 — skip Jupyter kernel registration entirely.
+    # Use when: headless CI, cluster node without Jupyter, or when kernel
+    # registration was already done in a prior run and is not needed again.
+    if [ "${NO_JUPYTER:-0}" = "1" ]; then
+        _msg_skip "NO_JUPYTER=1 — skipping Jupyter kernel registration"
+        _msg_info "To register later: STEP=register_kernel bash setup.sh"
+        step_end "register_kernel" "SKIP"; return
+    fi
 
     if _is_dry_run; then
         _msg_dry_run "install Jupyter kernelspec" \

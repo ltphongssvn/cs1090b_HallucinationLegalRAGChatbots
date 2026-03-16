@@ -4,17 +4,32 @@
 # Responsibility: NLP asset management — pinned spaCy model download, checksum, install.
 # Sourced by setup.sh — defines functions only, no top-level execution.
 #
-# Mutating steps and their DRY_RUN behaviour:
-#   download_nlp_models — would download wheel to .cache/spacy/ and pip install it
+# Mutating steps and their mode behaviour:
+#   download_nlp_models:
+#     DRY_RUN=1      — preview what would be downloaded/installed, no changes
+#     NO_DOWNLOAD=1  — skip download entirely (use when running on air-gapped node
+#                      or when model is already installed from a prior run)
+#     OFFLINE=1      — require cached wheel; hard-fail if not present
 
 download_nlp_models() {
     _require_python
     local SPACY_CACHE_DIR="${PROJECT_ROOT}/.cache/spacy"
     local SPACY_WHEEL="${SPACY_CACHE_DIR}/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
     echo " Installing spaCy ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned)..."
+
+    # NO_DOWNLOAD=1 — skip the entire step without checking current state.
+    # Use when: model already installed from prior run, air-gapped node,
+    # or CI environment where download is handled separately.
+    if [ "${NO_DOWNLOAD:-0}" = "1" ]; then
+        _msg_skip "NO_DOWNLOAD=1 — skipping spaCy model download/install"
+        _msg_info "Assuming ${SPACY_MODEL} ${SPACY_MODEL_VERSION} is already installed."
+        _msg_info "If not installed, run: STEP=download_nlp_models bash setup.sh"
+        step_end "download_nlp_models" "SKIP"; return
+    fi
+
     mkdir -p "$SPACY_CACHE_DIR"
 
-    # Idempotent check — skip entirely if already correct version
+    # Idempotent check — skip if already correct version
     if $PYTHON -c "
 import spacy,sys
 try:
@@ -26,7 +41,7 @@ except OSError: sys.exit(1)
         return
     fi
 
-    # Determine what would happen in dry-run mode
+    # DRY_RUN preview
     if _is_dry_run; then
         if [ -f "$SPACY_WHEEL" ]; then
             _msg_dry_run "install spaCy model from cached wheel" "$SPACY_WHEEL"
