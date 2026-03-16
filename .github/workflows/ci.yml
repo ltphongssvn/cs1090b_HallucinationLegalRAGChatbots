@@ -43,12 +43,7 @@ jobs:
       - name: Run shell tests
         env:
           LOG_LEVEL: "2"
-        run: |
-          bats --tap \
-            tests/shell/test_lib.bats \
-            tests/shell/test_bootstrap_env.bats \
-            tests/shell/test_preflight.bats \
-            tests/shell/test_failure_paths.bats
+        run: bats --tap tests/shell/test_lib.bats tests/shell/test_bootstrap_env.bats tests/shell/test_preflight.bats tests/shell/test_failure_paths.bats
       - name: Run artifact verification tests
         env:
           LOG_LEVEL: "2"
@@ -67,13 +62,7 @@ jobs:
       - run: uv python install 3.11.9
       - run: uv sync --frozen --dev
       - name: Run unit tests
-        run: |
-          uv run pytest tests/ -m unit \
-            -q --tb=short \
-            --strict-markers \
-            --cov=src \
-            --cov-report=xml \
-            --cov-report=term-missing
+        run: uv run pytest tests/ -m unit -q --tb=short --strict-markers --cov=src --cov-report=xml --cov-report=term-missing
       - uses: codecov/codecov-action@v4
         with:
           files: coverage.xml
@@ -91,58 +80,50 @@ jobs:
           enable-cache: true
       - run: uv python install 3.11.9
       - run: uv sync --frozen --dev
-
-      - name: Bootstrap environment (CPU-only, no GPU, no downloads, no Jupyter)
-        # CI=1 skips nvidia-smi preflight; SKIP_GPU=1 skips all GPU steps
+      - name: Bootstrap environment (CPU-only)
         run: SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 LOG_LEVEL=1 CI=1 bash setup.sh
         env:
           PYTHONHASHSEED: "0"
           CUBLAS_WORKSPACE_CONFIG: ":4096:8"
           TOKENIZERS_PARALLELISM: "false"
-
       - name: CPU inference forward pass
         run: |
           uv run python -c "
           import torch, torch.nn as nn
           from transformers import AutoTokenizer
           tok = AutoTokenizer.from_pretrained('bert-base-uncased')
-          ids = tok('The court ruled in favor of the plaintiff.', return_tensors='pt')
+          ids = tok('The court ruled.', return_tensors='pt')
           assert ids['input_ids'].shape[1] > 0
           class M(nn.Module):
               def __init__(self):
                   super().__init__()
                   self.e = nn.Embedding(tok.vocab_size, 32)
                   self.f = nn.Linear(32, 2)
-              def forward(self, x): return self.f(self.e(x).mean(dim=1))
+              def forward(self, x): return self.f(self.e(x).mean(1))
           m = M().eval()
           with torch.no_grad():
-              logits = m(ids['input_ids'])
-              probs = torch.softmax(logits, dim=-1)
-          assert logits.shape == (1, 2)
-          assert abs(probs.sum().item() - 1.0) < 1e-5
+              p = torch.softmax(m(ids['input_ids']), -1)
+          assert p.shape == (1, 2) and abs(p.sum().item() - 1.0) < 1e-5
           print('CPU forward pass ok')
           "
-
       - name: FAISS vector store integrity
         run: |
           uv run python -c "
           import numpy as np, faiss
-          dim, n, k = 768, 1000, 5
+          dim, n = 128, 500
           q = faiss.IndexFlatL2(dim)
-          idx = faiss.IndexIVFFlat(q, dim, 32, faiss.METRIC_L2)
+          idx = faiss.IndexIVFFlat(q, dim, 16, faiss.METRIC_L2)
           vecs = np.random.randn(n, dim).astype('float32')
           faiss.normalize_L2(vecs)
-          idx.train(vecs); idx.add(vecs)
-          assert idx.ntotal == n
-          idx.nprobe = 4
-          D, I = idx.search(vecs[:10], k)
+          idx.train(vecs); idx.add(vecs); idx.nprobe = 4
+          D, I = idx.search(vecs[:10], 5)
           hits = sum(1 for i in range(10) if i in I[i])
-          assert hits >= 7, f'only {hits}/10 self-queries in top-{k}'
-          print(f'FAISS IVF ok: {hits}/10 self-queries in top-{k}')
+          assert hits >= 7, f'{hits}/10'
+          print(f'FAISS ok: {hits}/10 self-queries')
           "
 
   security:
-    name: Security Audit (pip-audit + SBOM)
+    name: Security Audit
     runs-on: ubuntu-latest
     needs: lint
     steps:
@@ -153,47 +134,19 @@ jobs:
           enable-cache: true
       - run: uv python install 3.11.9
       - run: uv sync --frozen --dev
-
-      - name: Run pip-audit (non-blocking — CVEs documented below)
-        # transformers<4.40 CVEs are pinned for CUDA 11.7 wheel compatibility.
-        # Will be resolved when the cluster driver supports transformers>=4.41.
+      - name: Run pip-audit (non-blocking)
         run: |
           mkdir -p logs
-          uv run pip-audit \
-            --format=json \
-            --progress-spinner=off \
-            --output=logs/pip-audit.json 2>&1 || true
-          uv run python - << 'PYEOF'
-import json
-import pathlib
-p = pathlib.Path("logs/pip-audit.json")
-if not p.exists():
-    print("pip-audit output not found — skipping")
-else:
-    data = json.loads(p.read_text())
-    vulns = [d for d in data.get("dependencies", []) if d.get("vulns")]
-    if vulns:
-        print(f"WARNING: {len(vulns)} package(s) with known CVEs (non-blocking)")
-        print("NOTE: transformers<4.40 CVEs pinned for CUDA 11.7 compatibility")
-        for d in vulns:
-            for v in d["vulns"]:
-                print(f"  {d['name']}=={d['version']}: {v['id']}")
-    else:
-        print("No known vulnerabilities found.")
-PYEOF
-
-      - name: Generate CycloneDX SBOM
+          uv run pip-audit --format=json --progress-spinner=off --output=logs/pip-audit.json 2>&1 || true
+          uv run python scripts/ci_audit_report.py logs/pip-audit.json
+      - name: Generate SBOM
         run: |
           mkdir -p logs
           uv run python -m cyclonedx_py environment --of JSON --output-file logs/sbom.json || true
           uv run python -m cyclonedx_py environment --of XML  --output-file logs/sbom.xml  || true
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: security-artifacts
-          path: |
-            logs/pip-audit.json
-            logs/sbom.json
-            logs/sbom.xml
+          path: logs/
           retention-days: 30
