@@ -1,7 +1,5 @@
 # pyproject.toml
 # Path: cs1090b_HallucinationLegalRAGChatbots/pyproject.toml
-# Project: HallucinationLegalRAGChatbots (OOD GPU Environment)
-# Environment: Open OnDemand GPU Cluster — JupyterLab
 [project]
 name = "hallucination-legal-rag-chatbots-gpu"
 version = "0.1.0"
@@ -18,7 +16,6 @@ dependencies = [
   "torch>=2.0",
   "transformers>=4.35,<4.41",
   "sentence-transformers>=2.2",
-  # Multi-GPU distributed training across 4x L4 GPUs
   "accelerate>=0.20",
   # --- NLP ---
   "gensim>=4.3",
@@ -29,15 +26,10 @@ dependencies = [
   # --- Knowledge Graph ---
   "networkx>=3.4.0",
   # --- Evaluation & Metrics ---
-  # Recall@k, Precision@k, NDCG@10, MRR for retrieval benchmarking
   "evaluate>=0.4",
-  # NLI-based faithfulness + claim-level hallucination rate (RAGAS framework)
   "ragas>=0.1",
-  # Generation-level ROUGE for response quality
   "rouge-score>=0.1",
   # --- Experiment Tracking ---
-  # W&B: log retrieval metrics, hallucination rates, training curves per architecture
-  # Enables comparison of TF-IDF vs CNN vs LSTM vs BERT vs KG retrievers
   "wandb>=0.16",
   # --- Viz & Analysis ---
   "scikit-learn>=1.5.0",
@@ -57,6 +49,11 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "types-requests>=2.32.4.20260107",
+    # Vulnerability scanning — audit all installed packages against OSV database
+    # Run via: uv run pip-audit   or: STEP=check_dependency_drift bash setup.sh
+    "pip-audit>=2.7",
+    # SBOM generation in CycloneDX format — required for legal AI compliance
+    "cyclonedx-bom>=4.4",
 ]
 [tool.pytest.ini_options]
 filterwarnings = [

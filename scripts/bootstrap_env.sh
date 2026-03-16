@@ -2,7 +2,7 @@
 # scripts/bootstrap_env.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/bootstrap_env.sh
 # Responsibility: base environment bootstrap — uv, lockfile, venv, deps, drift.
-# Python drift check logic lives in src/drift_check.py (lintable, type-checkable, testable).
+# Python drift check logic lives in src/drift_check.py.
 # Sourced by setup.sh — defines functions only, no top-level execution.
 #
 # Mutating steps and their DRY_RUN behaviour:
@@ -81,14 +81,14 @@ ensure_venv() {
     local PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"
 
     if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (${PYVER_TUPLE}) else 1)" 2>/dev/null; then
-        _msg_ok ".venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping creation"
+        _msg_ok ".venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping"
         return
     fi
 
     if [ -d "${PROJECT_ROOT}/.venv" ]; then
         local venv_size; venv_size=$(du -sh "${PROJECT_ROOT}/.venv" 2>/dev/null | cut -f1)
         if _is_dry_run; then
-            _msg_dry_run "delete stale .venv (wrong Python version)" "${PROJECT_ROOT}/.venv (${venv_size})"
+            _msg_dry_run "delete stale .venv" "${PROJECT_ROOT}/.venv (${venv_size})"
             _msg_dry_run "create .venv" "uv venv .venv --python ${TARGET_PYTHON_VERSION} --seed"
             step_end "ensure_venv" "DRY"; return
         fi
@@ -125,9 +125,59 @@ sync_dependencies() {
     fi
 
     _msg_info "Syncing from uv.lock (--frozen) — may take minutes on first run..."
-    _msg_info "--dev explicit: ensures pytest/mypy/hypothesis always installed"
+    _msg_info "uv caches wheels in ~/.cache/uv — subsequent runs are fast"
+    _msg_info "--dev explicit: ensures pytest/mypy/pip-audit/cyclonedx-bom always installed"
     "$UV" sync --frozen --dev
     _msg_ok "Dependencies synced from uv.lock"
+}
+
+_run_vulnerability_audit() {
+    # Vulnerability audit via pip-audit — scans all installed packages against
+    # the OSV (Open Source Vulnerabilities) database.
+    # For legal AI: ensures no known CVEs in the dependency chain that could
+    # compromise data integrity, model outputs, or compliance posture.
+    _require_python
+    _msg_info "Running vulnerability audit (pip-audit against OSV database)..."
+
+    if ! $PYTHON -m pip_audit --version &>/dev/null 2>&1; then
+        _msg_warn "pip-audit not found" \
+            "pip-audit is not installed in the venv" \
+            "action-required" \
+            "STEP=sync_dependencies bash setup.sh  (pip-audit is a dev dependency)"
+        return 0
+    fi
+
+    local audit_output audit_exit
+    audit_output=$($PYTHON -m pip_audit \
+        --requirement <("$UV" pip list --format=freeze 2>/dev/null) \
+        --format=json \
+        --progress-spinner=off \
+        2>&1) && audit_exit=0 || audit_exit=$?
+
+    if [ "$audit_exit" -ne 0 ]; then
+        # Parse JSON to count and display vulnerabilities clearly
+        local vuln_count
+        vuln_count=$(echo "$audit_output" | $PYTHON -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    vulns = [d for d in data.get('dependencies', []) if d.get('vulns')]
+    print(len(vulns))
+    for dep in vulns:
+        for v in dep['vulns']:
+            print(f\"  {dep['name']}=={dep['version']}: {v['id']} — {v.get('description','')[:120]}\")
+except Exception:
+    print('parse-failed')
+" 2>/dev/null || echo "unknown")
+        _msg_warn "Vulnerability audit found issues" \
+            "${vuln_count} package(s) with known CVEs" \
+            "action-required" \
+            "Review above CVEs. Update affected packages in pyproject.toml, then: uv lock && bash setup.sh"
+        # Warn but do not hard-fail — allows setup to complete on air-gapped nodes
+        # where pip-audit cannot reach OSV. Treat as gate in CI via: make audit
+    else
+        _msg_ok "Vulnerability audit passed — no known CVEs in installed packages"
+    fi
 }
 
 check_dependency_drift() {
@@ -137,7 +187,7 @@ check_dependency_drift() {
     # --- Tier 1: Timestamp gate ---
     if [ "${PROJECT_ROOT}/pyproject.toml" -nt "${PROJECT_ROOT}/uv.lock" ]; then
         _msg_error "Stale uv.lock" "pyproject.toml is newer than uv.lock" \
-            "Collaborators will install different versions — reproducibility broken" \
+            "Collaborators will install different versions" \
             "uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
         exit 1
     fi
@@ -154,21 +204,21 @@ check_dependency_drift() {
     # --- Tier 3: venv vs lockfile sync check ---
     "$UV" sync --frozen --dev --check 2>/dev/null && _msg_ok "uv sync --check — matches uv.lock" || {
         _msg_error "Package drift" "Installed packages diverge from uv.lock" \
-            "Manual pip install after setup — results may not be reproducible" \
-            "bash setup.sh  (re-syncs .venv from uv.lock)"
+            "Manual pip install after setup — results not reproducible" \
+            "bash setup.sh"
         exit 1
     }
 
-    # --- Tiers 4+5: metadata version check + actual import + functional call ---
-    # Logic lives in src/drift_check.py — lintable, type-checkable, and unit-testable.
-    # Previously this was a large Python heredoc which could not be checked by tooling.
-    _msg_info "Running src/drift_check.py (Tier 4: metadata versions, Tier 5: import + functional call)..."
+    # --- Tiers 4+5: metadata + import/functional (src/drift_check.py) ---
+    _msg_info "Running src/drift_check.py (Tier 4: metadata, Tier 5: import + functional)..."
     $PYTHON "${PROJECT_ROOT}/src/drift_check.py" || {
-        _msg_error "Dependency drift check failed" \
-            "src/drift_check.py exited non-zero" \
+        _msg_error "Dependency drift check failed" "src/drift_check.py exited non-zero" \
             "One or more packages failed version or import/functional verification" \
-            "rm -rf .venv && bash setup.sh   (reinstalls from uv.lock)"
+            "rm -rf .venv && bash setup.sh"
         exit 1
     }
     _msg_ok "Dependency drift check complete — all tiers passed"
+
+    # --- Tier 6: Vulnerability audit ---
+    _run_vulnerability_audit
 }

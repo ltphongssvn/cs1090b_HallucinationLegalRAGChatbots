@@ -174,3 +174,29 @@ help:
 	@echo "    clean              — remove caches (preserves .venv)"
 	@echo "    clean-all          — remove caches + .venv"
 	@echo "    dvc-init           — initialize DVC for data dir"
+
+# --- Security ---
+audit:
+	@echo "Running vulnerability audit (pip-audit against OSV)..."
+	$(VENV_BIN)/python -m pip_audit --format=json --progress-spinner=off \
+		--requirement <($(VENV_BIN)/pip list --format=freeze) 2>&1 | \
+		$(VENV_BIN)/python -c "
+import json,sys
+data=json.load(sys.stdin)
+vulns=[d for d in data.get('dependencies',[]) if d.get('vulns')]
+if vulns:
+    print(f'VULNERABILITIES FOUND: {len(vulns)} package(s)')
+    for d in vulns:
+        for v in d['vulns']:
+            print(f'  {d[\"name\"]}=={d[\"version\"]}: {v[\"id\"]} — {v.get(\"description\",\"\")[:120]}')
+    sys.exit(1)
+else:
+    print('No known vulnerabilities found.')
+"
+
+sbom:
+	@echo "Generating CycloneDX SBOM..."
+	mkdir -p logs
+	$(VENV_BIN)/python -m cyclonedx_py environment --of JSON --output-file logs/sbom.json
+	$(VENV_BIN)/python -m cyclonedx_py environment --of XML  --output-file logs/sbom.xml
+	@echo "SBOM written: logs/sbom.json + logs/sbom.xml"
