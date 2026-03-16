@@ -38,11 +38,25 @@ check_lockfile() {
 
 log_gpu() {
     if command -v nvidia-smi &>/dev/null; then
-        echo " GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-        echo " CUDA driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+        echo " GPU:          $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+        echo " VRAM:         $(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)"
+        echo " Driver:       $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+        echo " CUDA runtime: $(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')"
     else
         echo "WARNING: nvidia-smi not found — GPU training unavailable"
     fi
+    if command -v nvcc &>/dev/null; then
+        echo " CUDA toolkit: $(nvcc --version | grep release | awk '{print $6}' | tr -d ',')"
+    else
+        echo "WARNING: nvcc not on PATH — CUDA toolkit version unverified"
+    fi
+    $PYTHON -c "
+import torch
+if torch.cuda.is_available():
+    print(f'  torch CUDA:  {torch.version.cuda}')
+    print(f'  cuDNN:       {torch.backends.cudnn.version()}')
+    print(f'  Compute cap: {torch.cuda.get_device_capability()}')
+" 2>/dev/null || true
 }
 
 ensure_venv() {
@@ -104,16 +118,30 @@ write_manifest() {
     echo " Writing environment manifest..."
     mkdir -p "$PROJECT_ROOT/logs"
     $PYTHON -c "
-import json, torch, transformers, spacy, sys, platform
+import json, torch, transformers, spacy, sys, platform, subprocess
 from datetime import datetime
+
+def get_nvcc_version():
+    try:
+        result = subprocess.run(['nvcc', '--version'], capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            if 'release' in line:
+                return line.strip()
+    except FileNotFoundError:
+        return 'nvcc not found'
+    return 'unknown'
+
 manifest = {
     'timestamp': datetime.utcnow().isoformat() + 'Z',
     'python': sys.version,
     'torch': torch.__version__,
-    'cuda': torch.version.cuda,
+    'cuda_runtime': torch.version.cuda,
+    'cudnn': str(torch.backends.cudnn.version()) if torch.cuda.is_available() else None,
+    'cuda_toolkit_nvcc': get_nvcc_version(),
     'cuda_available': torch.cuda.is_available(),
     'compute_capability': torch.cuda.get_device_capability() if torch.cuda.is_available() else None,
     'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    'vram_gb': round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2) if torch.cuda.is_available() else None,
     'transformers': transformers.__version__,
     'spacy': spacy.__version__,
     'platform': platform.platform(),
