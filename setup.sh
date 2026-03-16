@@ -8,13 +8,10 @@
 # Dry run:      DRY_RUN=1 bash setup.sh
 # Offline:      OFFLINE=1 bash setup.sh  (requires cached wheel in .cache/spacy/)
 #
-# Hardware target: 4x NVIDIA L4 (23034MiB each, compute cap 8.9, CUDA driver 12.8)
-# Torch wheel:     2.0.1+cu117 (compiled against CUDA runtime 11.7 — compatible via driver forward-compat)
-#
 # Reproducibility env vars (set here, written to .env, recorded in manifest):
-#   PYTHONHASHSEED=0              — deterministic Python hash randomization
-#   CUBLAS_WORKSPACE_CONFIG=:4096:8 — deterministic cuBLAS ops (required for torch.use_deterministic_algorithms)
-#   TOKENIZERS_PARALLELISM=false  — prevent HuggingFace tokenizer fork warnings in notebooks
+#   PYTHONHASHSEED=0                — deterministic Python hash randomization
+#   CUBLAS_WORKSPACE_CONFIG=:4096:8 — deterministic cuBLAS ops
+#   TOKENIZERS_PARALLELISM=false    — prevent HuggingFace tokenizer fork warnings
 set -euo pipefail
 [ "${DEBUG:-0}" = "1" ] && set -x
 
@@ -26,6 +23,19 @@ export TOKENIZERS_PARALLELISM=false
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
+
+# ===========================================================================
+# Hardware target constants — update here only if cluster hardware changes.
+# All gpu checks, logs, and manifest entries reference these variables.
+# ===========================================================================
+TARGET_GPU_NAME="L4"                  # substring match against torch device name
+TARGET_GPU_COUNT=4                    # expected number of visible GPUs
+TARGET_COMPUTE_CAP_MAJOR=8            # minimum compute capability major
+TARGET_COMPUTE_CAP_MINOR=9            # minimum compute capability minor (L4 = 8.9)
+TARGET_VRAM_GB_MIN=22.0               # minimum VRAM per GPU in GB
+TARGET_TORCH_CUDA_RUNTIME="11.7"      # torch wheel compiled against (cu117)
+TARGET_DRIVER_CUDA="12.8"             # driver-reported CUDA (forward-compat)
+TARGET_PYTHON_VERSION="3.11.9"        # pinned Python version
 
 # Pinned spaCy model — update deliberately and commit when upgrading
 SPACY_MODEL="en_core_web_sm"
@@ -60,6 +70,7 @@ check_lockfile() {
 }
 
 log_gpu() {
+    echo " Hardware target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME} | CUDA runtime ${TARGET_TORCH_CUDA_RUNTIME} | driver CUDA ${TARGET_DRIVER_CUDA}"
     if command -v nvidia-smi &>/dev/null; then
         echo " --- nvidia-smi per-GPU summary ---"
         nvidia-smi --query-gpu=index,name,memory.total,driver_version \
@@ -68,7 +79,7 @@ log_gpu() {
         done
         DRIVER_CUDA=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
         echo " Driver CUDA (max supported): $DRIVER_CUDA"
-        echo " NOTE: torch wheel is compiled against CUDA runtime 11.7 (cu117)."
+        echo " NOTE: torch wheel compiled against CUDA runtime ${TARGET_TORCH_CUDA_RUNTIME} (cu117)."
         echo "       Driver CUDA $DRIVER_CUDA is forward-compatible — this is expected and correct."
     else
         echo "WARNING: nvidia-smi not found — GPU training unavailable"
@@ -95,13 +106,14 @@ if torch.cuda.is_available():
 }
 
 ensure_venv() {
-    if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (3,11,9) else 1)" 2>/dev/null; then
-        echo " .venv already exists with Python 3.11.9 — skipping creation"
+    PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"  # "3.11.9" → "3,11,9" for Python tuple check
+    if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (${PYVER_TUPLE}) else 1)" 2>/dev/null; then
+        echo " .venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping creation"
         return
     fi
 
     if [ -d "$PROJECT_ROOT/.venv" ]; then
-        echo "WARNING: .venv exists but is NOT Python 3.11.9 — it will be removed."
+        echo "WARNING: .venv exists but is NOT Python ${TARGET_PYTHON_VERSION} — it will be removed."
         echo "         Contents: $(du -sh "$PROJECT_ROOT/.venv" 2>/dev/null | cut -f1) on disk"
         if [ "${DRY_RUN:-0}" = "1" ]; then
             echo "DRY_RUN=1 — skipping .venv removal. Exiting."
@@ -113,12 +125,13 @@ ensure_venv() {
         rm -rf "$PROJECT_ROOT/.venv"
     fi
 
-    echo " Creating .venv with Python 3.11.9..."
-    $UV venv .venv --python 3.11.9 --seed
+    echo " Creating .venv with Python ${TARGET_PYTHON_VERSION}..."
+    $UV venv .venv --python "${TARGET_PYTHON_VERSION}" --seed
 }
 
 verify_python() {
-    $PYTHON -c "import sys; assert sys.version_info[:3] == (3,11,9), f'Expected 3.11.9 got {sys.version}'"
+    PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"
+    $PYTHON -c "import sys; assert sys.version_info[:3] == (${PYVER_TUPLE}), f'Expected ${TARGET_PYTHON_VERSION} got {sys.version}'"
     echo " Python: $($PYTHON --version)"
     echo " Executable: $($PYTHON -c 'import sys; print(sys.executable)')"
 }
@@ -133,9 +146,6 @@ sync_dependencies() {
 }
 
 write_repro_env() {
-    # Write .env so the notebook and any collaborator script can source
-    # identical reproducibility settings without re-running setup.sh.
-    # This file is committed — it is configuration, not secrets.
     echo " Writing reproducibility .env..."
     cat > "$PROJECT_ROOT/.env" << 'ENVEOF'
 # .env
@@ -149,7 +159,6 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export TOKENIZERS_PARALLELISM=false
 ENVEOF
 
-    # Verify the vars are actually visible to venv Python right now
     $PYTHON -c "
 import os
 checks = {
@@ -168,7 +177,6 @@ download_nlp_models() {
     echo " Installing spaCy ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned)..."
     mkdir -p "$SPACY_CACHE_DIR"
 
-    # Check if correct model version already installed — skip if so
     if $PYTHON -c "
 import spacy, sys
 try:
@@ -186,7 +194,6 @@ except OSError:
         return
     fi
 
-    # Obtain wheel: use cache if present, else download (unless OFFLINE=1)
     if [ ! -f "$SPACY_WHEEL" ]; then
         if [ "${OFFLINE:-0}" = "1" ]; then
             echo "ERROR: OFFLINE=1 but cached wheel not found at $SPACY_WHEEL"
@@ -199,7 +206,6 @@ except OSError:
         echo " Using cached wheel: $SPACY_WHEEL"
     fi
 
-    # Checksum verification — always, regardless of source
     ACTUAL_SHA=$(sha256sum "$SPACY_WHEEL" | cut -d' ' -f1)
     if [ "$ACTUAL_SHA" != "$SPACY_MODEL_SHA256" ]; then
         echo "ERROR: spaCy model wheel checksum mismatch!"
@@ -210,8 +216,6 @@ except OSError:
         exit 1
     fi
     echo " Checksum verified: $ACTUAL_SHA"
-
-    # Install from verified local wheel
     $PYTHON -m pip install --quiet "$SPACY_WHEEL"
     echo " ${SPACY_MODEL} ${SPACY_MODEL_VERSION} installed from pinned wheel"
 }
@@ -219,7 +223,6 @@ except OSError:
 run_env_smoke_tests() {
     echo " Running environment smoke tests..."
 
-    # torch: version check + functional tensor op on CPU
     $PYTHON -c "
 import torch
 ver = torch.__version__
@@ -228,8 +231,6 @@ t = torch.tensor([1.0, 2.0, 3.0])
 assert torch.allclose(t.mean(), torch.tensor(2.0)), 'torch tensor op failed'
 print(f'  torch {ver} — tensor op ok')
 "
-
-    # transformers: version check + tokenizer instantiation (no model download)
     $PYTHON -c "
 import transformers
 from transformers import AutoTokenizer
@@ -238,8 +239,6 @@ ids = tok('hello world', return_tensors='pt')
 assert ids['input_ids'].shape[1] > 0, 'tokenizer produced empty output'
 print(f'  transformers {transformers.__version__} — tokenizer ok')
 "
-
-    # faiss: import + functional flat index add/search
     $PYTHON -c "
 import faiss, numpy as np
 dim = 64
@@ -251,8 +250,6 @@ D, I = index.search(vecs[:1], 3)
 assert I.shape == (1, 3), 'faiss search returned wrong shape'
 print(f'  faiss ok — index add/search functional')
 "
-
-    # spacy: version check + model load + pipeline run
     $PYTHON -c "
 import spacy
 nlp = spacy.load('${SPACY_MODEL}')
@@ -270,34 +267,43 @@ run_gpu_smoke_tests() {
         echo " SKIP_GPU=1 — skipping GPU smoke tests (CPU-only mode)"
         return
     fi
-    echo " Running GPU smoke tests (target: 4x NVIDIA L4, cu117 wheel, driver CUDA 12.8)..."
+    echo " Running GPU smoke tests (target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME}, cu117 wheel, driver CUDA ${TARGET_DRIVER_CUDA})..."
     $PYTHON -c "
 import torch
+
+TARGET_GPU_NAME        = '${TARGET_GPU_NAME}'
+TARGET_GPU_COUNT       = ${TARGET_GPU_COUNT}
+TARGET_CAP             = (${TARGET_COMPUTE_CAP_MAJOR}, ${TARGET_COMPUTE_CAP_MINOR})
+TARGET_VRAM_GB_MIN     = ${TARGET_VRAM_GB_MIN}
+TARGET_TORCH_CUDA      = '${TARGET_TORCH_CUDA_RUNTIME}'
 
 # 1. CUDA must be available
 assert torch.cuda.is_available(), 'CUDA not available — wrong torch wheel'
 
-# 2. torch runtime must be cu117 — this is the pinned wheel for this project
-assert torch.version.cuda.startswith('11.7'), (
-    f'Expected torch CUDA runtime 11.7 (cu117 wheel) got {torch.version.cuda}. '
-    f'NOTE: driver CUDA (12.8) != torch runtime CUDA (11.7) — this is expected.'
+# 2. torch runtime must match pinned cu117 wheel
+assert torch.version.cuda.startswith(TARGET_TORCH_CUDA), (
+    f'Expected torch CUDA runtime {TARGET_TORCH_CUDA} (cu117 wheel) got {torch.version.cuda}. '
+    f'NOTE: driver CUDA (${TARGET_DRIVER_CUDA}) != torch runtime CUDA ({TARGET_TORCH_CUDA}) — expected.'
 )
 
-# 3. Must see all 4 L4 GPUs
+# 3. Must see all expected GPUs
 n = torch.cuda.device_count()
-assert n >= 4, f'Expected 4x NVIDIA L4 GPUs, got {n}'
+assert n >= TARGET_GPU_COUNT, f'Expected {TARGET_GPU_COUNT}x NVIDIA {TARGET_GPU_NAME} GPUs, got {n}'
 
-# 4. Every visible GPU must be NVIDIA L4 with compute cap 8.9 and >=22GB VRAM
+# 4. Every GPU must match name, compute cap, and VRAM targets
 for i in range(n):
-    name = torch.cuda.get_device_name(i)
-    cap = torch.cuda.get_device_capability(i)
+    name    = torch.cuda.get_device_name(i)
+    cap     = torch.cuda.get_device_capability(i)
     vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-    assert 'L4' in name, f'GPU {i}: expected NVIDIA L4, got {name}'
-    assert cap >= (8, 9), f'GPU {i}: expected compute cap (8,9) for L4, got {cap}'
-    assert vram_gb >= 22.0, f'GPU {i}: expected >=22GB VRAM, got {vram_gb:.1f}GB'
+    assert TARGET_GPU_NAME in name, \
+        f'GPU {i}: expected NVIDIA {TARGET_GPU_NAME}, got {name}'
+    assert cap >= TARGET_CAP, \
+        f'GPU {i}: expected compute cap >={TARGET_CAP} for {TARGET_GPU_NAME}, got {cap}'
+    assert vram_gb >= TARGET_VRAM_GB_MIN, \
+        f'GPU {i}: expected >={TARGET_VRAM_GB_MIN}GB VRAM, got {vram_gb:.1f}GB'
     print(f'  GPU [{i}] {name} | cap {cap} | {vram_gb:.1f} GB — ok')
 
-# 5. Functional: allocate a tensor on GPU 0 and verify round-trip
+# 5. Functional: tensor round-trip on GPU 0
 t = torch.tensor([1.0, 2.0, 3.0], device='cuda:0')
 assert t.device.type == 'cuda', 'tensor not on CUDA device'
 assert torch.allclose(t.mean().cpu(), torch.tensor(2.0)), 'GPU tensor op failed'
@@ -309,7 +315,6 @@ write_manifest() {
     echo " Writing environment manifest..."
     mkdir -p "$PROJECT_ROOT/logs"
 
-    # Capture git SHA and uv.lock hash at shell level — more reliable than from Python
     GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
     GIT_BRANCH=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     GIT_DIRTY=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | wc -l | xargs)
@@ -383,7 +388,17 @@ manifest = {
         'CUBLAS_WORKSPACE_CONFIG': os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
         'TOKENIZERS_PARALLELISM': os.environ.get('TOKENIZERS_PARALLELISM'),
     },
-    # --- Torch & CUDA ---
+    # --- Hardware targets (from setup.sh constants) ---
+    'hardware_target': {
+        'gpu_name': '${TARGET_GPU_NAME}',
+        'gpu_count': ${TARGET_GPU_COUNT},
+        'compute_cap_min': [${TARGET_COMPUTE_CAP_MAJOR}, ${TARGET_COMPUTE_CAP_MINOR}],
+        'vram_gb_min': ${TARGET_VRAM_GB_MIN},
+        'torch_cuda_runtime': '${TARGET_TORCH_CUDA_RUNTIME}',
+        'driver_cuda': '${TARGET_DRIVER_CUDA}',
+        'python_version': '${TARGET_PYTHON_VERSION}',
+    },
+    # --- Torch & CUDA (actual) ---
     'torch': torch.__version__,
     'torch_cuda_runtime': torch.version.cuda,
     'driver_cuda': get_driver_cuda(),
@@ -414,10 +429,8 @@ register_kernel() {
     echo " Registering Jupyter kernel..."
     $PYTHON -m ipykernel install --user \
         --name hallucination-legal-rag \
-        --display-name "HallucinationLegalRAG (3.11.9)"
+        --display-name "HallucinationLegalRAG (${TARGET_PYTHON_VERSION})"
 
-    # Verify using the venv's own jupyter, not whatever is on PATH —
-    # this ensures we're checking the same installation that will run the notebook
     $PYTHON -m jupyter kernelspec list --json 2>/dev/null | $PYTHON -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -432,11 +445,6 @@ print(f'  kernel path: {spec[\"resource_dir\"]}')
 
 verify_tests() {
     echo " Verifying test suite..."
-
-    # Count unit-marked tests — if any exist, run them as the real gate.
-    # Unit tests are pure-function / no-I/O by marker contract, so they are
-    # always safe and fast to run during setup verification.
-    # Collection-only (--co) is the fallback for a fresh repo with no tests yet.
     UNIT_COUNT=$($UV run pytest tests/ --co -q -m unit 2>/dev/null | grep -c "^tests/" || true)
 
     if [ "${UNIT_COUNT}" -gt 0 ]; then
@@ -454,8 +462,8 @@ verify_tests() {
 
 echo "============================================================"
 echo " cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap"
-echo " Target: 4x NVIDIA L4 | Python 3.11.9 | torch 2.0.1+cu117"
-echo " Driver CUDA: 12.8 (forward-compat) | torch runtime: 11.7"
+echo " Target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME} | Python ${TARGET_PYTHON_VERSION} | torch 2.0.1+cu117"
+echo " Driver CUDA: ${TARGET_DRIVER_CUDA} (forward-compat) | torch runtime: ${TARGET_TORCH_CUDA_RUNTIME}"
 echo " spaCy model: ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned + checksummed)"
 echo " Offline mode: OFFLINE=1 bash setup.sh (requires .cache/spacy/ wheel)"
 echo " Repro vars:   PYTHONHASHSEED=0 | CUBLAS_WORKSPACE_CONFIG=:4096:8 | TOKENIZERS_PARALLELISM=false"
@@ -467,8 +475,6 @@ ensure_venv
 verify_python
 sync_dependencies
 write_repro_env
-# Note: download_nlp_models must run before run_env_smoke_tests
-# because spacy smoke test requires en_core_web_sm to be installed
 download_nlp_models
 run_env_smoke_tests
 run_gpu_smoke_tests
@@ -478,7 +484,7 @@ verify_tests
 echo "============================================================"
 echo " Environment ready."
 echo " Activate:  source .venv/bin/activate"
-echo " Kernel:    HallucinationLegalRAG (3.11.9)"
+echo " Kernel:    HallucinationLegalRAG (${TARGET_PYTHON_VERSION})"
 echo " Manifest:  logs/environment_manifest.json"
 echo " Repro env: source .env  (or dotenv.load_dotenv() in notebook)"
 echo " CPU mode:  SKIP_GPU=1 bash setup.sh"
