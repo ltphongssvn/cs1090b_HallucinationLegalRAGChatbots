@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # scripts/validate_tests.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/validate_tests.sh
-# Responsibility: test discovery, unit test gate, environment smoke tests,
+# Responsibility: test discovery, tiered test execution, environment smoke tests,
 #                 and shell script tests via bats-core.
+#
+# verify_tests() runs three tiers:
+#   Tier 1 — Shell tests (bats-core): validates setup.sh helper functions
+#   Tier 2 — Python unit tests (marker=unit): fast, no I/O, always run
+#   Tier 3 — CPU inference smoke test: one real forward pass on CPU to confirm
+#             the ML stack is wired correctly (not just importable)
+#   Tier 4 — GPU smoke subset (marker=gpu): runs only when SKIP_GPU != 1
+#
+# Collection-only (--co) is intentionally REMOVED as a gate — it only proves
+# test discovery, not execution. It is retained as a diagnostic fallback only.
 # Sourced by setup.sh — defines functions only, no top-level execution.
 
 run_env_smoke_tests() {
@@ -55,14 +65,9 @@ print(f'  \033[0;32m✓\033[0m spacy {spacy.__version__} | model {v} | entities:
 }
 
 run_shell_tests() {
-    # Run bats-core tests for shell scripts.
-    # bats-core must be installed — install via: npm install -g bats
-    # or: brew install bats-core
-    # or: git clone bats-core into tests/shell/bats-core and use local install.
     echo " Running shell script tests (bats-core)..."
 
     local bats_bin=""
-    # Prefer project-local bats install, then PATH
     if [ -x "${PROJECT_ROOT}/tests/shell/bats-core/bin/bats" ]; then
         bats_bin="${PROJECT_ROOT}/tests/shell/bats-core/bin/bats"
     elif command -v bats &>/dev/null; then
@@ -79,15 +84,14 @@ run_shell_tests() {
     fi
 
     _msg_info "bats: $("$bats_bin" --version)"
-    _msg_info "Running: tests/shell/test_lib.bats tests/shell/test_bootstrap_env.bats tests/shell/test_preflight.bats"
 
     local shell_test_files=(
         "${PROJECT_ROOT}/tests/shell/test_lib.bats"
         "${PROJECT_ROOT}/tests/shell/test_bootstrap_env.bats"
         "${PROJECT_ROOT}/tests/shell/test_preflight.bats"
+        "${PROJECT_ROOT}/tests/shell/test_failure_paths.bats"
     )
 
-    # Verify test files exist before running
     local missing=()
     for f in "${shell_test_files[@]}"; do
         [ ! -f "$f" ] && missing+=("$f")
@@ -105,36 +109,180 @@ run_shell_tests() {
     else
         _msg_error "Shell tests failed" \
             "One or more bats tests in tests/shell/ failed" \
-            "A broken shell helper (guard, messaging, dry-run) will cause silent failures in setup.sh" \
+            "A broken shell helper causes silent failures in setup.sh" \
             "Run manually: bats tests/shell/   or: STEP=run_shell_tests bash setup.sh"
         exit 1
     fi
 }
 
+_run_cpu_inference_smoke_test() {
+    # Tier 3: one real CPU forward pass to confirm the ML stack is wired correctly.
+    # Purpose: import success ≠ runtime success. A broken C extension, missing
+    # shared library, or ABI mismatch will pass import but fail here.
+    # Uses bert-base-uncased tokenizer + a tiny 2-layer MLP (no model download
+    # required) to exercise: tokenizer → tensor → linear → softmax → output.
+    _msg_info "Running CPU inference smoke test (real forward pass — not just import)..."
+    $PYTHON -c "
+import sys, torch, torch.nn as nn
+from transformers import AutoTokenizer
+
+# --- Tokenizer: exercises HuggingFace C++ tokenizer bindings ---
+try:
+    tok = AutoTokenizer.from_pretrained('bert-base-uncased', local_files_only=False)
+    ids = tok('The court ruled in favor of the plaintiff.', return_tensors='pt')
+    assert ids['input_ids'].shape[1] > 0, 'tokenizer produced empty output'
+    seq_len = ids['input_ids'].shape[1]
+    print(f'  \033[0;32m✓\033[0m tokenizer: seq_len={seq_len} tokens')
+except Exception as e:
+    print(f'\033[0;31m  ✗ tokenizer forward pass failed: {e}\033[0m')
+    print('    Why: HuggingFace C++ tokenizer bindings broken or model cache corrupt')
+    print('    Fix: rm -rf ~/.cache/huggingface && STEP=run_env_smoke_tests bash setup.sh')
+    sys.exit(1)
+
+# --- Tiny MLP forward pass: exercises torch C++ extension + autograd ---
+try:
+    vocab_size = tok.vocab_size
+    embed_dim  = 32
+    num_labels = 2
+
+    class TinyClassifier(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(vocab_size, embed_dim)
+            self.fc1   = nn.Linear(embed_dim, 16)
+            self.fc2   = nn.Linear(16, num_labels)
+            self.relu  = nn.ReLU()
+
+        def forward(self, input_ids):
+            x = self.embed(input_ids).mean(dim=1)   # mean pool over seq
+            x = self.relu(self.fc1(x))
+            return self.fc2(x)
+
+    model = TinyClassifier().eval()
+    with torch.no_grad():
+        logits = model(ids['input_ids'])
+        probs  = torch.softmax(logits, dim=-1)
+
+    assert logits.shape == (1, num_labels), \
+        f'expected logits shape (1, {num_labels}), got {logits.shape}'
+    assert abs(probs.sum().item() - 1.0) < 1e-5, \
+        f'softmax probabilities do not sum to 1: {probs.sum().item()}'
+
+    print(f'  \033[0;32m✓\033[0m CPU forward pass: logits={logits.tolist()} probs={[round(p,3) for p in probs[0].tolist()]}')
+    print(f'  \033[0;32m✓\033[0m CPU inference smoke test passed — torch C++ + autograd confirmed working')
+
+except Exception as e:
+    print(f'\033[0;31m  ✗ CPU forward pass failed: {e}\033[0m')
+    print('    Why: torch C++ extension or autograd is broken despite import succeeding')
+    print('    Fix: rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)')
+    sys.exit(1)
+
+# --- FAISS: exercises C++ BLAS bindings with a real vector search ---
+try:
+    import faiss, numpy as np
+    dim    = 64
+    n_vecs = 100
+    index  = faiss.IndexFlatL2(dim)
+    vecs   = np.random.rand(n_vecs, dim).astype('float32')
+    index.add(vecs)
+    D, I   = index.search(vecs[:5], 3)
+    assert index.ntotal == n_vecs, f'expected {n_vecs} vectors, got {index.ntotal}'
+    assert I.shape == (5, 3), f'expected search shape (5,3), got {I.shape}'
+    assert (D[:, 0] < 1e-5).all(), 'nearest neighbour distance should be ~0 for self-query'
+    print(f'  \033[0;32m✓\033[0m FAISS: {n_vecs}-vector index, self-query L2 distance ≈ 0 — C++ BLAS confirmed')
+except Exception as e:
+    print(f'\033[0;31m  ✗ FAISS forward pass failed: {e}\033[0m')
+    print('    Why: FAISS C++ BLAS bindings broken despite import succeeding')
+    print('    Fix: rm -rf .venv && bash setup.sh')
+    sys.exit(1)
+" || {
+        _msg_error "CPU inference smoke test failed" \
+            "A real forward pass failed despite import success" \
+            "Broken C extension, ABI mismatch, or corrupt wheel — training will fail at the same point" \
+            "rm -rf .venv && bash setup.sh   (reinstalls all packages from pinned uv.lock)"
+        exit 1
+    }
+    _msg_ok "CPU inference smoke test passed — ML stack confirmed end-to-end on CPU"
+}
+
+_run_gpu_smoke_subset() {
+    # Tier 4: GPU-gated test subset.
+    # Runs pytest -m gpu if any gpu-marked tests exist.
+    # Purpose: confirms CUDA kernel dispatch works at the pytest level,
+    # not just at the torch.tensor(device='cuda') level.
+    _require_uv; _require_python
+    _msg_info "Running GPU test subset (marker=gpu)..."
+
+    local GPU_COUNT
+    GPU_COUNT=$("$UV" run pytest tests/ --co -q -m gpu 2>/dev/null | grep -c "^tests/" || true)
+
+    if [ "${GPU_COUNT}" -gt 0 ]; then
+        _msg_info "Found ${GPU_COUNT} GPU-marked tests — running..."
+        "$UV" run pytest tests/ -m gpu -q --tb=short && \
+            _msg_ok "GPU test subset passed (${GPU_COUNT} tests)" || {
+            _msg_error "GPU tests failed" \
+                "${GPU_COUNT} gpu-marked tests but one or more failed" \
+                "GPU kernel dispatch is broken — do not proceed to training" \
+                ".venv/bin/pytest tests/ -m gpu -v --tb=long"
+            exit 1
+        }
+    else
+        _msg_info "No gpu-marked tests found yet — GPU subset skipped"
+        _msg_info "To add: decorate a test with @pytest.mark.gpu"
+    fi
+}
+
 verify_tests() {
     _require_uv; _require_python
-    echo " Verifying test suite..."
+    echo " Verifying test suite (tiered execution)..."
 
-    # --- Shell tests (bats-core) ---
+    # --- Tier 1: Shell tests ---
     run_shell_tests
 
-    # --- Python unit tests ---
+    # --- Tier 2: Python unit tests ---
+    # Unit tests are fast, pure-function, no I/O — always run as hard gate.
+    # Collection-only fallback is a DIAGNOSTIC ONLY — it does not verify execution.
     local UNIT_COUNT
     UNIT_COUNT=$("$UV" run pytest tests/ --co -q -m unit 2>/dev/null | grep -c "^tests/" || true)
+
     if [ "${UNIT_COUNT}" -gt 0 ]; then
-        _msg_info "Found ${UNIT_COUNT} Python unit tests — running as environment verification gate..."
+        _msg_info "Tier 2: ${UNIT_COUNT} unit tests — executing (not just collecting)..."
         "$UV" run pytest tests/ -m unit -q --tb=short && \
-            _msg_ok "Python unit tests passed — environment verified end-to-end" || {
-            _msg_error "Python unit tests failed" "${UNIT_COUNT} unit tests but one or more failed" \
-                "Failing unit tests indicate broken environment — do not proceed to training" \
+            _msg_ok "Tier 2 passed: ${UNIT_COUNT} unit tests executed" || {
+            _msg_error "Unit tests failed" \
+                "${UNIT_COUNT} unit tests collected but one or more FAILED execution" \
+                "Failing unit tests = broken environment. Do not proceed to training." \
                 ".venv/bin/pytest tests/ -m unit -v --tb=long"
             exit 1
         }
     else
-        _msg_info "No Python unit tests yet — collection check..."
-        "$UV" run pytest tests/ --co -q 2>/dev/null && \
-            _msg_ok "Python test collection ok — no unit tests to run yet" || \
-            _msg_warn "Python test collection failed" "pytest --co could not collect tests" \
-                "informational" ".venv/bin/python -c 'import src.environment; import src.repro'"
+        # Diagnostic collection check — not a gate
+        _msg_info "No unit tests yet — running collection check as diagnostic only..."
+        if "$UV" run pytest tests/ --co -q 2>/dev/null; then
+            _msg_warn "No unit tests to execute" \
+                "pytest --co succeeded but no unit-marked tests found" \
+                "informational" \
+                "Collection-only is NOT a verification gate. Add unit tests to tests/ to enable Tier 2."
+        else
+            _msg_warn "Test collection failed" \
+                "pytest --co could not import/collect tests" \
+                "informational" \
+                ".venv/bin/python -c 'import src.environment; import src.repro'"
+        fi
     fi
+
+    # --- Tier 3: CPU inference smoke test ---
+    # Runs regardless of SKIP_GPU — confirms ML stack works on CPU.
+    _msg_info "Tier 3: CPU inference smoke test..."
+    _run_cpu_inference_smoke_test
+
+    # --- Tier 4: GPU test subset (optional) ---
+    if [ "${SKIP_GPU:-0}" = "1" ]; then
+        _msg_skip "Tier 4: GPU test subset — SKIP_GPU=1, skipped"
+    else
+        _msg_info "Tier 4: GPU test subset (marker=gpu)..."
+        _run_gpu_smoke_subset
+    fi
+
+    _msg_ok "All verification tiers passed"
 }
