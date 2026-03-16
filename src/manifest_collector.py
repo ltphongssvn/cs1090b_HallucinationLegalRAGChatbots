@@ -1,7 +1,5 @@
 # src/manifest_collector.py
 # Path: cs1090b_HallucinationLegalRAGChatbots/src/manifest_collector.py
-# Responsibility: collect all environment state and print as JSON to stdout.
-# Called by scripts/manifest.sh via: $PYTHON src/manifest_collector.py <args>
 import argparse
 import importlib.metadata as meta
 import json
@@ -93,11 +91,11 @@ def get_cpu_info() -> dict[str, object]:
     try:
         with open("/proc/cpuinfo") as f:
             lines = f.read().splitlines()
-        models = [l.split(":")[1].strip() for l in lines if l.startswith("model name")]
+        models = [ln.split(":")[1].strip() for ln in lines if ln.startswith("model name")]
         if models:
             info["cpu_model"] = models[0]
-        physical = len({l.split(":")[1].strip() for l in lines if l.startswith("physical id")})
-        cores_per = len({l.split(":")[1].strip() for l in lines if l.startswith("core id")})
+        physical = len({ln.split(":")[1].strip() for ln in lines if ln.startswith("physical id")})
+        cores_per = len({ln.split(":")[1].strip() for ln in lines if ln.startswith("core id")})
         if physical > 0 and cores_per > 0:
             info["physical_cores"] = physical * cores_per
     except Exception:
@@ -130,9 +128,9 @@ def get_gpu_list() -> list[dict[str, object]]:
 
 
 def collect(args: argparse.Namespace) -> dict[str, object]:
+    import spacy  # type: ignore[import]
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
-    import spacy  # type: ignore[import]
 
     freeze_parsed = parse_freeze(args.freeze) if args.freeze not in ("unavailable", "") else {}
     gpus = get_gpu_list()
@@ -204,15 +202,11 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "spacy_model_version": nlp.meta.get("version"),
         "spacy_model_sha256": args.spacy_model_sha256,
         "faiss": get_faiss_version(),
-        # Core + new DL tooling snapshot
         "installed_packages": get_installed_versions([
             "torch", "transformers", "datasets", "faiss-cpu", "spacy",
             "scikit-learn", "numpy", "pandas", "langchain", "gensim",
             "sentence-transformers", "networkx",
-            # Multi-GPU, eval, experiment tracking
-            "accelerate", "evaluate", "ragas", "rouge-score",
-            "wandb",
-            # Dev
+            "accelerate", "peft", "evaluate", "ragas", "rouge-score", "wandb",
             "pytest", "mypy", "hypothesis",
         ]),
         "freeze_snapshot": freeze_parsed,
@@ -222,15 +216,15 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect environment manifest and print JSON.")
-    parser.add_argument("--git-sha",         required=True)
-    parser.add_argument("--git-branch",      required=True)
-    parser.add_argument("--git-dirty",       required=True)
-    parser.add_argument("--uvlock-sha256",   required=True)
-    parser.add_argument("--uv-version",      default="unknown")
-    parser.add_argument("--hostname",        default="unknown")
-    parser.add_argument("--slurm-job-id",    default="none")
-    parser.add_argument("--slurm-job-name",  default="none")
-    parser.add_argument("--slurm-nodelist",  default="none")
+    parser.add_argument("--git-sha",               required=True)
+    parser.add_argument("--git-branch",            required=True)
+    parser.add_argument("--git-dirty",             required=True)
+    parser.add_argument("--uvlock-sha256",         required=True)
+    parser.add_argument("--uv-version",            default="unknown")
+    parser.add_argument("--hostname",              default="unknown")
+    parser.add_argument("--slurm-job-id",          default="none")
+    parser.add_argument("--slurm-job-name",        default="none")
+    parser.add_argument("--slurm-nodelist",        default="none")
     parser.add_argument("--target-gpu-name",       required=True)
     parser.add_argument("--target-gpu-count",      required=True)
     parser.add_argument("--target-cap-major",      required=True)

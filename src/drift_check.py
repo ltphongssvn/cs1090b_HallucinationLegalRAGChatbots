@@ -1,8 +1,5 @@
 # src/drift_check.py
 # Path: cs1090b_HallucinationLegalRAGChatbots/src/drift_check.py
-# Responsibility: verify installed package versions meet minimum requirements
-#                 and that actual imports + functional calls succeed.
-# Called by scripts/bootstrap_env.sh Tier 4+5 via: $PYTHON src/drift_check.py
 import importlib
 import importlib.metadata as meta
 import sys
@@ -10,21 +7,20 @@ from typing import Callable
 
 from packaging.version import Version  # type: ignore[import]
 
-# (dist_name, import_name, min_version, exact_version_or_None)
 REQUIRED: list[tuple[str, str, str, str | None]] = [
-    ("torch",            "torch",          "2.0.0",  "2.0.1+cu117"),
-    ("transformers",     "transformers",   "4.35.0", None),
-    ("datasets",         "datasets",       "2.16.0", None),
-    ("faiss-cpu",        "faiss",          "1.7.0",  None),
-    ("spacy",            "spacy",          "3.7.0",  None),
-    ("scikit-learn",     "sklearn",        "1.5.0",  None),
-    ("numpy",            "numpy",          "1.24.0", None),
-    ("pandas",           "pandas",         "2.2.0",  None),
-    ("accelerate",       "accelerate",     "0.20.0", None),
-    ("peft",             "peft",           "0.7.0",  None),
-    ("evaluate",         "evaluate",       "0.4.0",  None),
-    ("ragas",            "ragas",          "0.1.0",  None),
-    ("wandb",            "wandb",          "0.16.0", None),
+    ("torch",        "torch",        "2.0.0",  "2.0.1+cu117"),
+    ("transformers", "transformers", "4.35.0", None),
+    ("datasets",     "datasets",     "2.16.0", None),
+    ("faiss-cpu",    "faiss",        "1.7.0",  None),
+    ("spacy",        "spacy",        "3.7.0",  None),
+    ("scikit-learn", "sklearn",      "1.5.0",  None),
+    ("numpy",        "numpy",        "1.24.0", None),
+    ("pandas",       "pandas",       "2.2.0",  None),
+    ("accelerate",   "accelerate",   "0.20.0", None),
+    ("peft",         "peft",         "0.7.0",  None),
+    ("evaluate",     "evaluate",     "0.4.0",  None),
+    ("ragas",        "ragas",        "0.1.0",  None),
+    ("wandb",        "wandb",        "0.16.0", None),
 ]
 
 FIX_HINT = "rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)"
@@ -43,20 +39,20 @@ def _check_transformers(mod: object) -> str:
 
 
 def _check_datasets(mod: object) -> str:
-    import datasets  # type: ignore[import]
     import pyarrow  # type: ignore[import]
+    import datasets  # type: ignore[import]
     return f"version={datasets.__version__}, arrow={pyarrow.__version__}"
 
 
 def _check_faiss(mod: object) -> str:
-    import faiss  # type: ignore[import]
     import numpy as np
+    import faiss  # type: ignore[import]
     idx = faiss.IndexFlatL2(4)
     vecs = np.random.rand(5, 4).astype("float32")
     idx.add(vecs)
     assert idx.ntotal == 5
-    D, I = idx.search(vecs[:1], 2)
-    assert I.shape == (1, 2)
+    distances, indices = idx.search(vecs[:1], 2)
+    assert indices.shape == (1, 2)
     return "IndexFlatL2 add/search ok"
 
 
@@ -68,8 +64,8 @@ def _check_spacy(mod: object) -> str:
 
 
 def _check_sklearn(mod: object) -> str:
-    import sklearn  # type: ignore[import]
     import numpy as np
+    import sklearn  # type: ignore[import]
     arr = np.array([1, 2, 3])
     assert arr.sum() == 6
     return f"version={sklearn.__version__}, numpy array ok"
@@ -91,16 +87,16 @@ def _check_pandas(mod: object) -> str:
 
 def _check_accelerate(mod: object) -> str:
     import accelerate  # type: ignore[import]
-    from accelerate import Accelerator  # type: ignore[import]
-    return f"version={accelerate.__version__}, Accelerator importable"
+    # Confirm Accelerator class is accessible — core class for multi-GPU training
+    assert hasattr(accelerate, "Accelerator"), "accelerate.Accelerator not found"
+    return f"version={accelerate.__version__}, Accelerator accessible"
 
 
 def _check_peft(mod: object) -> str:
     import peft  # type: ignore[import]
     from peft import LoraConfig, TaskType  # type: ignore[import]
-    # Functional: instantiate a LoraConfig — confirms PEFT core API accessible
     cfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=8, lora_alpha=16)
-    assert cfg.r == 8, f"LoraConfig.r={cfg.r}, expected 8"
+    assert cfg.r == 8
     return f"version={peft.__version__}, LoraConfig(r=8) ok"
 
 
@@ -117,7 +113,7 @@ def _check_ragas(mod: object) -> str:
 def _check_wandb(mod: object) -> str:
     import wandb  # type: ignore[import]
     assert hasattr(wandb, "init"), "wandb.init not found"
-    assert hasattr(wandb, "log"),  "wandb.log not found"
+    assert hasattr(wandb, "log"), "wandb.log not found"
     return f"version={wandb.__version__}, init/log API accessible"
 
 
@@ -147,10 +143,7 @@ def tier4_metadata_check() -> list[str]:
             if Version(installed) < Version(min_ver):
                 drift.append(f"{dist_name}: {installed} < minimum {min_ver}")
             elif exact_ver and installed != exact_ver:
-                print(
-                    f"  \033[0;33m⚠ WARNING\033[0m {dist_name} "
-                    f"installed={installed}, expected={exact_ver} (check wheel type)"
-                )
+                print(f"  \033[0;33m⚠ WARNING\033[0m {dist_name} installed={installed}, expected={exact_ver}")
             else:
                 print(f"  \033[0;32m✓\033[0m {dist_name:<20} {installed} (metadata)")
         except meta.PackageNotFoundError:
@@ -168,7 +161,7 @@ def tier5_import_functional_check() -> list[str]:
             mod = importlib.import_module(import_name)
         except ImportError as e:
             print(f"\033[0;31m  ✗ {dist_name}: import failed — {e}\033[0m")
-            print(f"    Why: metadata exists but module cannot load (missing .so / ABI mismatch)")
+            print("    Why: metadata exists but module cannot load (missing .so / ABI mismatch)")
             print(f"    Fix: {FIX_HINT}")
             failed.append(dist_name)
             continue
@@ -188,7 +181,7 @@ def tier5_import_functional_check() -> list[str]:
             print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok | {result}")
         except Exception as e:
             print(f"\033[0;31m  ✗ {dist_name}: import ok but functional call failed — {e}\033[0m")
-            print(f"    Why: C extension loaded but core op is broken")
+            print("    Why: C extension loaded but core op is broken")
             print(f"    Fix: {FIX_HINT}")
             failed.append(dist_name)
 
