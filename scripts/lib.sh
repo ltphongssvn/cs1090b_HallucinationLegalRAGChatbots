@@ -3,6 +3,15 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/lib.sh
 # Shared constants, color helpers, step framework, messaging, and defensive guards.
 # Sourced by setup.sh and all scripts/*.sh — defines functions only, no execution.
+#
+# Log levels (set via LOG_LEVEL env var):
+#   LOG_LEVEL=0 — quiet:   ERROR only
+#   LOG_LEVEL=1 — normal:  ERROR + WARN + OK  (default)
+#   LOG_LEVEL=2 — verbose: all messages including INFO (LOG_LEVEL=2 or VERBOSE=1)
+#
+# Example: LOG_LEVEL=0 bash setup.sh   (CI — errors only)
+#          LOG_LEVEL=2 bash setup.sh   (debugging — all output)
+#          VERBOSE=1   bash setup.sh   (alias for LOG_LEVEL=2)
 
 # ===========================================================================
 # Hardware target constants
@@ -45,9 +54,21 @@ HARDWARE_MATCH="true"
 UV=""
 
 # ===========================================================================
-# Colors
+# Log level — controls message verbosity
+# LOG_LEVEL=0: quiet  (ERROR only)         — use for CI / automated pipelines
+# LOG_LEVEL=1: normal (ERROR+WARN+OK)      — default
+# LOG_LEVEL=2: verbose (all + INFO)        — use for debugging
+# VERBOSE=1 is an alias for LOG_LEVEL=2
 # ===========================================================================
-if [ -t 1 ]; then
+if [ "${VERBOSE:-0}" = "1" ]; then
+    LOG_LEVEL=2
+fi
+LOG_LEVEL="${LOG_LEVEL:-1}"
+
+# ===========================================================================
+# Colors — disabled if not a TTY or LOG_LEVEL=0
+# ===========================================================================
+if [ -t 1 ] && [ "${LOG_LEVEL}" -gt 0 ]; then
     C_RESET="\033[0m"; C_BOLD="\033[1m"; C_GREEN="\033[0;32m"
     C_YELLOW="\033[0;33m"; C_RED="\033[0;31m"; C_CYAN="\033[0;36m"
     C_DIM="\033[2m"; C_BLUE="\033[0;34m"; C_MAGENTA="\033[0;35m"
@@ -62,11 +83,12 @@ fi
 SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
 _step_start_time=0
 SETUP_START_TIME=$(date +%s)
-_CURRENT_STEP="(none)"  # tracks the active step for signal handler context
+_CURRENT_STEP="(none)"
 
 step_begin() {
     _CURRENT_STEP="$1"
     _step_start_time=$(date +%s)
+    # Always print step header regardless of LOG_LEVEL — lets user track progress
     echo -e "${C_BOLD}${C_CYAN}▶ $1${C_RESET}"
 }
 
@@ -81,7 +103,8 @@ step_end() {
         DRY)  SUMMARY_STATUS+=("${C_MAGENTA}DRY${C_RESET}") ;;
         *)    SUMMARY_STATUS+=("${C_RED}FAIL${C_RESET}") ;;
     esac
-    echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
+    # Print duration only at verbose level — avoids clutter at normal/quiet
+    [ "${LOG_LEVEL}" -ge 2 ] && echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
 }
 
 print_summary() {
@@ -112,8 +135,18 @@ run_step() {
 }
 
 # ===========================================================================
-# Messaging helpers
+# Messaging helpers — respect LOG_LEVEL
+#
+# Level mapping:
+#   _msg_error → always printed (LOG_LEVEL 0+) — errors must never be silenced
+#   _msg_warn  → printed at LOG_LEVEL 1+        — warnings visible in normal mode
+#   _msg_ok    → printed at LOG_LEVEL 1+        — pass confirmations in normal mode
+#   _msg_info  → printed at LOG_LEVEL 2 only    — verbose detail, silent in CI
+#   _msg_skip  → printed at LOG_LEVEL 1+        — skip notices in normal mode
+#   _msg_dry_run → printed at LOG_LEVEL 1+      — dry-run previews in normal mode
 # ===========================================================================
+
+# ERROR — always printed regardless of LOG_LEVEL
 _msg_error() {
     local topic="$1" what="$2" why="$3" fix="$4"
     echo -e "\n${C_RED}${C_BOLD}  ✗ ERROR — ${topic}${C_RESET}"
@@ -122,20 +155,42 @@ _msg_error() {
     echo -e "${C_CYAN}    Fix:   ${fix}${C_RESET}\n"
 }
 
+# WARN — printed at LOG_LEVEL 1+ (normal and verbose)
 _msg_warn() {
+    [ "${LOG_LEVEL}" -lt 1 ] && return 0
     local topic="$1" what="$2" severity="$3" action="$4"
     local tag
-    [ "$severity" = "action-required" ] && tag="${C_YELLOW}[ACTION REQUIRED]${C_RESET}" || tag="${C_DIM}[informational]${C_RESET}"
+    [ "$severity" = "action-required" ] && \
+        tag="${C_YELLOW}[ACTION REQUIRED]${C_RESET}" || \
+        tag="${C_DIM}[informational]${C_RESET}"
     echo -e "${C_YELLOW}  ⚠ WARNING — ${topic}${C_RESET} ${tag}"
     echo -e "${C_YELLOW}    ${what}${C_RESET}"
     echo -e "${C_CYAN}    → ${action}${C_RESET}"
 }
 
-_msg_ok()   { echo -e "  ${C_GREEN}✓${C_RESET} $1"; }
-_msg_info() { echo -e "  ${C_BLUE}ℹ${C_RESET} $1"; }
-_msg_skip() { echo -e "  ${C_DIM}⊘ $1${C_RESET}"; }
+# OK — printed at LOG_LEVEL 1+ (normal and verbose)
+_msg_ok() {
+    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    echo -e "  ${C_GREEN}✓${C_RESET} $1"
+}
 
+# INFO — printed at LOG_LEVEL 2 only (verbose)
+# Silent in normal (LOG_LEVEL=1) and quiet (LOG_LEVEL=0) modes.
+# Use for: progress detail, intermediate values, diagnostic context.
+_msg_info() {
+    [ "${LOG_LEVEL}" -lt 2 ] && return 0
+    echo -e "  ${C_BLUE}ℹ${C_RESET} $1"
+}
+
+# SKIP — printed at LOG_LEVEL 1+
+_msg_skip() {
+    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    echo -e "  ${C_DIM}⊘ $1${C_RESET}"
+}
+
+# DRY RUN — printed at LOG_LEVEL 1+
 _msg_dry_run() {
+    [ "${LOG_LEVEL}" -lt 1 ] && return 0
     local action="$1" target="$2"
     echo -e "  ${C_MAGENTA}⊡ DRY RUN${C_RESET} — would ${action}: ${C_DIM}${target}${C_RESET}"
 }
@@ -147,8 +202,6 @@ _is_dry_run() { [ "${DRY_RUN:-0}" = "1" ]; }
 # ===========================================================================
 
 _on_error() {
-    # ERR trap: called on any non-zero exit from a simple command.
-    # Prints structured context before showing the summary.
     local line="$1" cmd="$2"
     echo -e "\n${C_RED}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_RED}${C_BOLD}  SETUP FAILED — unexpected error${C_RESET}"
@@ -158,44 +211,33 @@ _on_error() {
     echo -e "${C_RED}  Active step:  ${_CURRENT_STEP}${C_RESET}"
     echo -e "${C_DIM}  Hint: DEBUG=1 bash setup.sh for full set -x trace${C_RESET}"
     echo -e "${C_DIM}  Hint: STEP=${_CURRENT_STEP} bash setup.sh to re-run just the failing step${C_RESET}"
-    echo -e "${C_DIM}  Hint: Check logs/environment_manifest.json if it exists${C_RESET}\n"
+    echo -e "${C_DIM}  Hint: LOG_LEVEL=2 bash setup.sh for verbose output${C_RESET}\n"
     print_summary
 }
 
 _on_sigint() {
-    # SIGINT handler: user pressed Ctrl+C during setup.
-    # Prints which step was interrupted so the user knows exactly where to resume.
     echo -e "\n\n${C_YELLOW}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_YELLOW}${C_BOLD}  SETUP INTERRUPTED — Ctrl+C received${C_RESET}"
     echo -e "${C_YELLOW}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_YELLOW}  Interrupted during step: ${_CURRENT_STEP}${C_RESET}"
     echo -e "${C_DIM}  The environment may be in a partial state.${C_RESET}"
-    echo -e "${C_CYAN}  To resume from the interrupted step:${C_RESET}"
-    echo -e "${C_CYAN}    STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}"
-    echo -e "${C_CYAN}  To restart from the beginning:${C_RESET}"
-    echo -e "${C_CYAN}    bash setup.sh${C_RESET}\n"
+    echo -e "${C_CYAN}  To resume: STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}"
+    echo -e "${C_CYAN}  To restart: bash setup.sh${C_RESET}\n"
     print_summary
-    exit 130  # Standard exit code for SIGINT (128 + 2)
+    exit 130
 }
 
 _on_sigterm() {
-    # SIGTERM handler: process was killed (e.g. cluster job timeout, OOM killer).
-    # Distinguishable from SIGINT so the user knows it was not their Ctrl+C.
     echo -e "\n\n${C_RED}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_RED}${C_BOLD}  SETUP TERMINATED — SIGTERM received${C_RESET}"
     echo -e "${C_RED}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_RED}  Terminated during step: ${_CURRENT_STEP}${C_RESET}"
     echo -e "${C_DIM}  Possible causes: cluster job timeout, OOM killer, or external kill${C_RESET}"
-    echo -e "${C_CYAN}  Check cluster logs, then resume:${C_RESET}"
-    echo -e "${C_CYAN}    STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}\n"
+    echo -e "${C_CYAN}  Check cluster logs, then: STEP=${_CURRENT_STEP} bash setup.sh${C_RESET}\n"
     print_summary
-    exit 143  # Standard exit code for SIGTERM (128 + 15)
+    exit 143
 }
 
-# Register signal handlers.
-# These are registered here in lib.sh so they are active as soon as lib.sh
-# is sourced — before any step runs. The ERR trap is registered in setup.sh
-# after sourcing because it references _CURRENT_STEP which is defined here.
 trap '_on_sigint'  INT
 trap '_on_sigterm' TERM
 
