@@ -9,7 +9,6 @@ import platform
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 
 
 def get_nvcc_version() -> str:

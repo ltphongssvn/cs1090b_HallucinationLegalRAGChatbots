@@ -39,14 +39,14 @@ def _check_transformers(mod: object) -> str:
 
 
 def _check_datasets(mod: object) -> str:
-    import pyarrow  # type: ignore[import]
     import datasets  # type: ignore[import]
+    import pyarrow  # type: ignore[import]
     return f"version={datasets.__version__}, arrow={pyarrow.__version__}"
 
 
 def _check_faiss(mod: object) -> str:
-    import numpy as np
     import faiss  # type: ignore[import]
+    import numpy as np
     idx = faiss.IndexFlatL2(4)
     vecs = np.random.rand(5, 4).astype("float32")
     idx.add(vecs)

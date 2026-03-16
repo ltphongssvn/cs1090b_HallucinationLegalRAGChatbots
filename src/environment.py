@@ -123,7 +123,8 @@ def run_preflight_checks(
             f"got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
         )
     else:
-        if logger: logger.info(f"✓ PASS: GPU count {n} >= {PREFLIGHT_GPU_COUNT}")
+        if logger:
+            logger.info(f"✓ PASS: GPU count {n} >= {PREFLIGHT_GPU_COUNT}")
 
     # Check 2: GPU name, compute cap, VRAM
     if torch.cuda.is_available():
@@ -138,7 +139,8 @@ def run_preflight_checks(
             elif vram_gb < PREFLIGHT_VRAM_GB_MIN:
                 failures.append(f"GPU[{i}] VRAM: expected >={PREFLIGHT_VRAM_GB_MIN}GB, got {vram_gb:.1f}GB.")
             else:
-                if logger: logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
+                if logger:
+                    logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
 
     # Check 3: torch CUDA runtime
     if torch.cuda.is_available():
@@ -149,7 +151,8 @@ def run_preflight_checks(
                 f"got {actual_cuda}. Run: bash setup.sh"
             )
         else:
-            if logger: logger.info(f"✓ PASS: torch CUDA runtime {actual_cuda}")
+            if logger:
+                logger.info(f"✓ PASS: torch CUDA runtime {actual_cuda}")
 
     # Check 4: Disk space
     project_root = Path(__file__).resolve().parent.parent
@@ -158,7 +161,8 @@ def run_preflight_checks(
     if free_gb < PREFLIGHT_MIN_DISK_GB:
         failures.append(f"Disk space: expected >={PREFLIGHT_MIN_DISK_GB}GB free, got {free_gb:.1f}GB.")
     else:
-        if logger: logger.info(f"✓ PASS: Disk {free_gb:.1f}GB free")
+        if logger:
+            logger.info(f"✓ PASS: Disk {free_gb:.1f}GB free")
 
     # Check 5: src/repro.py
     repro_path = project_root / "src" / "repro.py"
@@ -167,7 +171,8 @@ def run_preflight_checks(
     else:
         try:
             importlib.import_module("src.repro")
-            if logger: logger.info("✓ PASS: src/repro.py importable")
+            if logger:
+                logger.info("✓ PASS: src/repro.py importable")
         except ImportError as e:
             failures.append(f"src/repro.py import failed: {e}")
 
@@ -186,7 +191,8 @@ def run_preflight_checks(
             if actual != expected:
                 failures.append(f"repro_cfg['{key}']: expected {expected!r}, got {actual!r}.")
             else:
-                if logger: logger.info(f"✓ PASS: repro_cfg['{key}'] = {actual!r}")
+                if logger:
+                    logger.info(f"✓ PASS: repro_cfg['{key}'] = {actual!r}")
     else:
         failures.append("repro_cfg not provided to run_preflight_checks().")
 
@@ -220,14 +226,16 @@ def run_preflight_checks(
         if actual != expected:
             failures.append(f"os.environ['{var}']={actual!r} — expected {expected!r}. Re-run Cell 1.")
         else:
-            if logger: logger.info(f"✓ PASS: os.environ['{var}'] = {actual!r}")
+            if logger:
+                logger.info(f"✓ PASS: os.environ['{var}'] = {actual!r}")
 
     # Check 9: uv.lock present
     uvlock_path = project_root / "uv.lock"
     if not uvlock_path.exists():
         failures.append("uv.lock not found. Run: uv lock && git add uv.lock && git commit")
     else:
-        if logger: logger.info("✓ PASS: uv.lock present")
+        if logger:
+            logger.info("✓ PASS: uv.lock present")
 
     if failures:
         msg = (
