@@ -24,6 +24,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python
         run: uv python install 3.11.9
@@ -86,6 +87,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
@@ -120,6 +122,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
@@ -191,6 +194,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
