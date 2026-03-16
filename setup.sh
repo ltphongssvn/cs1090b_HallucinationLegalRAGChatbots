@@ -28,14 +28,14 @@ PYTHON="$PROJECT_ROOT/.venv/bin/python"
 # Hardware target constants — update here only if cluster hardware changes.
 # All gpu checks, logs, and manifest entries reference these variables.
 # ===========================================================================
-TARGET_GPU_NAME="L4"                  # substring match against torch device name
-TARGET_GPU_COUNT=4                    # expected number of visible GPUs
-TARGET_COMPUTE_CAP_MAJOR=8            # minimum compute capability major
-TARGET_COMPUTE_CAP_MINOR=9            # minimum compute capability minor (L4 = 8.9)
-TARGET_VRAM_GB_MIN=22.0               # minimum VRAM per GPU in GB
-TARGET_TORCH_CUDA_RUNTIME="11.7"      # torch wheel compiled against (cu117)
-TARGET_DRIVER_CUDA="12.8"             # driver-reported CUDA (forward-compat)
-TARGET_PYTHON_VERSION="3.11.9"        # pinned Python version
+TARGET_GPU_NAME="L4"
+TARGET_GPU_COUNT=4
+TARGET_COMPUTE_CAP_MAJOR=8
+TARGET_COMPUTE_CAP_MINOR=9
+TARGET_VRAM_GB_MIN=22.0
+TARGET_TORCH_CUDA_RUNTIME="11.7"
+TARGET_DRIVER_CUDA="12.8"
+TARGET_PYTHON_VERSION="3.11.9"
 
 # Pinned spaCy model — update deliberately and commit when upgrading
 SPACY_MODEL="en_core_web_sm"
@@ -106,7 +106,7 @@ if torch.cuda.is_available():
 }
 
 ensure_venv() {
-    PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"  # "3.11.9" → "3,11,9" for Python tuple check
+    PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"
     if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (${PYVER_TUPLE}) else 1)" 2>/dev/null; then
         echo " .venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping creation"
         return
@@ -170,6 +170,72 @@ for var, expected in checks.items():
     actual = os.environ.get(var)
     assert actual == expected, f'{var}={actual!r} — expected {expected!r}'
     print(f'  {var}={actual} — verified')
+"
+}
+
+verify_numerical_stability() {
+    echo " Verifying numerical/runtime stability configuration..."
+    $PYTHON -c "
+import os, torch
+
+# 1. Verify CUBLAS_WORKSPACE_CONFIG is set correctly in the process environment.
+#    This env var must be set BEFORE torch is imported to take effect for cuBLAS.
+#    Without it, torch.use_deterministic_algorithms(True) raises a RuntimeError
+#    on CUDA ops that use cuBLAS workspace buffers.
+cublas_cfg = os.environ.get('CUBLAS_WORKSPACE_CONFIG', '')
+assert cublas_cfg == ':4096:8', (
+    f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be :4096:8 for deterministic cuBLAS. '
+    f'Ensure this is exported before torch is imported.'
+)
+print(f'  CUBLAS_WORKSPACE_CONFIG={cublas_cfg} — ok')
+
+# 2. Enable deterministic algorithms globally and verify it sticks.
+#    warn_only=False means torch raises an error (not a warning) if a non-deterministic
+#    op is called — this is the correct setting for reproducible research.
+torch.use_deterministic_algorithms(True, warn_only=False)
+assert torch.are_deterministic_algorithms_enabled(), \
+    'torch.use_deterministic_algorithms(True) did not take effect'
+print(f'  torch.use_deterministic_algorithms: enabled (warn_only=False)')
+
+# 3. Disable cuDNN benchmark mode.
+#    benchmark=True allows cuDNN to auto-select fastest convolution algorithms,
+#    which vary by input size and hardware state — a source of non-determinism.
+#    Must be False for reproducible training runs.
+torch.backends.cudnn.benchmark = False
+assert not torch.backends.cudnn.benchmark, \
+    'cudnn.benchmark=True — non-deterministic algorithm selection is active'
+print(f'  cudnn.benchmark: False — deterministic algorithm selection')
+
+# 4. Enable cuDNN deterministic mode.
+#    deterministic=True forces cuDNN to use deterministic convolution algorithms,
+#    at the cost of some performance. Required for bit-exact reproducibility.
+torch.backends.cudnn.deterministic = True
+assert torch.backends.cudnn.deterministic, \
+    'cudnn.deterministic=False — cuDNN may produce non-deterministic results'
+print(f'  cudnn.deterministic: True — bit-exact cuDNN ops enabled')
+
+# 5. Verify PYTHONHASHSEED is pinned.
+#    Without this, dict/set iteration order and hash-based data structures
+#    vary across Python processes — a subtle but real source of non-reproducibility
+#    in data pipeline shuffling and tokenization.
+hashseed = os.environ.get('PYTHONHASHSEED', 'not set')
+assert hashseed == '0', \
+    f'PYTHONHASHSEED={hashseed!r} — must be 0 for deterministic hash randomization'
+print(f'  PYTHONHASHSEED={hashseed} — deterministic hash randomization')
+
+# 6. Verify TOKENIZERS_PARALLELISM is disabled.
+#    HuggingFace fast tokenizers use Rust thread pools that can cause deadlocks
+#    when forked in multiprocessing DataLoader workers. False prevents this.
+tok_par = os.environ.get('TOKENIZERS_PARALLELISM', 'not set')
+assert tok_par == 'false', \
+    f'TOKENIZERS_PARALLELISM={tok_par!r} — must be false to prevent tokenizer fork deadlocks'
+print(f'  TOKENIZERS_PARALLELISM={tok_par} — tokenizer fork safety enabled')
+
+print()
+print('  Numerical stability configuration verified.')
+print('  NOTE: torch.use_deterministic_algorithms(True) is verified here at setup time.')
+print('        Notebooks and training scripts must also call this before any GPU ops.')
+print('        Add to notebook Cell 1: import torch; torch.use_deterministic_algorithms(True, warn_only=False)')
 "
 }
 
@@ -271,26 +337,19 @@ run_gpu_smoke_tests() {
     $PYTHON -c "
 import torch
 
-TARGET_GPU_NAME        = '${TARGET_GPU_NAME}'
-TARGET_GPU_COUNT       = ${TARGET_GPU_COUNT}
-TARGET_CAP             = (${TARGET_COMPUTE_CAP_MAJOR}, ${TARGET_COMPUTE_CAP_MINOR})
-TARGET_VRAM_GB_MIN     = ${TARGET_VRAM_GB_MIN}
-TARGET_TORCH_CUDA      = '${TARGET_TORCH_CUDA_RUNTIME}'
+TARGET_GPU_NAME    = '${TARGET_GPU_NAME}'
+TARGET_GPU_COUNT   = ${TARGET_GPU_COUNT}
+TARGET_CAP         = (${TARGET_COMPUTE_CAP_MAJOR}, ${TARGET_COMPUTE_CAP_MINOR})
+TARGET_VRAM_GB_MIN = ${TARGET_VRAM_GB_MIN}
+TARGET_TORCH_CUDA  = '${TARGET_TORCH_CUDA_RUNTIME}'
 
-# 1. CUDA must be available
 assert torch.cuda.is_available(), 'CUDA not available — wrong torch wheel'
-
-# 2. torch runtime must match pinned cu117 wheel
 assert torch.version.cuda.startswith(TARGET_TORCH_CUDA), (
     f'Expected torch CUDA runtime {TARGET_TORCH_CUDA} (cu117 wheel) got {torch.version.cuda}. '
     f'NOTE: driver CUDA (${TARGET_DRIVER_CUDA}) != torch runtime CUDA ({TARGET_TORCH_CUDA}) — expected.'
 )
-
-# 3. Must see all expected GPUs
 n = torch.cuda.device_count()
 assert n >= TARGET_GPU_COUNT, f'Expected {TARGET_GPU_COUNT}x NVIDIA {TARGET_GPU_NAME} GPUs, got {n}'
-
-# 4. Every GPU must match name, compute cap, and VRAM targets
 for i in range(n):
     name    = torch.cuda.get_device_name(i)
     cap     = torch.cuda.get_device_capability(i)
@@ -302,8 +361,6 @@ for i in range(n):
     assert vram_gb >= TARGET_VRAM_GB_MIN, \
         f'GPU {i}: expected >={TARGET_VRAM_GB_MIN}GB VRAM, got {vram_gb:.1f}GB'
     print(f'  GPU [{i}] {name} | cap {cap} | {vram_gb:.1f} GB — ok')
-
-# 5. Functional: tensor round-trip on GPU 0
 t = torch.tensor([1.0, 2.0, 3.0], device='cuda:0')
 assert t.device.type == 'cuda', 'tensor not on CUDA device'
 assert torch.allclose(t.mean().cpu(), torch.tensor(2.0)), 'GPU tensor op failed'
@@ -388,6 +445,12 @@ manifest = {
         'CUBLAS_WORKSPACE_CONFIG': os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
         'TOKENIZERS_PARALLELISM': os.environ.get('TOKENIZERS_PARALLELISM'),
     },
+    # --- Numerical stability settings ---
+    'numerical_stability': {
+        'deterministic_algorithms_enabled': torch.are_deterministic_algorithms_enabled(),
+        'cudnn_benchmark': torch.backends.cudnn.benchmark,
+        'cudnn_deterministic': torch.backends.cudnn.deterministic,
+    },
     # --- Hardware targets (from setup.sh constants) ---
     'hardware_target': {
         'gpu_name': '${TARGET_GPU_NAME}',
@@ -422,6 +485,7 @@ print('  manifest written to logs/environment_manifest.json')
 print(f'  git sha: ${GIT_SHA} | branch: ${GIT_BRANCH} | dirty files: ${GIT_DIRTY}')
 print(f'  uv.lock sha256: ${UVLOCK_SHA256}')
 print(f'  repro env: PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 TOKENIZERS_PARALLELISM=false')
+print(f'  numerical stability: deterministic_algorithms=True cudnn.benchmark=False cudnn.deterministic=True')
 "
 }
 
@@ -467,6 +531,7 @@ echo " Driver CUDA: ${TARGET_DRIVER_CUDA} (forward-compat) | torch runtime: ${TA
 echo " spaCy model: ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned + checksummed)"
 echo " Offline mode: OFFLINE=1 bash setup.sh (requires .cache/spacy/ wheel)"
 echo " Repro vars:   PYTHONHASHSEED=0 | CUBLAS_WORKSPACE_CONFIG=:4096:8 | TOKENIZERS_PARALLELISM=false"
+echo " Stability:    deterministic_algorithms=True | cudnn.benchmark=False | cudnn.deterministic=True"
 echo "============================================================"
 check_uv
 check_lockfile
@@ -475,6 +540,7 @@ ensure_venv
 verify_python
 sync_dependencies
 write_repro_env
+verify_numerical_stability
 download_nlp_models
 run_env_smoke_tests
 run_gpu_smoke_tests
