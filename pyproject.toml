@@ -10,7 +10,7 @@ dependencies = [
   "pandas>=2.2.0",
   "numpy>=1.24.0,<2.0.0",
   "torch>=2.0",
-  "transformers>=4.35,<4.41",
+  "transformers>=4.35,<4.40",
   "sentence-transformers>=2.2",
   "accelerate>=0.20",
   "peft>=0.7",
@@ -60,6 +60,3 @@ line-length = 120
 select = ["E", "F", "I"]
 ignore = ["E501"]
 
-[tool.uv]
-# Prefer binary wheels — avoids broken sdist builds (e.g. tokenizers 0.19.1)
-no-build-package = ["tokenizers"]

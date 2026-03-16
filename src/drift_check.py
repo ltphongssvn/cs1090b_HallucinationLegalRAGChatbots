@@ -195,7 +195,7 @@ def main() -> None:
         print("\n  \033[0;31mDrift detected:\033[0m")
         for d in drift:
             print(f"  \033[0;31m  • {d}\033[0m")
-        print(f"  \033[0;36m  Fix: bash setup.sh\033[0m")
+        print("  \033[0;36m  Fix: bash setup.sh\033[0m")
         sys.exit(1)
     print("  Metadata versions ok — proceeding to import verification")
 
