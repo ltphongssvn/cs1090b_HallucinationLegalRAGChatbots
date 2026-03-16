@@ -6,6 +6,7 @@
 # Debug:        DEBUG=1 bash setup.sh
 # Skip GPU:     SKIP_GPU=1 bash setup.sh
 # Dry run:      DRY_RUN=1 bash setup.sh
+# Offline:      OFFLINE=1 bash setup.sh  (requires cached wheel in .cache/spacy/)
 #
 # Hardware target: 4x NVIDIA L4 (23034MiB each, compute cap 8.9, CUDA driver 12.8)
 # Torch wheel:     2.0.1+cu117 (compiled against CUDA runtime 11.7 — compatible via driver forward-compat)
@@ -15,6 +16,14 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
+
+# Pinned spaCy model — update deliberately and commit when upgrading
+SPACY_MODEL="en_core_web_sm"
+SPACY_MODEL_VERSION="3.8.0"
+SPACY_MODEL_URL="https://github.com/explosion/spacy-models/releases/download/${SPACY_MODEL}-${SPACY_MODEL_VERSION}/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
+SPACY_MODEL_SHA256="5e97b9ec4f95153b992896c5c45b1a00c3fcde7f764426c5370f2f11e71abef2"
+SPACY_CACHE_DIR="$PROJECT_ROOT/.cache/spacy"
+SPACY_WHEEL="$SPACY_CACHE_DIR/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
 
 trap 'echo "ERROR: setup.sh failed at line $LINENO — environment may be incomplete"' ERR
 
@@ -47,7 +56,6 @@ log_gpu() {
             --format=csv,noheader | while IFS=',' read -r idx name mem drv; do
             echo "  GPU $idx:$(echo "$name" | xargs) | VRAM:$(echo "$mem" | xargs) | Driver:$(echo "$drv" | xargs)"
         done
-        # Driver-reported CUDA version (max supported by driver, NOT torch runtime)
         DRIVER_CUDA=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
         echo " Driver CUDA (max supported): $DRIVER_CUDA"
         echo " NOTE: torch wheel is compiled against CUDA runtime 11.7 (cu117)."
@@ -60,7 +68,6 @@ log_gpu() {
     else
         echo "WARNING: nvcc not on PATH — CUDA toolkit version unverified"
     fi
-    # Log torch-side CUDA details after venv exists
     if [ -f "$PYTHON" ]; then
         $PYTHON -c "
 import torch
@@ -115,6 +122,58 @@ sync_dependencies() {
     $UV sync --frozen --dev
 }
 
+download_nlp_models() {
+    echo " Installing spaCy ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned)..."
+    mkdir -p "$SPACY_CACHE_DIR"
+
+    # Check if model version already installed — skip if so
+    if $PYTHON -c "
+import spacy, sys
+try:
+    nlp = spacy.load('${SPACY_MODEL}')
+    meta = nlp.meta
+    if meta.get('version') == '${SPACY_MODEL_VERSION}':
+        sys.exit(0)
+    else:
+        print(f'  installed version {meta.get(\"version\")} != pinned ${SPACY_MODEL_VERSION} — reinstalling')
+        sys.exit(1)
+except OSError:
+    sys.exit(1)
+" 2>/dev/null; then
+        echo " ${SPACY_MODEL} ${SPACY_MODEL_VERSION} already installed — skipping"
+        return
+    fi
+
+    # Obtain wheel: use cache if present, else download (unless OFFLINE=1)
+    if [ ! -f "$SPACY_WHEEL" ]; then
+        if [ "${OFFLINE:-0}" = "1" ]; then
+            echo "ERROR: OFFLINE=1 but cached wheel not found at $SPACY_WHEEL"
+            echo "       To cache: mkdir -p .cache/spacy && wget -O $SPACY_WHEEL $SPACY_MODEL_URL"
+            exit 1
+        fi
+        echo " Downloading ${SPACY_MODEL} wheel..."
+        curl -fsSL -o "$SPACY_WHEEL" "$SPACY_MODEL_URL"
+    else
+        echo " Using cached wheel: $SPACY_WHEEL"
+    fi
+
+    # Checksum verification — always, regardless of source
+    ACTUAL_SHA=$(sha256sum "$SPACY_WHEEL" | cut -d' ' -f1)
+    if [ "$ACTUAL_SHA" != "$SPACY_MODEL_SHA256" ]; then
+        echo "ERROR: spaCy model wheel checksum mismatch!"
+        echo "       expected: $SPACY_MODEL_SHA256"
+        echo "       actual:   $ACTUAL_SHA"
+        echo "       Deleting corrupted wheel: $SPACY_WHEEL"
+        rm -f "$SPACY_WHEEL"
+        exit 1
+    fi
+    echo " Checksum verified: $ACTUAL_SHA"
+
+    # Install from verified local wheel
+    $PYTHON -m pip install --quiet "$SPACY_WHEEL"
+    echo " ${SPACY_MODEL} ${SPACY_MODEL_VERSION} installed from pinned wheel"
+}
+
 run_env_smoke_tests() {
     echo " Running environment smoke tests..."
 
@@ -123,7 +182,6 @@ run_env_smoke_tests() {
 import torch
 ver = torch.__version__
 assert ver.startswith('2.') and 'cu' in ver, f'Expected torch 2.x+cuXXX got {ver}'
-# Functional: basic tensor op must execute without error
 t = torch.tensor([1.0, 2.0, 3.0])
 assert torch.allclose(t.mean(), torch.tensor(2.0)), 'torch tensor op failed'
 print(f'  torch {ver} — tensor op ok')
@@ -133,7 +191,6 @@ print(f'  torch {ver} — tensor op ok')
     $PYTHON -c "
 import transformers
 from transformers import AutoTokenizer
-# Functional: tokenizer from a tiny bundled vocab — no network needed
 tok = AutoTokenizer.from_pretrained('bert-base-uncased', local_files_only=False)
 ids = tok('hello world', return_tensors='pt')
 assert ids['input_ids'].shape[1] > 0, 'tokenizer produced empty output'
@@ -143,7 +200,6 @@ print(f'  transformers {transformers.__version__} — tokenizer ok')
     # faiss: import + functional flat index add/search
     $PYTHON -c "
 import faiss, numpy as np
-# Functional: build a flat L2 index, add vectors, run a search
 dim = 64
 index = faiss.IndexFlatL2(dim)
 vecs = np.random.rand(10, dim).astype('float32')
@@ -154,15 +210,16 @@ assert I.shape == (1, 3), 'faiss search returned wrong shape'
 print(f'  faiss ok — index add/search functional')
 "
 
-    # spacy: import + model load + pipeline run
+    # spacy: version check + model load + pipeline run
     $PYTHON -c "
 import spacy
-# Functional: load the model downloaded by download_nlp_models() and run a doc
-nlp = spacy.load('en_core_web_sm')
+nlp = spacy.load('${SPACY_MODEL}')
+assert nlp.meta.get('version') == '${SPACY_MODEL_VERSION}', \
+    f'spaCy model version mismatch: expected ${SPACY_MODEL_VERSION} got {nlp.meta.get(\"version\")}'
 doc = nlp('The Supreme Court ruled in favor of the plaintiff.')
 assert len(doc) > 0, 'spacy pipeline produced empty doc'
 ents = [ent.label_ for ent in doc.ents]
-print(f'  spacy {spacy.__version__} — pipeline ok, entities: {ents}')
+print(f'  spacy {spacy.__version__} | model ${SPACY_MODEL_VERSION} — pipeline ok, entities: {ents}')
 "
 }
 
@@ -188,7 +245,7 @@ assert torch.version.cuda.startswith('11.7'), (
 n = torch.cuda.device_count()
 assert n >= 4, f'Expected 4x NVIDIA L4 GPUs, got {n}'
 
-# 4. Every visible GPU must be an NVIDIA L4 with compute cap 8.9 and >=22GB VRAM
+# 4. Every visible GPU must be NVIDIA L4 with compute cap 8.9 and >=22GB VRAM
 for i in range(n):
     name = torch.cuda.get_device_name(i)
     cap = torch.cuda.get_device_capability(i)
@@ -204,11 +261,6 @@ assert t.device.type == 'cuda', 'tensor not on CUDA device'
 assert torch.allclose(t.mean().cpu(), torch.tensor(2.0)), 'GPU tensor op failed'
 print(f'  CUDA {torch.version.cuda} — GPU tensor op on cuda:0 ok')
 "
-}
-
-download_nlp_models() {
-    echo " Downloading spaCy en_core_web_sm..."
-    $PYTHON -m spacy download en_core_web_sm --quiet
 }
 
 write_manifest() {
@@ -249,6 +301,7 @@ if torch.cuda.is_available():
             'compute_capability': list(torch.cuda.get_device_capability(i)),
         })
 
+nlp = spacy.load('${SPACY_MODEL}')
 manifest = {
     'timestamp': datetime.utcnow().isoformat() + 'Z',
     'python': sys.version,
@@ -262,6 +315,9 @@ manifest = {
     'gpus': gpus,
     'transformers': transformers.__version__,
     'spacy': spacy.__version__,
+    'spacy_model': '${SPACY_MODEL}',
+    'spacy_model_version': nlp.meta.get('version'),
+    'spacy_model_sha256': '${SPACY_MODEL_SHA256}',
     'platform': platform.platform(),
 }
 with open('logs/environment_manifest.json', 'w') as f:
@@ -291,6 +347,8 @@ echo "============================================================"
 echo " cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap"
 echo " Target: 4x NVIDIA L4 | Python 3.11.9 | torch 2.0.1+cu117"
 echo " Driver CUDA: 12.8 (forward-compat) | torch runtime: 11.7"
+echo " spaCy model: ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned + checksummed)"
+echo " Offline mode: OFFLINE=1 bash setup.sh (requires .cache/spacy/ wheel)"
 echo "============================================================"
 check_uv
 check_lockfile
@@ -313,4 +371,5 @@ echo " Kernel:    HallucinationLegalRAG (3.11.9)"
 echo " Manifest:  logs/environment_manifest.json"
 echo " CPU mode:  SKIP_GPU=1 bash setup.sh"
 echo " Dry run:   DRY_RUN=1 bash setup.sh"
+echo " Offline:   OFFLINE=1 bash setup.sh"
 echo "============================================================"
