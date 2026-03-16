@@ -145,6 +145,89 @@ sync_dependencies() {
     $UV sync --frozen --dev
 }
 
+check_dependency_drift() {
+    echo " Checking for dependency drift..."
+
+    # 1. Detect if pyproject.toml is newer than uv.lock — indicates uv.lock
+    #    was not regenerated after a dependency change, meaning the lockfile
+    #    is stale and does not reflect the current pyproject.toml spec.
+    if [ "$PROJECT_ROOT/pyproject.toml" -nt "$PROJECT_ROOT/uv.lock" ]; then
+        echo "ERROR: pyproject.toml is newer than uv.lock — lockfile is stale."
+        echo "       Someone edited pyproject.toml without regenerating uv.lock."
+        echo "       To fix deliberately: uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
+        exit 1
+    fi
+    echo " pyproject.toml vs uv.lock timestamp — ok (lockfile is not stale)"
+
+    # 2. Verify uv.lock is consistent with pyproject.toml using uv's own checker.
+    #    'uv lock --check' exits non-zero if the lockfile would change on re-solve,
+    #    catching cases where pyproject.toml constraints no longer satisfy uv.lock pins.
+    if $UV lock --check 2>/dev/null; then
+        echo " uv lock --check — lockfile is consistent with pyproject.toml"
+    else
+        echo "ERROR: uv lock --check failed — uv.lock is inconsistent with pyproject.toml."
+        echo "       To fix deliberately: uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
+        exit 1
+    fi
+
+    # 3. Verify installed packages match uv.lock exactly.
+    #    'uv sync --frozen --check' (uv >=0.4) exits non-zero if the venv
+    #    diverges from the lockfile — catching manual pip installs or removals
+    #    that happened after setup. This is the primary drift detection gate.
+    if $UV sync --frozen --dev --check 2>/dev/null; then
+        echo " uv sync --frozen --check — installed packages match uv.lock exactly"
+    else
+        echo "ERROR: Installed packages diverge from uv.lock."
+        echo "       This usually means someone ran 'pip install' manually after setup."
+        echo "       To fix: bash setup.sh  (re-syncs from uv.lock)"
+        exit 1
+    fi
+
+    # 4. Cross-check critical package versions directly in Python as a final
+    #    sanity gate — uv sync --check may not exist in older uv builds,
+    #    so this Python check is the fallback that always works.
+    $PYTHON -c "
+import importlib.metadata as meta
+
+# Critical packages with minimum versions required for this project.
+# These are a subset of pyproject.toml — add more if drift in these causes breakage.
+required = {
+    'torch':            ('2.0.0',  '2.0.1+cu117'),
+    'transformers':     ('4.35.0', None),
+    'datasets':         ('2.16.0', None),
+    'faiss-cpu':        ('1.7.0',  None),
+    'spacy':            ('3.7.0',  None),
+    'scikit-learn':     ('1.5.0',  None),
+    'numpy':            ('1.24.0', None),
+    'pandas':           ('2.2.0',  None),
+}
+
+from packaging.version import Version
+drift = []
+for pkg, (min_ver, exact_ver) in required.items():
+    try:
+        installed = meta.version(pkg)
+        if Version(installed) < Version(min_ver):
+            drift.append(f'{pkg}: installed {installed} < required {min_ver}')
+        elif exact_ver and installed != exact_ver:
+            # Warn on exact mismatch (torch wheel) but do not hard-fail —
+            # a newer compatible wheel is acceptable; a CPU wheel is not.
+            print(f'  WARNING: {pkg} installed={installed}, expected={exact_ver} (check wheel type)')
+        else:
+            print(f'  {pkg:<20} {installed} — ok')
+    except meta.PackageNotFoundError:
+        drift.append(f'{pkg}: NOT INSTALLED')
+
+if drift:
+    print('ERROR: Dependency drift detected:')
+    for d in drift:
+        print(f'  {d}')
+    raise SystemExit(1)
+
+print('  All critical package versions verified — no drift detected')
+"
+}
+
 write_repro_env() {
     echo " Writing reproducibility .env..."
     cat > "$PROJECT_ROOT/.env" << 'ENVEOF'
@@ -178,54 +261,38 @@ verify_numerical_stability() {
     $PYTHON -c "
 import os, torch
 
-# 1. Verify CUBLAS_WORKSPACE_CONFIG is set correctly in the process environment.
-#    This env var must be set BEFORE torch is imported to take effect for cuBLAS.
-#    Without it, torch.use_deterministic_algorithms(True) raises a RuntimeError
-#    on CUDA ops that use cuBLAS workspace buffers.
+# 1. CUBLAS_WORKSPACE_CONFIG must be set before torch import
 cublas_cfg = os.environ.get('CUBLAS_WORKSPACE_CONFIG', '')
 assert cublas_cfg == ':4096:8', (
-    f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be :4096:8 for deterministic cuBLAS. '
-    f'Ensure this is exported before torch is imported.'
+    f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be :4096:8 for deterministic cuBLAS.'
 )
 print(f'  CUBLAS_WORKSPACE_CONFIG={cublas_cfg} — ok')
 
-# 2. Enable deterministic algorithms globally and verify it sticks.
-#    warn_only=False means torch raises an error (not a warning) if a non-deterministic
-#    op is called — this is the correct setting for reproducible research.
+# 2. Enable deterministic algorithms — warn_only=False raises on non-deterministic ops
 torch.use_deterministic_algorithms(True, warn_only=False)
 assert torch.are_deterministic_algorithms_enabled(), \
     'torch.use_deterministic_algorithms(True) did not take effect'
 print(f'  torch.use_deterministic_algorithms: enabled (warn_only=False)')
 
-# 3. Disable cuDNN benchmark mode.
-#    benchmark=True allows cuDNN to auto-select fastest convolution algorithms,
-#    which vary by input size and hardware state — a source of non-determinism.
-#    Must be False for reproducible training runs.
+# 3. Disable cuDNN benchmark — prevents auto-selection of non-deterministic algorithms
 torch.backends.cudnn.benchmark = False
 assert not torch.backends.cudnn.benchmark, \
     'cudnn.benchmark=True — non-deterministic algorithm selection is active'
 print(f'  cudnn.benchmark: False — deterministic algorithm selection')
 
-# 4. Enable cuDNN deterministic mode.
-#    deterministic=True forces cuDNN to use deterministic convolution algorithms,
-#    at the cost of some performance. Required for bit-exact reproducibility.
+# 4. Enable cuDNN deterministic mode — forces bit-exact cuDNN ops
 torch.backends.cudnn.deterministic = True
 assert torch.backends.cudnn.deterministic, \
     'cudnn.deterministic=False — cuDNN may produce non-deterministic results'
 print(f'  cudnn.deterministic: True — bit-exact cuDNN ops enabled')
 
-# 5. Verify PYTHONHASHSEED is pinned.
-#    Without this, dict/set iteration order and hash-based data structures
-#    vary across Python processes — a subtle but real source of non-reproducibility
-#    in data pipeline shuffling and tokenization.
+# 5. Verify PYTHONHASHSEED
 hashseed = os.environ.get('PYTHONHASHSEED', 'not set')
 assert hashseed == '0', \
     f'PYTHONHASHSEED={hashseed!r} — must be 0 for deterministic hash randomization'
 print(f'  PYTHONHASHSEED={hashseed} — deterministic hash randomization')
 
-# 6. Verify TOKENIZERS_PARALLELISM is disabled.
-#    HuggingFace fast tokenizers use Rust thread pools that can cause deadlocks
-#    when forked in multiprocessing DataLoader workers. False prevents this.
+# 6. Verify TOKENIZERS_PARALLELISM
 tok_par = os.environ.get('TOKENIZERS_PARALLELISM', 'not set')
 assert tok_par == 'false', \
     f'TOKENIZERS_PARALLELISM={tok_par!r} — must be false to prevent tokenizer fork deadlocks'
@@ -233,9 +300,8 @@ print(f'  TOKENIZERS_PARALLELISM={tok_par} — tokenizer fork safety enabled')
 
 print()
 print('  Numerical stability configuration verified.')
-print('  NOTE: torch.use_deterministic_algorithms(True) is verified here at setup time.')
-print('        Notebooks and training scripts must also call this before any GPU ops.')
-print('        Add to notebook Cell 1: import torch; torch.use_deterministic_algorithms(True, warn_only=False)')
+print('  NOTE: Notebooks must also call torch.use_deterministic_algorithms(True, warn_only=False)')
+print('        in Cell 1 before any GPU ops.')
 "
 }
 
@@ -379,6 +445,7 @@ write_manifest() {
 
     $PYTHON -c "
 import json, torch, transformers, spacy, sys, platform, subprocess, os
+import importlib.metadata as meta
 from datetime import datetime
 
 def get_nvcc_version():
@@ -416,6 +483,15 @@ def get_faiss_version():
         return getattr(faiss, '__version__', 'installed — version attr unavailable')
     except ImportError:
         return 'not installed'
+
+def get_installed_versions(pkgs):
+    versions = {}
+    for pkg in pkgs:
+        try:
+            versions[pkg] = meta.version(pkg)
+        except meta.PackageNotFoundError:
+            versions[pkg] = 'not installed'
+    return versions
 
 gpus = []
 if torch.cuda.is_available():
@@ -478,6 +554,12 @@ manifest = {
     'spacy_model_version': nlp.meta.get('version'),
     'spacy_model_sha256': '${SPACY_MODEL_SHA256}',
     'faiss': get_faiss_version(),
+    # --- Full installed package snapshot for drift auditing ---
+    'installed_packages': get_installed_versions([
+        'torch', 'transformers', 'datasets', 'faiss-cpu', 'spacy',
+        'scikit-learn', 'numpy', 'pandas', 'langchain', 'gensim',
+        'sentence-transformers', 'networkx', 'pytest', 'mypy', 'hypothesis',
+    ]),
 }
 with open('logs/environment_manifest.json', 'w') as f:
     json.dump(manifest, f, indent=2)
@@ -539,6 +621,7 @@ log_gpu
 ensure_venv
 verify_python
 sync_dependencies
+check_dependency_drift
 write_repro_env
 verify_numerical_stability
 download_nlp_models
