@@ -19,6 +19,30 @@ _collect_manifest_data() {
             eval "${arg_name}=unknown"
         fi
     done
+
+    # Capture uv version at shell level — not available inside Python
+    local uv_version="unknown"
+    if [ -n "${UV:-}" ] && "$UV" --version &>/dev/null; then
+        uv_version=$("$UV" --version 2>/dev/null || echo "unknown")
+    elif command -v uv &>/dev/null; then
+        uv_version=$(uv --version 2>/dev/null || echo "unknown")
+    fi
+
+    # Capture cluster provenance at shell level
+    local host_name; host_name=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+    local slurm_job_id="${SLURM_JOB_ID:-none}"
+    local slurm_job_name="${SLURM_JOB_NAME:-none}"
+    local slurm_nodelist="${SLURM_JOB_NODELIST:-none}"
+
+    # Full uv pip freeze — complete installed package snapshot for exact reproduction.
+    # This goes beyond installed_packages (core subset) to capture every transitive dep.
+    local freeze_output=""
+    if [ -n "${UV:-}" ] && "$UV" pip list --format=freeze &>/dev/null 2>&1; then
+        freeze_output=$("$UV" pip list --format=freeze 2>/dev/null || echo "unavailable")
+    elif [ -x "$PYTHON" ]; then
+        freeze_output=$("$PYTHON" -m pip list --format=freeze 2>/dev/null || echo "unavailable")
+    fi
+
     $PYTHON -c "
 import json, torch, transformers, spacy, sys, platform, subprocess, os
 import importlib.metadata as meta
@@ -59,6 +83,19 @@ def _get_pkgs(pkgs):
         except meta.PackageNotFoundError: out[p]='not installed'
     return out
 
+def _parse_freeze(freeze_str):
+    # Convert pip freeze output into {package: version} dict for structured storage
+    result = {}
+    for line in freeze_str.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'): continue
+        if '==' in line:
+            pkg, _, ver = line.partition('==')
+            result[pkg.strip()] = ver.strip()
+        else:
+            result[line] = 'unknown-format'
+    return result
+
 gpus=[]
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
@@ -68,14 +105,27 @@ if torch.cuda.is_available():
                      'compute_capability':list(torch.cuda.get_device_capability(i))})
 
 nlp=spacy.load('${SPACY_MODEL}')
+freeze_raw = '''${freeze_output}'''
+freeze_parsed = _parse_freeze(freeze_raw) if freeze_raw not in ('unavailable', '') else {}
+
 data={
     'timestamp':      datetime.utcnow().isoformat()+'Z',
+    # --- Repo provenance ---
     'git_sha':        '${git_sha}',
     'git_branch':     '${git_branch}',
     'git_dirty_files': int('${git_dirty}') if '${git_dirty}'.isdigit() else -1,
     'uv_lock_sha256': '${uvlock_sha256}',
+    # --- Tool versions ---
+    'uv_version':     '${uv_version}',
+    # --- Cluster / host provenance ---
+    'hostname':       '${host_name}',
+    'slurm_job_id':   '${slurm_job_id}',
+    'slurm_job_name': '${slurm_job_name}',
+    'slurm_nodelist': '${slurm_nodelist}',
+    # --- Python ---
     'python':         sys.version,
     'platform':       platform.platform(),
+    # --- Reproducibility env vars ---
     'repro_env':{
         'PYTHONHASHSEED':         os.environ.get('PYTHONHASHSEED','NOT SET'),
         'CUBLAS_WORKSPACE_CONFIG':os.environ.get('CUBLAS_WORKSPACE_CONFIG','NOT SET'),
@@ -89,6 +139,7 @@ data={
     },
     'parity_module':'src/repro.py',
     'parity_usage': 'from src.repro import configure; configure()',
+    # --- Hardware targets ---
     'hardware_target':{
         'gpu_name':          '${TARGET_GPU_NAME}',
         'gpu_count':          ${TARGET_GPU_COUNT},
@@ -99,6 +150,7 @@ data={
         'python_version':    '${TARGET_PYTHON_VERSION}',
         'min_disk_gb':        ${TARGET_MIN_DISK_GB},
     },
+    # --- Detected hardware ---
     'hardware_detected':{
         'gpu_name':          '${DETECTED_GPU_NAME}',
         'gpu_count':         '${DETECTED_GPU_COUNT}',
@@ -107,6 +159,7 @@ data={
         'cudnn':             '${DETECTED_CUDNN}',
         'hardware_match':    '${HARDWARE_MATCH}',
     },
+    # --- Torch & CUDA (actual) ---
     'torch':              torch.__version__,
     'torch_cuda_runtime': torch.version.cuda,
     'driver_cuda':        _get_driver_cuda(),
@@ -116,17 +169,22 @@ data={
     'cuda_available':     torch.cuda.is_available(),
     'gpu_count':          torch.cuda.device_count() if torch.cuda.is_available() else 0,
     'gpus':               gpus,
+    # --- NLP / RAG libraries ---
     'transformers':       transformers.__version__,
     'spacy':              spacy.__version__,
     'spacy_model':        '${SPACY_MODEL}',
     'spacy_model_version':nlp.meta.get('version'),
     'spacy_model_sha256': '${SPACY_MODEL_SHA256}',
     'faiss':              _get_faiss(),
+    # --- Core package versions (quick lookup subset) ---
     'installed_packages': _get_pkgs([
         'torch','transformers','datasets','faiss-cpu','spacy',
         'scikit-learn','numpy','pandas','langchain','gensim',
         'sentence-transformers','networkx','pytest','mypy','hypothesis',
     ]),
+    # --- Full freeze snapshot (all transitive deps — for exact reproduction) ---
+    'freeze_snapshot': freeze_parsed,
+    'freeze_snapshot_raw': freeze_raw,
 }
 print(json.dumps(data))
 "
@@ -153,7 +211,9 @@ import json,sys
 data=json.load(sys.stdin)
 with open('logs/environment_manifest.json','w') as f:
     json.dump(data,f,indent=2)
-print('  \033[0;32m✓\033[0m manifest → logs/environment_manifest.json')
+pkg_count = len(data.get('freeze_snapshot', {}))
+print(f'  \033[0;32m✓\033[0m manifest → logs/environment_manifest.json')
+print(f'    freeze snapshot: {pkg_count} packages')
 "
 }
 
@@ -163,7 +223,8 @@ write_manifest() {
     if _is_dry_run; then
         local git_sha; git_sha=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
         _msg_dry_run "write environment manifest" "${PROJECT_ROOT}/logs/environment_manifest.json"
-        _msg_info "Would record: git=${git_sha} | hardware_match=${HARDWARE_MATCH} | detected=${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
+        _msg_info "Would record: git=${git_sha} | host=$(hostname 2>/dev/null) | slurm_job=${SLURM_JOB_ID:-none}"
+        _msg_info "Would record: hardware_match=${HARDWARE_MATCH} | detected=${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
         step_end "write_manifest" "DRY"; return
     fi
 
@@ -182,6 +243,7 @@ write_manifest() {
     manifest_json=$(_collect_manifest_data "$git_sha" "$git_branch" "$git_dirty" "$uvlock_sha256")
     _write_manifest_file "$manifest_json"
     _msg_info "git: ${git_sha} | branch: ${git_branch} | dirty: ${git_dirty}"
+    _msg_info "uv: ${UV:-uv} | host: $(hostname 2>/dev/null) | slurm_job: ${SLURM_JOB_ID:-none}"
     _msg_info "uv.lock sha256: ${uvlock_sha256}"
     _msg_info "hardware_match: ${HARDWARE_MATCH} | detected: ${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
 }
