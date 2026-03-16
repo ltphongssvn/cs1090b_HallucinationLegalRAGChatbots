@@ -1,38 +1,32 @@
 #!/usr/bin/env bats
 # tests/shell/test_lib.bats
-# Path: cs1090b_HallucinationLegalRAGChatbots/tests/shell/test_lib.bats
-# Unit tests for scripts/lib.sh — guards, messaging, dry-run, step framework.
+# Unit tests for scripts/lib.sh
 
 load helpers
 
 # ===========================================================================
 # _is_dry_run
 # ===========================================================================
-
 @test "_is_dry_run returns 0 (true) when DRY_RUN=1" {
-    load_lib
-    DRY_RUN=1
+    load_lib; DRY_RUN=1
     run _is_dry_run
     [ "$status" -eq 0 ]
 }
 
 @test "_is_dry_run returns 1 (false) when DRY_RUN=0" {
-    load_lib
-    DRY_RUN=0
+    load_lib; DRY_RUN=0
     run _is_dry_run
     [ "$status" -eq 1 ]
 }
 
 @test "_is_dry_run returns 1 (false) when DRY_RUN is unset" {
-    load_lib
-    unset DRY_RUN
+    load_lib; unset DRY_RUN
     run _is_dry_run
     [ "$status" -eq 1 ]
 }
 
 @test "_is_dry_run returns 1 (false) when DRY_RUN is empty string" {
-    load_lib
-    DRY_RUN=""
+    load_lib; DRY_RUN=""
     run _is_dry_run
     [ "$status" -eq 1 ]
 }
@@ -40,7 +34,6 @@ load helpers
 # ===========================================================================
 # _msg_dry_run
 # ===========================================================================
-
 @test "_msg_dry_run outputs DRY RUN prefix and both arguments" {
     load_lib
     run _msg_dry_run "write file" "/tmp/test.txt"
@@ -53,7 +46,6 @@ load helpers
 # ===========================================================================
 # _msg_ok / _msg_info / _msg_skip
 # ===========================================================================
-
 @test "_msg_ok outputs checkmark and message" {
     load_lib
     run _msg_ok "everything is fine"
@@ -61,11 +53,41 @@ load helpers
     assert_contains "$output" "everything is fine"
 }
 
-@test "_msg_info outputs info symbol and message" {
+@test "_msg_info outputs info symbol and message at LOG_LEVEL=2" {
+    # _msg_info is silent at LOG_LEVEL<2 by design.
+    # Tests must explicitly set LOG_LEVEL=2 to assert on _msg_info output.
     load_lib
-    run _msg_info "just so you know"
+    LOG_LEVEL=2
+    run bash -c "
+        source '$PROJECT_ROOT/scripts/lib.sh'
+        LOG_LEVEL=2
+        _msg_info 'just so you know'
+    "
     [ "$status" -eq 0 ]
     assert_contains "$output" "just so you know"
+}
+
+@test "_msg_info is silent at LOG_LEVEL=1 (normal mode)" {
+    load_lib
+    LOG_LEVEL=1
+    run bash -c "
+        source '$PROJECT_ROOT/scripts/lib.sh'
+        LOG_LEVEL=1
+        _msg_info 'should be silent'
+    "
+    [ "$status" -eq 0 ]
+    assert_not_contains "$output" "should be silent"
+}
+
+@test "_msg_info is silent at LOG_LEVEL=0 (quiet mode)" {
+    load_lib
+    run bash -c "
+        source '$PROJECT_ROOT/scripts/lib.sh'
+        LOG_LEVEL=0
+        _msg_info 'totally silent'
+    "
+    [ "$status" -eq 0 ]
+    assert_not_contains "$output" "totally silent"
 }
 
 @test "_msg_skip outputs skip symbol and message" {
@@ -78,7 +100,6 @@ load helpers
 # ===========================================================================
 # _msg_error
 # ===========================================================================
-
 @test "_msg_error outputs all four structured fields" {
     load_lib
     run _msg_error "Test topic" "what happened" "why it matters" "how to fix"
@@ -97,10 +118,19 @@ load helpers
     assert_contains "$output" "Fix:"
 }
 
+@test "_msg_error always prints at LOG_LEVEL=0 (quiet mode)" {
+    run bash -c "
+        source '$PROJECT_ROOT/scripts/lib.sh'
+        LOG_LEVEL=0
+        _msg_error 'topic' 'what' 'why' 'fix'
+    "
+    [ "$status" -eq 0 ]
+    assert_contains "$output" "topic"
+}
+
 # ===========================================================================
 # _msg_warn
 # ===========================================================================
-
 @test "_msg_warn action-required outputs ACTION REQUIRED tag" {
     load_lib
     run _msg_warn "Topic" "what" "action-required" "do this"
@@ -117,10 +147,19 @@ load helpers
     assert_contains "$output" "informational"
 }
 
+@test "_msg_warn is silent at LOG_LEVEL=0" {
+    run bash -c "
+        source '$PROJECT_ROOT/scripts/lib.sh'
+        LOG_LEVEL=0
+        _msg_warn 'topic' 'what' 'informational' 'action'
+    "
+    [ "$status" -eq 0 ]
+    assert_not_contains "$output" "topic"
+}
+
 # ===========================================================================
 # _require_project_root
 # ===========================================================================
-
 @test "_require_project_root exits 1 when pyproject.toml missing" {
     load_lib
     local tmpdir; tmpdir=$(mktemp -d)
@@ -144,16 +183,13 @@ load helpers
 # ===========================================================================
 # _require_uv
 # ===========================================================================
-
 @test "_require_uv auto-resolves when uv is on PATH" {
-    load_lib
-    UV=""
-    # uv is on PATH in the venv environment — should resolve successfully
+    load_lib; UV=""
     if command -v uv &>/dev/null || [ -x "$HOME/.local/bin/uv" ]; then
         run _require_uv
         [ "$status" -eq 0 ]
     else
-        skip "uv not installed — cannot test auto-resolve"
+        skip "uv not installed"
     fi
 }
 
@@ -168,12 +204,10 @@ load helpers
 # ===========================================================================
 # _require_repro_env
 # ===========================================================================
-
 @test "_require_repro_env exits 1 when .env missing" {
     load_lib
     local tmpdir; tmpdir=$(mktemp -d)
-    PROJECT_ROOT="$tmpdir"
-    RANDOM_SEED=0
+    PROJECT_ROOT="$tmpdir"; RANDOM_SEED=0
     run _require_repro_env
     [ "$status" -eq 1 ]
     assert_contains "$output" ".env not found"
@@ -196,8 +230,7 @@ load helpers
     load_lib
     local tmpdir; tmpdir=$(mktemp -d)
     PROJECT_ROOT="$tmpdir"
-    touch "$tmpdir/.env"
-    RANDOM_SEED=0
+    touch "$tmpdir/.env"; RANDOM_SEED=0
     run _require_repro_env
     [ "$status" -eq 0 ]
     rm -rf "$tmpdir"
@@ -205,44 +238,61 @@ load helpers
 
 # ===========================================================================
 # step_end summary recording
+# NOTE: bats `run` executes in a subshell — bash arrays do not cross subshell
+# boundaries. Call step_end directly (without `run`) and inspect arrays inline.
 # ===========================================================================
-
-@test "step_end PASS records step in SUMMARY_STEPS" {
+@test "step_end PASS records step name in SUMMARY_STEPS" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
-    _step_start_time=$(date +%s)
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     step_end "my_step" "PASS"
     [ "${SUMMARY_STEPS[0]}" = "my_step" ]
 }
 
-@test "step_end SKIP records step with SKIP status" {
+@test "step_end SKIP records SKIP in SUMMARY_STATUS" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
-    _step_start_time=$(date +%s)
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     step_end "skipped_step" "SKIP"
     [ "${SUMMARY_STEPS[0]}" = "skipped_step" ]
     assert_contains "${SUMMARY_STATUS[0]}" "SKIP"
 }
 
-@test "step_end DRY records step with DRY status" {
+@test "step_end DRY records DRY in SUMMARY_STATUS" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
-    _step_start_time=$(date +%s)
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     step_end "dry_step" "DRY"
     assert_contains "${SUMMARY_STATUS[0]}" "DRY"
+}
+
+@test "step_end WARN records WARN in SUMMARY_STATUS" {
+    load_lib
+    SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
+    step_end "warn_step" "WARN"
+    assert_contains "${SUMMARY_STATUS[0]}" "WARN"
+}
+
+@test "step_end records duration in SUMMARY_DURATION" {
+    load_lib
+    SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
+    step_end "timed_step" "PASS"
+    [ -n "${SUMMARY_DURATION[0]}" ]
+    assert_contains "${SUMMARY_DURATION[0]}" "s"
 }
 
 # ===========================================================================
 # run_step with STEP= single-step mode
 # ===========================================================================
-
 @test "run_step skips function when STEP is set to different name" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     STEP="other_step"
     my_fn() { echo "I should not run"; }
     run_step my_fn
-    # Function should NOT have executed — status entry should be SKIP
     assert_contains "${SUMMARY_STATUS[0]:-}" "SKIP"
     unset STEP
 }
@@ -250,8 +300,8 @@ load helpers
 @test "run_step executes function when STEP matches function name" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     STEP="my_fn"
-    _step_start_time=$(date +%s)
     my_fn() { echo "I ran"; }
     run run_step my_fn
     assert_contains "$output" "I ran"
@@ -261,9 +311,8 @@ load helpers
 @test "run_step executes function when STEP is unset" {
     load_lib
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
+    SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
     unset STEP
-    _step_start_time=$(date +%s)
-    SETUP_START_TIME=$(date +%s)
     my_fn() { echo "executed"; }
     run run_step my_fn
     assert_contains "$output" "executed"

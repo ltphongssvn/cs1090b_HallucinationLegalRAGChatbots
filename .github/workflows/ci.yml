@@ -1,17 +1,3 @@
-# .github/workflows/ci.yml
-# Path: cs1090b_HallucinationLegalRAGChatbots/.github/workflows/ci.yml
-# CI pipeline — runs on every push and PR to main/develop.
-#
-# Job map:
-#   lint          — ruff + mypy (no venv needed beyond uv)
-#   shell-tests   — bats-core tests for all scripts/*.sh helpers
-#   unit-tests    — pytest -m unit (CPU-only, no GPU)
-#   cpu-smoke     — CPU inference forward pass + vector store integrity
-#   security      — pip-audit vulnerability scan + SBOM generation
-#
-# GPU jobs are NOT run in CI — hardware is cluster-only.
-# Use SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 for all setup calls.
-
 name: CI
 
 on:
@@ -28,9 +14,6 @@ env:
   UV_CACHE_DIR: ~/.cache/uv
 
 jobs:
-  # ===========================================================================
-  # Job 1: Lint + typecheck (fast gate — fails fast before expensive jobs)
-  # ===========================================================================
   lint:
     name: Lint & Typecheck
     runs-on: ubuntu-latest
@@ -42,7 +25,8 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # Correct glob — uv.lock is at repo root
+          cache-dependency-glob: "**/uv.lock"
 
       - name: Set up Python
         run: uv python install 3.11.9
@@ -59,29 +43,29 @@ jobs:
       - name: mypy
         run: uv run mypy src/
 
-  # ===========================================================================
-  # Job 2: Shell tests (bats-core) — validates all scripts/*.sh helpers
-  # ===========================================================================
   shell-tests:
     name: Shell Tests (bats-core)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
       - name: Install bats-core
         run: |
           git clone https://github.com/bats-core/bats-core.git /tmp/bats-core
           sudo /tmp/bats-core/install.sh /usr/local
 
-      - name: Install uv (needed by some shell test stubs)
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
       - name: Verify bats version
         run: bats --version
 
       - name: Run shell helper tests
+        # LOG_LEVEL=2 so _msg_info produces output (tests assert on it)
+        env:
+          LOG_LEVEL: "2"
         run: |
           bats --tap \
             tests/shell/test_lib.bats \
@@ -89,15 +73,11 @@ jobs:
             tests/shell/test_preflight.bats \
             tests/shell/test_failure_paths.bats
 
-      - name: Run artifact verification tests (skip-guard active — no setup run)
+      - name: Run artifact verification tests (skip-guard active)
+        env:
+          LOG_LEVEL: "2"
         run: bats --tap tests/shell/test_artifact_verification.bats
-        # All tests in this file use _skip_if_no_venv / _skip_if_no_manifest
-        # guards — they will SKIP (not fail) when setup.sh has not been run.
-        continue-on-error: false
 
-  # ===========================================================================
-  # Job 3: Python unit tests (CPU-only, no GPU required)
-  # ===========================================================================
   unit-tests:
     name: Python Unit Tests
     runs-on: ubuntu-latest
@@ -110,12 +90,12 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "**/uv.lock"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
 
-      - name: Install dependencies (CPU — torch CPU wheel in CI)
+      - name: Install dependencies
         run: uv sync --frozen --dev
 
       - name: Run unit tests
@@ -133,9 +113,6 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-  # ===========================================================================
-  # Job 4: CPU smoke tests — real forward pass, no GPU
-  # ===========================================================================
   cpu-smoke:
     name: CPU Inference Smoke Tests
     runs-on: ubuntu-latest
@@ -148,7 +125,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "**/uv.lock"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
@@ -157,8 +134,7 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Bootstrap environment (CPU-only, no downloads, no Jupyter)
-        run: |
-          SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 LOG_LEVEL=1 bash setup.sh
+        run: SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 LOG_LEVEL=1 bash setup.sh
         env:
           PYTHONHASHSEED: "0"
           CUBLAS_WORKSPACE_CONFIG: ":4096:8"
@@ -174,11 +150,10 @@ jobs:
           ids = tok('The court ruled in favor of the plaintiff.', return_tensors='pt')
           assert ids['input_ids'].shape[1] > 0
 
-          vocab_size = tok.vocab_size
           class TinyClassifier(nn.Module):
               def __init__(self):
                   super().__init__()
-                  self.embed = nn.Embedding(vocab_size, 32)
+                  self.embed = nn.Embedding(tok.vocab_size, 32)
                   self.fc = nn.Linear(32, 2)
               def forward(self, x):
                   return self.fc(self.embed(x).mean(dim=1))
@@ -196,25 +171,20 @@ jobs:
         run: |
           uv run python -c "
           import numpy as np, faiss
-
-          dim = 768; n = 1000; k = 5
-          quantizer = faiss.IndexFlatL2(dim)
-          index = faiss.IndexIVFFlat(quantizer, dim, 32, faiss.METRIC_L2)
-          vecs = np.random.randn(n, dim).astype('float32')
+          dim=768; n=1000; k=5
+          quantizer=faiss.IndexFlatL2(dim)
+          index=faiss.IndexIVFFlat(quantizer,dim,32,faiss.METRIC_L2)
+          vecs=np.random.randn(n,dim).astype('float32')
           faiss.normalize_L2(vecs)
-          index.train(vecs)
-          index.add(vecs)
-          assert index.ntotal == n
-          index.nprobe = 4
-          D, I = index.search(vecs[:10], k)
-          self_hits = sum(1 for i in range(10) if i in I[i])
-          assert self_hits >= 7, f'only {self_hits}/10 self-queries in top-{k}'
+          index.train(vecs); index.add(vecs)
+          assert index.ntotal==n
+          index.nprobe=4
+          D,I=index.search(vecs[:10],k)
+          self_hits=sum(1 for i in range(10) if i in I[i])
+          assert self_hits>=7, f'only {self_hits}/10 self-queries in top-{k}'
           print(f'IVF vector store ok: {self_hits}/10 self-queries in top-{k}')
           "
 
-  # ===========================================================================
-  # Job 5: Security audit
-  # ===========================================================================
   security:
     name: Security Audit (pip-audit + SBOM)
     runs-on: ubuntu-latest
@@ -227,7 +197,7 @@ jobs:
         with:
           version: "latest"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "**/uv.lock"
 
       - name: Set up Python 3.11.9
         run: uv python install 3.11.9
@@ -237,12 +207,12 @@ jobs:
 
       - name: Run pip-audit vulnerability scan
         run: |
+          mkdir -p logs
           uv run pip-audit \
             --format=json \
             --progress-spinner=off \
             --output=logs/pip-audit.json \
             2>&1 || true
-          mkdir -p logs
           uv run python -c "
           import json, sys, pathlib
           p = pathlib.Path('logs/pip-audit.json')
