@@ -11,7 +11,6 @@ dependencies = [
   "numpy>=1.24.0,<2.0.0",
   "torch>=2.0",
   "transformers>=4.35,<4.41",
-  "tokenizers>=0.19.2",
   "sentence-transformers>=2.2",
   "accelerate>=0.20",
   "peft>=0.7",
@@ -60,3 +59,7 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
+
+[tool.uv]
+# Prefer binary wheels — avoids broken sdist builds (e.g. tokenizers 0.19.1)
+no-build-package = ["tokenizers"]
