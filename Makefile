@@ -13,10 +13,10 @@ LOG_DIR    := logs
 REPRO_LOG  := $(LOG_DIR)/repro_$(shell date +%Y%m%d_%H%M%S).log
 BATS       := $(shell command -v bats 2>/dev/null || echo $(TESTS_DIR)/shell/bats-core/bin/bats)
 
-.PHONY: setup cpu test test-all test-unit test-contract test-integration \
-        test-regression test-gpu test-cov test-shell test-all-with-shell \
-        lint fmt format typecheck check ci repro clean clean-all \
-        dvc-init install-hooks help
+.PHONY: setup cpu dry-run test test-all test-unit test-contract test-integration \
+        test-regression test-gpu test-cov test-shell test-shell-artifacts \
+        test-all-with-shell lint fmt format typecheck check ci repro \
+        clean clean-all dvc-init install-hooks help
 
 setup:
 	bash setup.sh
@@ -46,16 +46,36 @@ test-shell:
 	$(BATS) --tap \
 		$(TESTS_DIR)/shell/test_lib.bats \
 		$(TESTS_DIR)/shell/test_bootstrap_env.bats \
-		$(TESTS_DIR)/shell/test_preflight.bats
+		$(TESTS_DIR)/shell/test_preflight.bats \
+		$(TESTS_DIR)/shell/test_failure_paths.bats
 
-# Parametric entry point: make test MARKER=contract
+# Artifact-verification tests (require setup.sh to have been run first)
+test-shell-artifacts:
+	@if [ ! -x "$(BATS)" ]; then \
+		echo "ERROR: bats not found"; exit 1; \
+	fi
+	@echo "Running artifact verification tests..."
+	$(BATS) --tap $(TESTS_DIR)/shell/test_artifact_verification.bats
+
+# All shell tests including artifact verification
+test-shell-all:
+	@if [ ! -x "$(BATS)" ]; then \
+		echo "ERROR: bats not found"; exit 1; \
+	fi
+	$(BATS) --tap \
+		$(TESTS_DIR)/shell/test_lib.bats \
+		$(TESTS_DIR)/shell/test_bootstrap_env.bats \
+		$(TESTS_DIR)/shell/test_preflight.bats \
+		$(TESTS_DIR)/shell/test_failure_paths.bats \
+		$(TESTS_DIR)/shell/test_artifact_verification.bats
+
 test: setup
 	$(PYTEST) -m "$(MARKER)"
 
 test-all: setup
 	$(PYTEST) -n auto
 
-test-all-with-shell: test-shell test-all
+test-all-with-shell: test-shell-all test-all
 
 test-unit:
 	$(MAKE) test MARKER=unit
@@ -131,13 +151,15 @@ help:
 	@echo "  Tests:"
 	@echo "    test               — run tests matching MARKER (default: 'not gpu')"
 	@echo "    test-all           — full Python suite in parallel"
-	@echo "    test-shell         — shell script tests via bats-core"
-	@echo "    test-all-with-shell— shell + full Python suite"
-	@echo "    test-unit          — shortcut: MARKER=unit"
-	@echo "    test-contract      — shortcut: MARKER=contract"
-	@echo "    test-integration   — shortcut: MARKER=integration"
-	@echo "    test-regression    — shortcut: MARKER=regression"
-	@echo "    test-gpu           — shortcut: MARKER=gpu"
+	@echo "    test-shell         — shell helper tests via bats-core (no artifacts)"
+	@echo "    test-shell-artifacts — verify .venv/manifest/kernelspec contents"
+	@echo "    test-shell-all     — all shell tests including artifact verification"
+	@echo "    test-all-with-shell— shell-all + full Python suite"
+	@echo "    test-unit          — MARKER=unit"
+	@echo "    test-contract      — MARKER=contract"
+	@echo "    test-integration   — MARKER=integration"
+	@echo "    test-regression    — MARKER=regression"
+	@echo "    test-gpu           — MARKER=gpu"
 	@echo "    test-cov           — parallel tests with HTML+XML coverage"
 	@echo ""
 	@echo "  Quality:"
@@ -151,4 +173,4 @@ help:
 	@echo "    repro              — clean-all + setup + test-all with timestamped log"
 	@echo "    clean              — remove caches (preserves .venv)"
 	@echo "    clean-all          — remove caches + .venv"
-	@echo "    dvc-init           — initialize DVC tracking for data dir"
+	@echo "    dvc-init           — initialize DVC for data dir"
