@@ -37,7 +37,8 @@ def get_driver_version() -> str:
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return r.stdout.strip().splitlines()[0] if r.stdout.strip() else "unknown"
     except FileNotFoundError:
@@ -47,6 +48,7 @@ def get_driver_version() -> str:
 def get_faiss_version() -> str:
     try:
         import faiss  # type: ignore[import]
+
         return getattr(faiss, "__version__", "installed — no version attr")
     except ImportError:
         return "not installed"
@@ -113,16 +115,19 @@ def get_cpu_info() -> dict[str, object]:
 
 def get_gpu_list() -> list[dict[str, object]]:
     import torch  # type: ignore[import]
+
     gpus: list[dict[str, object]] = []
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            gpus.append({
-                "index": i,
-                "name": props.name,
-                "vram_gb": round(props.total_memory / 1e9, 2),
-                "compute_capability": list(torch.cuda.get_device_capability(i)),
-            })
+            gpus.append(
+                {
+                    "index": i,
+                    "name": props.name,
+                    "vram_gb": round(props.total_memory / 1e9, 2),
+                    "compute_capability": list(torch.cuda.get_device_capability(i)),
+                }
+            )
     return gpus
 
 
@@ -201,13 +206,31 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "spacy_model_version": nlp.meta.get("version"),
         "spacy_model_sha256": args.spacy_model_sha256,
         "faiss": get_faiss_version(),
-        "installed_packages": get_installed_versions([
-            "torch", "transformers", "datasets", "faiss-cpu", "spacy",
-            "scikit-learn", "numpy", "pandas", "langchain", "gensim",
-            "sentence-transformers", "networkx",
-            "accelerate", "peft", "evaluate", "ragas", "rouge-score", "wandb",
-            "pytest", "mypy", "hypothesis",
-        ]),
+        "installed_packages": get_installed_versions(
+            [
+                "torch",
+                "transformers",
+                "datasets",
+                "faiss-cpu",
+                "spacy",
+                "scikit-learn",
+                "numpy",
+                "pandas",
+                "langchain",
+                "gensim",
+                "sentence-transformers",
+                "networkx",
+                "accelerate",
+                "peft",
+                "evaluate",
+                "ragas",
+                "rouge-score",
+                "wandb",
+                "pytest",
+                "mypy",
+                "hypothesis",
+            ]
+        ),
         "freeze_snapshot": freeze_parsed,
         "freeze_snapshot_raw": args.freeze,
     }
@@ -215,33 +238,33 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect environment manifest and print JSON.")
-    parser.add_argument("--git-sha",               required=True)
-    parser.add_argument("--git-branch",            required=True)
-    parser.add_argument("--git-dirty",             required=True)
-    parser.add_argument("--uvlock-sha256",         required=True)
-    parser.add_argument("--uv-version",            default="unknown")
-    parser.add_argument("--hostname",              default="unknown")
-    parser.add_argument("--slurm-job-id",          default="none")
-    parser.add_argument("--slurm-job-name",        default="none")
-    parser.add_argument("--slurm-nodelist",        default="none")
-    parser.add_argument("--target-gpu-name",       required=True)
-    parser.add_argument("--target-gpu-count",      required=True)
-    parser.add_argument("--target-cap-major",      required=True)
-    parser.add_argument("--target-cap-minor",      required=True)
-    parser.add_argument("--target-vram-gb-min",    required=True)
-    parser.add_argument("--target-torch-cuda",     required=True)
-    parser.add_argument("--target-driver-cuda",    required=True)
+    parser.add_argument("--git-sha", required=True)
+    parser.add_argument("--git-branch", required=True)
+    parser.add_argument("--git-dirty", required=True)
+    parser.add_argument("--uvlock-sha256", required=True)
+    parser.add_argument("--uv-version", default="unknown")
+    parser.add_argument("--hostname", default="unknown")
+    parser.add_argument("--slurm-job-id", default="none")
+    parser.add_argument("--slurm-job-name", default="none")
+    parser.add_argument("--slurm-nodelist", default="none")
+    parser.add_argument("--target-gpu-name", required=True)
+    parser.add_argument("--target-gpu-count", required=True)
+    parser.add_argument("--target-cap-major", required=True)
+    parser.add_argument("--target-cap-minor", required=True)
+    parser.add_argument("--target-vram-gb-min", required=True)
+    parser.add_argument("--target-torch-cuda", required=True)
+    parser.add_argument("--target-driver-cuda", required=True)
     parser.add_argument("--target-python-version", required=True)
-    parser.add_argument("--target-min-disk-gb",    required=True)
-    parser.add_argument("--detected-gpu-name",     required=True)
-    parser.add_argument("--detected-gpu-count",    required=True)
-    parser.add_argument("--detected-torch-cuda",   required=True)
-    parser.add_argument("--detected-driver-cuda",  required=True)
-    parser.add_argument("--detected-cudnn",        required=True)
-    parser.add_argument("--hardware-match",        required=True)
-    parser.add_argument("--spacy-model",           required=True)
-    parser.add_argument("--spacy-model-sha256",    required=True)
-    parser.add_argument("--freeze",                default="unavailable")
+    parser.add_argument("--target-min-disk-gb", required=True)
+    parser.add_argument("--detected-gpu-name", required=True)
+    parser.add_argument("--detected-gpu-count", required=True)
+    parser.add_argument("--detected-torch-cuda", required=True)
+    parser.add_argument("--detected-driver-cuda", required=True)
+    parser.add_argument("--detected-cudnn", required=True)
+    parser.add_argument("--hardware-match", required=True)
+    parser.add_argument("--spacy-model", required=True)
+    parser.add_argument("--spacy-model-sha256", required=True)
+    parser.add_argument("--freeze", default="unavailable")
 
     args = parser.parse_args()
     data = collect(args)

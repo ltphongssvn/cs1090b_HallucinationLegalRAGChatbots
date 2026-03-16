@@ -8,19 +8,19 @@ from typing import Callable
 from packaging.version import Version  # type: ignore[import]
 
 REQUIRED: list[tuple[str, str, str, str | None]] = [
-    ("torch",        "torch",        "2.0.0",  "2.0.1+cu117"),
+    ("torch", "torch", "2.0.0", "2.0.1+cu117"),
     ("transformers", "transformers", "4.35.0", None),
-    ("datasets",     "datasets",     "2.16.0", None),
-    ("faiss-cpu",    "faiss",        "1.7.0",  None),
-    ("spacy",        "spacy",        "3.7.0",  None),
-    ("scikit-learn", "sklearn",      "1.5.0",  None),
-    ("numpy",        "numpy",        "1.24.0", None),
-    ("pandas",       "pandas",       "2.2.0",  None),
-    ("accelerate",   "accelerate",   "0.20.0", None),
-    ("peft",         "peft",         "0.7.0",  None),
-    ("evaluate",     "evaluate",     "0.4.0",  None),
-    ("ragas",        "ragas",        "0.1.0",  None),
-    ("wandb",        "wandb",        "0.16.0", None),
+    ("datasets", "datasets", "2.16.0", None),
+    ("faiss-cpu", "faiss", "1.7.0", None),
+    ("spacy", "spacy", "3.7.0", None),
+    ("scikit-learn", "sklearn", "1.5.0", None),
+    ("numpy", "numpy", "1.24.0", None),
+    ("pandas", "pandas", "2.2.0", None),
+    ("accelerate", "accelerate", "0.20.0", None),
+    ("peft", "peft", "0.7.0", None),
+    ("evaluate", "evaluate", "0.4.0", None),
+    ("ragas", "ragas", "0.1.0", None),
+    ("wandb", "wandb", "0.16.0", None),
 ]
 
 FIX_HINT = "rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)"
@@ -28,6 +28,7 @@ FIX_HINT = "rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)"
 
 def _check_torch(mod: object) -> str:
     import torch  # type: ignore[import]
+
     t = torch.tensor([1.0, 2.0, 3.0])
     assert torch.allclose(t.mean(), torch.tensor(2.0))
     return f"tensor mean=2.0 ok, version={torch.__version__}"
@@ -35,18 +36,21 @@ def _check_torch(mod: object) -> str:
 
 def _check_transformers(mod: object) -> str:
     import transformers  # type: ignore[import]
+
     return f"version={transformers.__version__}"
 
 
 def _check_datasets(mod: object) -> str:
     import datasets  # type: ignore[import]
     import pyarrow  # type: ignore[import]
+
     return f"version={datasets.__version__}, arrow={pyarrow.__version__}"
 
 
 def _check_faiss(mod: object) -> str:
     import faiss  # type: ignore[import]
     import numpy as np
+
     idx = faiss.IndexFlatL2(4)
     vecs = np.random.rand(5, 4).astype("float32")
     idx.add(vecs)
@@ -58,6 +62,7 @@ def _check_faiss(mod: object) -> str:
 
 def _check_spacy(mod: object) -> str:
     import spacy  # type: ignore[import]
+
     nlp = spacy.blank("en")
     assert nlp.vocab
     return f"version={spacy.__version__}, blank vocab ok"
@@ -66,6 +71,7 @@ def _check_spacy(mod: object) -> str:
 def _check_sklearn(mod: object) -> str:
     import numpy as np
     import sklearn  # type: ignore[import]
+
     arr = np.array([1, 2, 3])
     assert arr.sum() == 6
     return f"version={sklearn.__version__}, numpy array ok"
@@ -73,6 +79,7 @@ def _check_sklearn(mod: object) -> str:
 
 def _check_numpy(mod: object) -> str:
     import numpy as np
+
     arr = np.array([1, 2, 3])
     assert arr.sum() == 6
     return f"version={np.__version__}, sum ok"
@@ -80,6 +87,7 @@ def _check_numpy(mod: object) -> str:
 
 def _check_pandas(mod: object) -> str:
     import pandas as pd
+
     df = pd.DataFrame({"a": [1, 2, 3]})
     assert len(df) == 3
     return f"version={pd.__version__}, DataFrame ok"
@@ -87,6 +95,7 @@ def _check_pandas(mod: object) -> str:
 
 def _check_accelerate(mod: object) -> str:
     import accelerate  # type: ignore[import]
+
     # Confirm Accelerator class is accessible — core class for multi-GPU training
     assert hasattr(accelerate, "Accelerator"), "accelerate.Accelerator not found"
     return f"version={accelerate.__version__}, Accelerator accessible"
@@ -95,6 +104,7 @@ def _check_accelerate(mod: object) -> str:
 def _check_peft(mod: object) -> str:
     import peft  # type: ignore[import]
     from peft import LoraConfig, TaskType  # type: ignore[import]
+
     cfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=8, lora_alpha=16)
     assert cfg.r == 8
     return f"version={peft.__version__}, LoraConfig(r=8) ok"
@@ -102,35 +112,38 @@ def _check_peft(mod: object) -> str:
 
 def _check_evaluate(mod: object) -> str:
     import evaluate  # type: ignore[import]
+
     return f"version={evaluate.__version__}, module ok"
 
 
 def _check_ragas(mod: object) -> str:
     import ragas  # type: ignore[import]
+
     return f"version={ragas.__version__}, module ok"
 
 
 def _check_wandb(mod: object) -> str:
     import wandb  # type: ignore[import]
+
     assert hasattr(wandb, "init"), "wandb.init not found"
     assert hasattr(wandb, "log"), "wandb.log not found"
     return f"version={wandb.__version__}, init/log API accessible"
 
 
 FUNCTIONAL_CHECKS: list[tuple[str, Callable[[object], str]]] = [
-    ("torch",        _check_torch),
+    ("torch", _check_torch),
     ("transformers", _check_transformers),
-    ("datasets",     _check_datasets),
-    ("faiss",        _check_faiss),
-    ("spacy",        _check_spacy),
-    ("sklearn",      _check_sklearn),
-    ("numpy",        _check_numpy),
-    ("pandas",       _check_pandas),
-    ("accelerate",   _check_accelerate),
-    ("peft",         _check_peft),
-    ("evaluate",     _check_evaluate),
-    ("ragas",        _check_ragas),
-    ("wandb",        _check_wandb),
+    ("datasets", _check_datasets),
+    ("faiss", _check_faiss),
+    ("spacy", _check_spacy),
+    ("sklearn", _check_sklearn),
+    ("numpy", _check_numpy),
+    ("pandas", _check_pandas),
+    ("accelerate", _check_accelerate),
+    ("peft", _check_peft),
+    ("evaluate", _check_evaluate),
+    ("ragas", _check_ragas),
+    ("wandb", _check_wandb),
 ]
 
 

@@ -14,20 +14,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from packaging.version import Version
 
 REQUIRED_DEPS: Dict[str, Optional[str]] = {
-    "torch":        ">=2.0",
+    "torch": ">=2.0",
     "transformers": ">=4.35,<4.41",
-    "datasets":     ">=2.16",
-    "gensim":       ">=4.3",
-    "spacy":        ">=3.7",
-    "faiss":        None,
-    "langchain":    ">=0.1",
-    "sklearn":      ">=1.3",
-    "numpy":        ">=1.24,<2.0",
-    "pandas":       ">=2.1",
-    "accelerate":   ">=0.20",
-    "evaluate":     ">=0.4",
-    "ragas":        ">=0.1",
-    "wandb":        ">=0.16",
+    "datasets": ">=2.16",
+    "gensim": ">=4.3",
+    "spacy": ">=3.7",
+    "faiss": None,
+    "langchain": ">=0.1",
+    "sklearn": ">=1.3",
+    "numpy": ">=1.24,<2.0",
+    "pandas": ">=2.1",
+    "accelerate": ">=0.20",
+    "evaluate": ">=0.4",
+    "ragas": ">=0.1",
+    "wandb": ">=0.16",
 }
 
 COMPAT_RULES: List[Dict[str, Any]] = [
@@ -43,16 +43,16 @@ COMPAT_RULES: List[Dict[str, Any]] = [
 MIN_GPU_MEMORY_GB: int = 10
 
 # Preflight thresholds — must match setup.sh hardware constants
-PREFLIGHT_GPU_NAME        = "L4"
-PREFLIGHT_GPU_COUNT       = 4
-PREFLIGHT_VRAM_GB_MIN     = 22.0
+PREFLIGHT_GPU_NAME = "L4"
+PREFLIGHT_GPU_COUNT = 4
+PREFLIGHT_VRAM_GB_MIN = 22.0
 PREFLIGHT_COMPUTE_CAP_MIN = (8, 9)
-PREFLIGHT_TORCH_CUDA      = "11.7"
-PREFLIGHT_MIN_DISK_GB     = 50.0
+PREFLIGHT_TORCH_CUDA = "11.7"
+PREFLIGHT_MIN_DISK_GB = 50.0
 
 # Reproducibility expectations — must match src/repro.py and .env exactly
-EXPECTED_PYTHONHASHSEED        = "0"
-EXPECTED_CUBLAS_CFG            = ":4096:8"
+EXPECTED_PYTHONHASHSEED = "0"
+EXPECTED_CUBLAS_CFG = ":4096:8"
 EXPECTED_TOKENIZERS_PARALLELISM = "false"
 
 
@@ -82,16 +82,11 @@ def _check_constraint(actual_str: str, constraint: str) -> Tuple[bool, str]:
 
 def run_environment_checks(logger: Any = None) -> bool:
     checks: List[Tuple[str, Callable[[], None]]] = [
-        ("Every required dependency must be importable and meet version constraints",
-         _check_deps),
-        ("CUDA GPU must be detected for training",
-         _check_gpu_available),
-        ("GPU must have at least 10GB VRAM for transformer fine-tuning",
-         _check_gpu_memory),
-        ("PyTorch must be compiled with CUDA support",
-         _check_pytorch_cuda),
-        ("Cross-dependency version constraints must be satisfied",
-         _check_compat),
+        ("Every required dependency must be importable and meet version constraints", _check_deps),
+        ("CUDA GPU must be detected for training", _check_gpu_available),
+        ("GPU must have at least 10GB VRAM for transformer fine-tuning", _check_gpu_memory),
+        ("PyTorch must be compiled with CUDA support", _check_pytorch_cuda),
+        ("Cross-dependency version constraints must be satisfied", _check_compat),
     ]
     all_passed = True
     for description, check_fn in checks:
@@ -129,8 +124,8 @@ def run_preflight_checks(
     # Check 2: GPU name, compute cap, VRAM
     if torch.cuda.is_available():
         for i in range(n):
-            name    = torch.cuda.get_device_name(i)
-            cap     = torch.cuda.get_device_capability(i)
+            name = torch.cuda.get_device_name(i)
+            cap = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
             if PREFLIGHT_GPU_NAME not in name:
                 failures.append(f"GPU[{i}] name: expected {PREFLIGHT_GPU_NAME}, got '{name}'.")
@@ -179,12 +174,12 @@ def run_preflight_checks(
     # Check 6: repro_cfg integrity
     if repro_cfg is not None:
         required_repro_keys = {
-            "PYTHONHASHSEED":           EXPECTED_PYTHONHASHSEED,
-            "CUBLAS_WORKSPACE_CONFIG":  EXPECTED_CUBLAS_CFG,
-            "TOKENIZERS_PARALLELISM":   EXPECTED_TOKENIZERS_PARALLELISM,
+            "PYTHONHASHSEED": EXPECTED_PYTHONHASHSEED,
+            "CUBLAS_WORKSPACE_CONFIG": EXPECTED_CUBLAS_CFG,
+            "TOKENIZERS_PARALLELISM": EXPECTED_TOKENIZERS_PARALLELISM,
             "deterministic_algorithms": True,
-            "cudnn_benchmark":          False,
-            "cudnn_deterministic":      True,
+            "cudnn_benchmark": False,
+            "cudnn_deterministic": True,
         }
         for key, expected in required_repro_keys.items():
             actual = repro_cfg.get(key)
@@ -199,28 +194,24 @@ def run_preflight_checks(
     # Check 7: torch runtime state — independent of repro_cfg
     torch_state_failures: List[str] = []
     if not torch.are_deterministic_algorithms_enabled():
-        torch_state_failures.append(
-            "torch.use_deterministic_algorithms is NOT enabled. Re-run Cell 1."
-        )
+        torch_state_failures.append("torch.use_deterministic_algorithms is NOT enabled. Re-run Cell 1.")
     if torch.backends.cudnn.benchmark:
-        torch_state_failures.append(
-            "torch.backends.cudnn.benchmark=True. Re-run Cell 1."
-        )
+        torch_state_failures.append("torch.backends.cudnn.benchmark=True. Re-run Cell 1.")
     if not torch.backends.cudnn.deterministic:
-        torch_state_failures.append(
-            "torch.backends.cudnn.deterministic=False. Re-run Cell 1."
-        )
+        torch_state_failures.append("torch.backends.cudnn.deterministic=False. Re-run Cell 1.")
     if torch_state_failures:
         failures.extend(torch_state_failures)
     else:
         if logger:
-            logger.info("✓ PASS: torch runtime state — deterministic_algorithms=True | cudnn.benchmark=False | cudnn.deterministic=True")
+            logger.info(
+                "✓ PASS: torch runtime state — deterministic_algorithms=True | cudnn.benchmark=False | cudnn.deterministic=True"
+            )
 
     # Check 8: OS env vars — independent of repro_cfg
     for var, expected in [
-        ("PYTHONHASHSEED",          EXPECTED_PYTHONHASHSEED),
+        ("PYTHONHASHSEED", EXPECTED_PYTHONHASHSEED),
         ("CUBLAS_WORKSPACE_CONFIG", EXPECTED_CUBLAS_CFG),
-        ("TOKENIZERS_PARALLELISM",  EXPECTED_TOKENIZERS_PARALLELISM),
+        ("TOKENIZERS_PARALLELISM", EXPECTED_TOKENIZERS_PARALLELISM),
     ]:
         actual = os.environ.get(var)
         if actual != expected:
@@ -238,11 +229,8 @@ def run_preflight_checks(
             logger.info("✓ PASS: uv.lock present")
 
     if failures:
-        msg = (
-            f"\n{'=' * 60}\n"
-            f"  PREFLIGHT FAILED — {len(failures)} issue(s) detected.\n"
-            f"{'=' * 60}\n"
-            + "\n".join(f"  [{i+1}] {f}" for i, f in enumerate(failures))
+        msg = f"\n{'=' * 60}\n  PREFLIGHT FAILED — {len(failures)} issue(s) detected.\n{'=' * 60}\n" + "\n".join(
+            f"  [{i + 1}] {f}" for i, f in enumerate(failures)
         )
         raise PreflightError(msg)
 
@@ -272,12 +260,14 @@ def _check_deps() -> None:
 
 def _check_gpu_available() -> None:
     import torch
+
     if not torch.cuda.is_available():
         raise AssertionError("No CUDA GPU detected")
 
 
 def _check_gpu_memory() -> None:
     import torch
+
     props: Any = torch.cuda.get_device_properties(0)
     gigabytes: float = props.total_memory / 1e9
     if gigabytes < MIN_GPU_MEMORY_GB:
@@ -286,6 +276,7 @@ def _check_gpu_memory() -> None:
 
 def _check_pytorch_cuda() -> None:
     import torch
+
     if torch.version.cuda is None:
         raise AssertionError("PyTorch built without CUDA")
 
@@ -311,6 +302,7 @@ def _check_compat() -> None:
 def get_environment_summary() -> Dict[str, Any]:
     """Return dict of verified environment details including reproducibility state."""
     import torch
+
     summary: Dict[str, Any] = {"python": sys.version.split()[0]}
     for pkg in REQUIRED_DEPS:
         try:
@@ -318,16 +310,16 @@ def get_environment_summary() -> Dict[str, Any]:
             summary[pkg] = _get_version(mod) or "installed"
         except ImportError:
             summary[pkg] = "MISSING"
-    summary["gpu"]           = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-    summary["gpu_count"]     = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    props: Any               = torch.cuda.get_device_properties(0)
+    summary["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+    summary["gpu_count"] = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    props: Any = torch.cuda.get_device_properties(0)
     summary["gpu_memory_gb"] = round(props.total_memory / 1e9, 1)
-    summary["cuda"]          = torch.version.cuda
+    summary["cuda"] = torch.version.cuda
     # Reproducibility runtime state snapshot
     summary["deterministic_algorithms"] = torch.are_deterministic_algorithms_enabled()
-    summary["cudnn_benchmark"]          = torch.backends.cudnn.benchmark
-    summary["cudnn_deterministic"]      = torch.backends.cudnn.deterministic
-    summary["PYTHONHASHSEED"]           = os.environ.get("PYTHONHASHSEED", "NOT SET")
-    summary["CUBLAS_WORKSPACE_CONFIG"]  = os.environ.get("CUBLAS_WORKSPACE_CONFIG", "NOT SET")
-    summary["TOKENIZERS_PARALLELISM"]   = os.environ.get("TOKENIZERS_PARALLELISM", "NOT SET")
+    summary["cudnn_benchmark"] = torch.backends.cudnn.benchmark
+    summary["cudnn_deterministic"] = torch.backends.cudnn.deterministic
+    summary["PYTHONHASHSEED"] = os.environ.get("PYTHONHASHSEED", "NOT SET")
+    summary["CUBLAS_WORKSPACE_CONFIG"] = os.environ.get("CUBLAS_WORKSPACE_CONFIG", "NOT SET")
+    summary["TOKENIZERS_PARALLELISM"] = os.environ.get("TOKENIZERS_PARALLELISM", "NOT SET")
     return summary
