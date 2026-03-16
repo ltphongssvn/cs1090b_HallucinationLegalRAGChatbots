@@ -50,10 +50,10 @@ UV=""  # set by check_uv(); all callers must invoke _require_uv() first
 if [ -t 1 ]; then
     C_RESET="\033[0m"; C_BOLD="\033[1m"; C_GREEN="\033[0;32m"
     C_YELLOW="\033[0;33m"; C_RED="\033[0;31m"; C_CYAN="\033[0;36m"
-    C_DIM="\033[2m"; C_BLUE="\033[0;34m"
+    C_DIM="\033[2m"; C_BLUE="\033[0;34m"; C_MAGENTA="\033[0;35m"
 else
     C_RESET=""; C_BOLD=""; C_GREEN=""; C_YELLOW=""; C_RED=""
-    C_CYAN=""; C_DIM=""; C_BLUE=""
+    C_CYAN=""; C_DIM=""; C_BLUE=""; C_MAGENTA=""
 fi
 
 # ===========================================================================
@@ -72,6 +72,7 @@ step_end() {
         PASS) SUMMARY_STATUS+=("${C_GREEN}PASS${C_RESET}") ;;
         WARN) SUMMARY_STATUS+=("${C_YELLOW}WARN${C_RESET}") ;;
         SKIP) SUMMARY_STATUS+=("${C_DIM}SKIP${C_RESET}") ;;
+        DRY)  SUMMARY_STATUS+=("${C_MAGENTA}DRY${C_RESET}") ;;
         *)    SUMMARY_STATUS+=("${C_RED}FAIL${C_RESET}") ;;
     esac
     echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
@@ -82,6 +83,8 @@ print_summary() {
     local mm=$(( total_elapsed / 60 )) ss=$(( total_elapsed % 60 ))
     echo -e "\n${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_BOLD} Setup Summary  ${C_DIM}(total: ${mm}m ${ss}s)${C_RESET}"
+    [ "${DRY_RUN:-0}" = "1" ] && \
+        echo -e "${C_MAGENTA}${C_BOLD} DRY RUN — no files written, no packages installed${C_RESET}"
     echo -e "${C_BOLD}============================================================${C_RESET}"
     printf "  %-40s %-8s %s\n" "Step" "Status" "Duration"
     printf "  %-40s %-8s %s\n" "----" "------" "--------"
@@ -125,6 +128,19 @@ _msg_warn() {
 _msg_ok()   { echo -e "  ${C_GREEN}✓${C_RESET} $1"; }
 _msg_info() { echo -e "  ${C_BLUE}ℹ${C_RESET} $1"; }
 _msg_skip() { echo -e "  ${C_DIM}⊘ $1${C_RESET}"; }
+
+# _msg_dry_run <action> <target>
+# Prints what a mutating step WOULD do in DRY_RUN=1 mode.
+# Use this at the top of any step that writes files, installs packages,
+# or deletes directories — then return 0 to skip the actual operation.
+_msg_dry_run() {
+    local action="$1" target="$2"
+    echo -e "  ${C_MAGENTA}⊡ DRY RUN${C_RESET} — would ${action}: ${C_DIM}${target}${C_RESET}"
+}
+
+# _is_dry_run — returns 0 (true) if DRY_RUN=1, 1 (false) otherwise.
+# Use in mutating steps: _is_dry_run && { _msg_dry_run ...; return 0; }
+_is_dry_run() { [ "${DRY_RUN:-0}" = "1" ]; }
 
 # ===========================================================================
 # ERR trap

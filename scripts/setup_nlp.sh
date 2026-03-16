@@ -3,6 +3,9 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/setup_nlp.sh
 # Responsibility: NLP asset management — pinned spaCy model download, checksum, install.
 # Sourced by setup.sh — defines functions only, no top-level execution.
+#
+# Mutating steps and their DRY_RUN behaviour:
+#   download_nlp_models — would download wheel to .cache/spacy/ and pip install it
 
 download_nlp_models() {
     _require_python
@@ -11,6 +14,7 @@ download_nlp_models() {
     echo " Installing spaCy ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned)..."
     mkdir -p "$SPACY_CACHE_DIR"
 
+    # Idempotent check — skip entirely if already correct version
     if $PYTHON -c "
 import spacy,sys
 try:
@@ -18,8 +22,28 @@ try:
     sys.exit(0 if nlp.meta.get('version')=='${SPACY_MODEL_VERSION}' else 1)
 except OSError: sys.exit(1)
 " 2>/dev/null; then
-        _msg_ok "${SPACY_MODEL} ${SPACY_MODEL_VERSION} already installed — skipping download"
+        _msg_ok "${SPACY_MODEL} ${SPACY_MODEL_VERSION} already installed — skipping"
         return
+    fi
+
+    # Determine what would happen in dry-run mode
+    if _is_dry_run; then
+        if [ -f "$SPACY_WHEEL" ]; then
+            _msg_dry_run "install spaCy model from cached wheel" "$SPACY_WHEEL"
+            _msg_info "Cached wheel present — would verify checksum and pip install"
+        else
+            if [ "${OFFLINE:-0}" = "1" ]; then
+                _msg_error "Offline mode: wheel not cached" \
+                    "OFFLINE=1 but wheel not found at $SPACY_WHEEL" \
+                    "Cannot download in offline mode" \
+                    "Pre-cache: mkdir -p .cache/spacy && wget -O $SPACY_WHEEL ${SPACY_MODEL_URL}"
+                exit 1
+            fi
+            _msg_dry_run "download spaCy wheel" "${SPACY_MODEL_URL}"
+            _msg_dry_run "verify checksum" "sha256=${SPACY_MODEL_SHA256}"
+            _msg_dry_run "pip install wheel" "$SPACY_WHEEL"
+        fi
+        step_end "download_nlp_models" "DRY"; return
     fi
 
     if [ ! -f "$SPACY_WHEEL" ]; then

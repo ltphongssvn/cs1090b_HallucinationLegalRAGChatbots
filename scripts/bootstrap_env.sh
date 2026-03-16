@@ -3,6 +3,10 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/bootstrap_env.sh
 # Responsibility: base environment bootstrap — uv, lockfile, venv, deps, drift.
 # Sourced by setup.sh — defines functions only, no top-level execution.
+#
+# Mutating steps and their DRY_RUN behaviour:
+#   ensure_venv        — would create/delete .venv
+#   sync_dependencies  — would install packages from uv.lock
 
 _check_disk_space() {
     local free_gb msg
@@ -74,17 +78,32 @@ check_lockfile() {
 ensure_venv() {
     _require_uv
     local PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"
+
+    # Idempotent check — skip entirely if venv already correct
     if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (${PYVER_TUPLE}) else 1)" 2>/dev/null; then
         _msg_ok ".venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping creation"
         return
     fi
+
+    # Stale venv present — would delete it
     if [ -d "${PROJECT_ROOT}/.venv" ]; then
+        local venv_size; venv_size=$(du -sh "${PROJECT_ROOT}/.venv" 2>/dev/null | cut -f1)
+        if _is_dry_run; then
+            _msg_dry_run "delete stale .venv (wrong Python version)" "${PROJECT_ROOT}/.venv (${venv_size})"
+            _msg_dry_run "create .venv" "uv venv .venv --python ${TARGET_PYTHON_VERSION} --seed"
+            step_end "ensure_venv" "DRY"; return
+        fi
         _msg_warn "Stale .venv detected" ".venv exists but contains wrong Python version" \
             "action-required" "Removing in 5 seconds — Ctrl+C to cancel"
-        echo "         Contents: $(du -sh "${PROJECT_ROOT}/.venv" 2>/dev/null | cut -f1) on disk"
-        [ "${DRY_RUN:-0}" = "1" ] && _msg_skip "DRY_RUN=1 — skipping removal. Exiting." && exit 0
+        echo "         Contents: ${venv_size} on disk"
         sleep 5; rm -rf "${PROJECT_ROOT}/.venv"
+    else
+        if _is_dry_run; then
+            _msg_dry_run "create .venv" "uv venv .venv --python ${TARGET_PYTHON_VERSION} --seed"
+            step_end "ensure_venv" "DRY"; return
+        fi
     fi
+
     _msg_info "Creating .venv with Python ${TARGET_PYTHON_VERSION}..."
     "$UV" venv .venv --python "${TARGET_PYTHON_VERSION}" --seed
 }
@@ -99,6 +118,13 @@ verify_python() {
 
 sync_dependencies() {
     _require_uv; _require_python
+
+    if _is_dry_run; then
+        _msg_dry_run "sync packages from uv.lock" "uv sync --frozen --dev  (installs all pinned deps into .venv)"
+        _msg_info "Would install: $(grep -c '^name = ' "${PROJECT_ROOT}/uv.lock" 2>/dev/null || echo '?') packages from uv.lock"
+        step_end "sync_dependencies" "DRY"; return
+    fi
+
     _msg_info "Syncing from uv.lock (--frozen) — may take minutes on first run..."
     _msg_info "--dev explicit: ensures pytest/mypy/hypothesis always installed"
     "$UV" sync --frozen --dev

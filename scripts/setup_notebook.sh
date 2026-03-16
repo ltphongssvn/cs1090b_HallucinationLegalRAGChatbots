@@ -3,9 +3,21 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/setup_notebook.sh
 # Responsibility: notebook integration — repro env, repro module, stability, kernel.
 # Sourced by setup.sh — defines functions only, no top-level execution.
+#
+# Mutating steps and their DRY_RUN behaviour:
+#   write_repro_env    — would write .env
+#   write_repro_module — would write src/repro.py
+#   register_kernel    — would install Jupyter kernelspec
 
 write_repro_env() {
     _require_project_root
+
+    if _is_dry_run; then
+        _msg_dry_run "write reproducibility .env" "${PROJECT_ROOT}/.env"
+        _msg_info "Would write: PYTHONHASHSEED=${REPRO_PYTHONHASHSEED} CUBLAS_WORKSPACE_CONFIG=${REPRO_CUBLAS_CFG} TOKENIZERS_PARALLELISM=${REPRO_TOKENIZERS_PAR} RANDOM_SEED=${RANDOM_SEED}"
+        step_end "write_repro_env" "DRY"; return
+    fi
+
     echo " Writing reproducibility .env..."
     cat > "${PROJECT_ROOT}/.env" << ENVEOF
 # .env
@@ -45,7 +57,15 @@ if failed:
 }
 
 write_repro_module() {
-    _require_python; _require_repro_env
+    _require_repro_env
+
+    if _is_dry_run; then
+        _msg_dry_run "write src/repro.py" "${PROJECT_ROOT}/src/repro.py"
+        _msg_info "Would inject: RANDOM_SEED=${RANDOM_SEED} PYTHONHASHSEED=${REPRO_PYTHONHASHSEED} CUBLAS_CFG=${REPRO_CUBLAS_CFG}"
+        step_end "write_repro_module" "DRY"; return
+    fi
+
+    _require_python
     echo " Writing src/repro.py — notebook/CLI parity module..."
     mkdir -p "${PROJECT_ROOT}/src"
     cat > "${PROJECT_ROOT}/src/repro.py" << PYEOF
@@ -208,6 +228,7 @@ print('  \033[0;32m✓\033[0m src/repro.configure() verified')
 
 verify_numerical_stability() {
     _require_python; _require_repro_env
+    # Read-only verification step — no DRY_RUN guard needed
     echo " Verifying numerical/runtime stability..."
     $PYTHON -c "
 import os, torch, sys
@@ -240,6 +261,13 @@ print('  \033[2mNOTE: Notebooks must call: from src.repro import configure; conf
 
 register_kernel() {
     _require_python
+
+    if _is_dry_run; then
+        _msg_dry_run "install Jupyter kernelspec" \
+            "~/.local/share/jupyter/kernels/hallucination-legal-rag/  (display: HallucinationLegalRAG (${TARGET_PYTHON_VERSION}))"
+        step_end "register_kernel" "DRY"; return
+    fi
+
     echo " Registering Jupyter kernel..."
     $PYTHON -m ipykernel install --user \
         --name hallucination-legal-rag \

@@ -3,6 +3,9 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/manifest.sh
 # Responsibility: environment manifest — collect data, validate JSON, write to disk.
 # Sourced by setup.sh — defines functions only, no top-level execution.
+#
+# Mutating steps and their DRY_RUN behaviour:
+#   write_manifest — would write logs/environment_manifest.json
 
 _collect_manifest_data() {
     _require_python; _require_hardware_detected
@@ -156,6 +159,14 @@ print('  \033[0;32m✓\033[0m manifest → logs/environment_manifest.json')
 
 write_manifest() {
     _require_python; _require_hardware_detected
+
+    if _is_dry_run; then
+        local git_sha; git_sha=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
+        _msg_dry_run "write environment manifest" "${PROJECT_ROOT}/logs/environment_manifest.json"
+        _msg_info "Would record: git=${git_sha} | hardware_match=${HARDWARE_MATCH} | detected=${DETECTED_GPU_COUNT}x ${DETECTED_GPU_NAME}"
+        step_end "write_manifest" "DRY"; return
+    fi
+
     echo " Writing environment manifest..."
     local git_sha git_branch git_dirty uvlock_sha256 manifest_json
     git_sha=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")

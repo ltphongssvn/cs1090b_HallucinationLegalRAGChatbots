@@ -8,9 +8,15 @@
 # Usage:        bash setup.sh
 # Debug:        DEBUG=1 bash setup.sh
 # Skip GPU:     SKIP_GPU=1 bash setup.sh
-# Dry run:      DRY_RUN=1 bash setup.sh
+# Dry run:      DRY_RUN=1 bash setup.sh   (preview all side effects, no writes)
 # Offline:      OFFLINE=1 bash setup.sh
 # Single step:  STEP=<name> bash setup.sh
+#
+# DRY_RUN=1 behaviour:
+#   Read-only steps (checks, detection, verification) run normally.
+#   Mutating steps print what they WOULD do and record status=DRY in summary.
+#   Mutating steps: ensure_venv | sync_dependencies | download_nlp_models |
+#                   write_repro_env | write_repro_module | register_kernel | write_manifest
 #
 # Module map:
 #   scripts/lib.sh            — constants, colors, step framework, messaging, guards
@@ -32,7 +38,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
-# Source all modules — order matters: lib.sh must be first (defines shared state)
+# Source all modules — lib.sh must be first (defines shared state)
 # shellcheck source=scripts/lib.sh
 source "$PROJECT_ROOT/scripts/lib.sh"
 source "$PROJECT_ROOT/scripts/bootstrap_env.sh"
@@ -45,13 +51,12 @@ source "$PROJECT_ROOT/scripts/manifest.sh"
 trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ===========================================================================
-# preflight_fast_checks — orchestrates cheap pre-venv gates from both
-# bootstrap_env and validate_gpu helpers. Lives here because it spans modules.
+# preflight_fast_checks — spans bootstrap_env + validate_gpu helpers
 # ===========================================================================
 preflight_fast_checks() {
     _require_project_root
     echo " Running preflight fast checks (pre-venv, seconds)..."
-    _msg_info "These checks run before any expensive operation. Failure saves venv build+sync time on wrong nodes."
+    _msg_info "These run before any expensive operation. Failure saves venv build+sync time on wrong nodes."
     local failures=()
     local output
 
@@ -106,6 +111,25 @@ preflight_fast_checks() {
 # ===========================================================================
 [ -n "${STEP:-}" ] && echo -e "${C_BOLD}${C_CYAN}Single-step mode: STEP=${STEP}${C_RESET}\n"
 
+# DRY_RUN banner — list all mutating steps upfront so the user knows what
+# would be changed before committing to a full run
+if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_MAGENTA}${C_BOLD} DRY RUN MODE — no files written, no packages installed${C_RESET}"
+    echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}"
+    echo -e "${C_MAGENTA} Mutating steps that will be previewed (not executed):${C_RESET}"
+    echo -e "${C_MAGENTA}   ensure_venv        — create/delete .venv${C_RESET}"
+    echo -e "${C_MAGENTA}   sync_dependencies  — install packages from uv.lock${C_RESET}"
+    echo -e "${C_MAGENTA}   download_nlp_models— download + install spaCy wheel${C_RESET}"
+    echo -e "${C_MAGENTA}   write_repro_env    — write .env${C_RESET}"
+    echo -e "${C_MAGENTA}   write_repro_module — write src/repro.py${C_RESET}"
+    echo -e "${C_MAGENTA}   register_kernel    — install Jupyter kernelspec${C_RESET}"
+    echo -e "${C_MAGENTA}   write_manifest     — write logs/environment_manifest.json${C_RESET}"
+    echo -e "${C_DIM} Read-only steps (preflight, detection, verification) run normally.${C_RESET}"
+    echo -e "${C_DIM} To execute for real: bash setup.sh  (without DRY_RUN=1)${C_RESET}"
+    echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}\n"
+fi
+
 echo -e "${C_BOLD}============================================================${C_RESET}"
 echo -e "${C_BOLD} cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap${C_RESET}"
 echo -e " Target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME} | Python ${TARGET_PYTHON_VERSION} | torch 2.0.1+cu117"
@@ -114,25 +138,25 @@ echo -e " Repro: PYTHONHASHSEED=${REPRO_PYTHONHASHSEED} | CUBLAS=${REPRO_CUBLAS_
 echo -e " Fail-fast: preflight_fast_checks() first | Single step: STEP=<fn> bash setup.sh"
 echo -e "${C_BOLD}============================================================${C_RESET}"
 
-#                         module                step function
-run_step preflight_fast_checks             # setup.sh (spans modules)
-run_step check_uv                          # bootstrap_env
-run_step check_lockfile                    # bootstrap_env
-run_step log_gpu                           # validate_gpu
-run_step ensure_venv                       # bootstrap_env
-run_step verify_python                     # bootstrap_env
-run_step sync_dependencies                 # bootstrap_env
-run_step check_dependency_drift            # bootstrap_env
-run_step detect_hardware                   # validate_gpu
-run_step write_repro_env                   # setup_notebook
-run_step write_repro_module                # setup_notebook
-run_step verify_numerical_stability        # setup_notebook
-run_step download_nlp_models               # setup_nlp
-run_step run_env_smoke_tests               # validate_tests
-run_step run_gpu_smoke_tests               # validate_gpu
-run_step write_manifest                    # manifest
-run_step register_kernel                   # setup_notebook
-run_step verify_tests                      # validate_tests
+#                              module
+run_step preflight_fast_checks              # setup.sh (spans modules)
+run_step check_uv                           # bootstrap_env
+run_step check_lockfile                     # bootstrap_env
+run_step log_gpu                            # validate_gpu  (read-only)
+run_step ensure_venv                        # bootstrap_env (MUTATING)
+run_step verify_python                      # bootstrap_env (read-only)
+run_step sync_dependencies                  # bootstrap_env (MUTATING)
+run_step check_dependency_drift             # bootstrap_env (read-only)
+run_step detect_hardware                    # validate_gpu  (read-only)
+run_step write_repro_env                    # setup_notebook (MUTATING)
+run_step write_repro_module                 # setup_notebook (MUTATING)
+run_step verify_numerical_stability         # setup_notebook (read-only)
+run_step download_nlp_models                # setup_nlp     (MUTATING)
+run_step run_env_smoke_tests                # validate_tests (read-only)
+run_step run_gpu_smoke_tests                # validate_gpu  (read-only)
+run_step write_manifest                     # manifest      (MUTATING)
+run_step register_kernel                    # setup_notebook (MUTATING)
+run_step verify_tests                       # validate_tests (read-only)
 
 print_summary
 
@@ -155,6 +179,7 @@ echo -e "   Constants/seeds:    scripts/lib.sh"
 echo -e "   Manifest:           scripts/manifest.sh"
 echo -e ""
 echo -e " ${C_BOLD}Single step:${C_RESET}  STEP=<fn_name> bash setup.sh"
-echo -e " ${C_BOLD}Other modes:${C_RESET}  SKIP_GPU=1 | DEBUG=1 | DRY_RUN=1 | OFFLINE=1"
+echo -e " ${C_BOLD}Dry run:${C_RESET}      DRY_RUN=1 bash setup.sh  (preview all side effects)"
+echo -e " ${C_BOLD}Other modes:${C_RESET}  SKIP_GPU=1 | DEBUG=1 | OFFLINE=1"
 echo -e " ${C_BOLD}Seed expt:${C_RESET}   Edit RANDOM_SEED in scripts/lib.sh, re-run, commit"
 echo -e "${C_BOLD}============================================================${C_RESET}"
