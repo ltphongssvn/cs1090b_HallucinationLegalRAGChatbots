@@ -5,6 +5,7 @@
 # Usage:        bash setup.sh
 # Debug:        DEBUG=1 bash setup.sh
 # Skip GPU:     SKIP_GPU=1 bash setup.sh
+# Dry run:      DRY_RUN=1 bash setup.sh
 set -euo pipefail
 [ "${DEBUG:-0}" = "1" ] && set -x
 
@@ -62,11 +63,24 @@ if torch.cuda.is_available():
 ensure_venv() {
     if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (3,11,9) else 1)" 2>/dev/null; then
         echo " .venv already exists with Python 3.11.9 — skipping creation"
-    else
-        echo " Creating .venv with Python 3.11.9..."
-        rm -rf "$PROJECT_ROOT/.venv"
-        $UV venv .venv --python 3.11.9 --seed
+        return
     fi
+
+    if [ -d "$PROJECT_ROOT/.venv" ]; then
+        echo "WARNING: .venv exists but is NOT Python 3.11.9 — it will be removed."
+        echo "         Contents: $(du -sh "$PROJECT_ROOT/.venv" 2>/dev/null | cut -f1) on disk"
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+            echo "DRY_RUN=1 — skipping .venv removal. Exiting."
+            exit 0
+        fi
+        echo "         Aborting in 5 seconds — press Ctrl+C to cancel..."
+        sleep 5
+        echo " Removing stale .venv..."
+        rm -rf "$PROJECT_ROOT/.venv"
+    fi
+
+    echo " Creating .venv with Python 3.11.9..."
+    $UV venv .venv --python 3.11.9 --seed
 }
 
 verify_python() {
@@ -190,4 +204,5 @@ echo " Activate:  source .venv/bin/activate"
 echo " Kernel:    HallucinationLegalRAG (3.11.9)"
 echo " Manifest:  logs/environment_manifest.json"
 echo " CPU mode:  SKIP_GPU=1 bash setup.sh"
+echo " Dry run:   DRY_RUN=1 bash setup.sh"
 echo "============================================================"
