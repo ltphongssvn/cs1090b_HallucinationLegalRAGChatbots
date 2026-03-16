@@ -4,6 +4,7 @@
 # SRP: Verify GPU environment and dependency contracts.
 # No test_* functions here — those live in tests/test_environment.py.
 import importlib
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -43,7 +44,12 @@ PREFLIGHT_GPU_COUNT       = 4
 PREFLIGHT_VRAM_GB_MIN     = 22.0
 PREFLIGHT_COMPUTE_CAP_MIN = (8, 9)
 PREFLIGHT_TORCH_CUDA      = "11.7"
-PREFLIGHT_MIN_DISK_GB     = 50.0   # minimum free disk on project root filesystem
+PREFLIGHT_MIN_DISK_GB     = 50.0
+
+# Reproducibility expectations — must match src/repro.py and .env exactly
+EXPECTED_PYTHONHASHSEED        = "0"
+EXPECTED_CUBLAS_CFG            = ":4096:8"
+EXPECTED_TOKENIZERS_PARALLELISM = "false"
 
 
 class PreflightError(RuntimeError):
@@ -108,16 +114,16 @@ def run_preflight_checks(
     Raises PreflightError with an actionable message on any failure.
 
     Checks:
-      1. GPU count, name, compute capability, and VRAM against PREFLIGHT_* thresholds
-      2. torch CUDA runtime version matches pinned cu117 wheel
-      3. Sufficient free disk space for training artifacts
-      4. src/repro.py exists and is importable
-      5. repro_cfg integrity — all required keys present and correctly set
-      6. uv.lock exists and its sha256 is recorded in manifest (if available)
-
-    Call order:
-      run_preflight_checks() must be called AFTER run_environment_checks() passes
-      and AFTER src/repro.configure() has been called (repro_cfg passed in).
+      1.  GPU count, name, compute capability, and VRAM
+      2.  torch CUDA runtime matches pinned cu117 wheel
+      3.  Free disk space
+      4.  src/repro.py exists and is importable
+      5.  repro_cfg integrity (dict values from configure())
+      6.  Torch runtime state — independently verified, not just trusted from repro_cfg.
+          A notebook restart or partial cell re-run can silently reset torch flags
+          even when repro_cfg looks correct. This check catches that case.
+      7.  OS-level env vars for reproducibility
+      8.  uv.lock present
     """
     import torch
 
@@ -140,7 +146,6 @@ def run_preflight_checks(
             name    = torch.cuda.get_device_name(i)
             cap     = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-
             if PREFLIGHT_GPU_NAME not in name:
                 failures.append(
                     f"GPU[{i}] name: expected NVIDIA {PREFLIGHT_GPU_NAME}, got '{name}'. "
@@ -149,26 +154,24 @@ def run_preflight_checks(
             elif cap < PREFLIGHT_COMPUTE_CAP_MIN:
                 failures.append(
                     f"GPU[{i}] compute capability: expected >={PREFLIGHT_COMPUTE_CAP_MIN}, "
-                    f"got {cap}. {PREFLIGHT_GPU_NAME} requires cc {PREFLIGHT_COMPUTE_CAP_MIN}."
+                    f"got {cap}."
                 )
             elif vram_gb < PREFLIGHT_VRAM_GB_MIN:
                 failures.append(
                     f"GPU[{i}] VRAM: expected >={PREFLIGHT_VRAM_GB_MIN}GB, "
-                    f"got {vram_gb:.1f}GB. Insufficient for transformer fine-tuning."
+                    f"got {vram_gb:.1f}GB."
                 )
             else:
                 if logger:
-                    logger.info(
-                        f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB"
-                    )
+                    logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
 
-    # --- Check 3: torch CUDA runtime matches pinned cu117 wheel ---
+    # --- Check 3: torch CUDA runtime ---
     if torch.cuda.is_available():
         actual_cuda = torch.version.cuda or "unknown"
         if not actual_cuda.startswith(PREFLIGHT_TORCH_CUDA):
             failures.append(
                 f"torch CUDA runtime: expected {PREFLIGHT_TORCH_CUDA} (cu117 wheel), "
-                f"got {actual_cuda}. Wrong torch wheel installed — run: bash setup.sh"
+                f"got {actual_cuda}. Run: bash setup.sh"
             )
         else:
             if logger:
@@ -180,34 +183,33 @@ def run_preflight_checks(
     free_gb = disk.free / 1e9
     if free_gb < PREFLIGHT_MIN_DISK_GB:
         failures.append(
-            f"Disk space: expected >={PREFLIGHT_MIN_DISK_GB}GB free on {project_root}, "
-            f"got {free_gb:.1f}GB. Training artifacts may fail to write."
+            f"Disk space: expected >={PREFLIGHT_MIN_DISK_GB}GB free, "
+            f"got {free_gb:.1f}GB."
         )
     else:
         if logger:
-            logger.info(f"✓ PASS: Disk space {free_gb:.1f}GB free >= {PREFLIGHT_MIN_DISK_GB}GB")
+            logger.info(f"✓ PASS: Disk {free_gb:.1f}GB free >= {PREFLIGHT_MIN_DISK_GB}GB")
 
     # --- Check 5: src/repro.py exists and is importable ---
     repro_path = project_root / "src" / "repro.py"
     if not repro_path.exists():
         failures.append(
-            f"src/repro.py not found at {repro_path}. "
-            f"Run: bash setup.sh to regenerate it."
+            f"src/repro.py not found. Run: bash setup.sh"
         )
     else:
         try:
             importlib.import_module("src.repro")
             if logger:
-                logger.info(f"✓ PASS: src/repro.py exists and is importable")
+                logger.info("✓ PASS: src/repro.py exists and is importable")
         except ImportError as e:
             failures.append(f"src/repro.py import failed: {e}")
 
-    # --- Check 6: repro_cfg integrity ---
+    # --- Check 6: repro_cfg integrity (dict from configure()) ---
     if repro_cfg is not None:
         required_repro_keys = {
-            "PYTHONHASHSEED":          "0",
-            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-            "TOKENIZERS_PARALLELISM":  "false",
+            "PYTHONHASHSEED":           EXPECTED_PYTHONHASHSEED,
+            "CUBLAS_WORKSPACE_CONFIG":  EXPECTED_CUBLAS_CFG,
+            "TOKENIZERS_PARALLELISM":   EXPECTED_TOKENIZERS_PARALLELISM,
             "deterministic_algorithms": True,
             "cudnn_benchmark":          False,
             "cudnn_deterministic":      True,
@@ -224,11 +226,59 @@ def run_preflight_checks(
                     logger.info(f"✓ PASS: repro_cfg['{key}'] = {actual!r}")
     else:
         failures.append(
-            "repro_cfg not provided to run_preflight_checks(). "
-            "Pass repro_cfg=repro_cfg from Cell 1 configure() call."
+            "repro_cfg not provided. Pass repro_cfg=repro_cfg from configure() call."
         )
 
-    # --- Check 7: uv.lock exists ---
+    # --- Check 7: torch runtime state — independent of repro_cfg ---
+    # This is the reproducibility mindset check: repro_cfg is a dict snapshot
+    # taken at configure() call time. But torch flags are process-global mutable
+    # state. A notebook kernel restart, a reimport, or a cell running
+    # torch.backends.cudnn.benchmark = True after configure() would make
+    # repro_cfg lie. We verify the actual live torch state independently here.
+    torch_state_failures: List[str] = []
+
+    if not torch.are_deterministic_algorithms_enabled():
+        torch_state_failures.append(
+            "torch.use_deterministic_algorithms is NOT enabled in the current process. "
+            "A cell or import may have reset it. Re-run Cell 1 to restore."
+        )
+    if torch.backends.cudnn.benchmark:
+        torch_state_failures.append(
+            "torch.backends.cudnn.benchmark=True — non-deterministic algorithm "
+            "selection is active. Re-run Cell 1 to restore."
+        )
+    if not torch.backends.cudnn.deterministic:
+        torch_state_failures.append(
+            "torch.backends.cudnn.deterministic=False — non-deterministic cuDNN ops "
+            "active. Re-run Cell 1 to restore."
+        )
+    if torch_state_failures:
+        failures.extend(torch_state_failures)
+    else:
+        if logger:
+            logger.info(
+                "✓ PASS: torch runtime state — deterministic_algorithms=True | "
+                "cudnn.benchmark=False | cudnn.deterministic=True"
+            )
+
+    # --- Check 8: OS-level env vars — independent of repro_cfg ---
+    # Same reasoning: env vars can be mutated by os.environ after configure().
+    for var, expected in [
+        ("PYTHONHASHSEED",          EXPECTED_PYTHONHASHSEED),
+        ("CUBLAS_WORKSPACE_CONFIG", EXPECTED_CUBLAS_CFG),
+        ("TOKENIZERS_PARALLELISM",  EXPECTED_TOKENIZERS_PARALLELISM),
+    ]:
+        actual = os.environ.get(var)
+        if actual != expected:
+            failures.append(
+                f"os.environ['{var}']={actual!r} — expected {expected!r}. "
+                f"Something mutated os.environ after configure(). Re-run Cell 1."
+            )
+        else:
+            if logger:
+                logger.info(f"✓ PASS: os.environ['{var}'] = {actual!r}")
+
+    # --- Check 9: uv.lock present ---
     uvlock_path = project_root / "uv.lock"
     if not uvlock_path.exists():
         failures.append(
@@ -237,7 +287,7 @@ def run_preflight_checks(
         )
     else:
         if logger:
-            logger.info(f"✓ PASS: uv.lock present at {uvlock_path}")
+            logger.info(f"✓ PASS: uv.lock present")
 
     # --- Final gate ---
     if failures:
@@ -252,8 +302,8 @@ def run_preflight_checks(
 
     if logger:
         logger.info(
-            f"\n✓ All preflight checks passed — "
-            f"environment is safe to proceed to training cells."
+            "\n✓ All preflight checks passed — "
+            "environment is safe to proceed to training cells."
         )
 
 
@@ -316,7 +366,7 @@ def _check_compat() -> None:
 
 
 def get_environment_summary() -> Dict[str, Any]:
-    """Return dict of verified environment details."""
+    """Return dict of verified environment details including reproducibility state."""
     import torch
     summary: Dict[str, Any] = {"python": sys.version.split()[0]}
     for pkg in REQUIRED_DEPS:
@@ -330,4 +380,13 @@ def get_environment_summary() -> Dict[str, Any]:
     props: Any               = torch.cuda.get_device_properties(0)
     summary["gpu_memory_gb"] = round(props.total_memory / 1e9, 1)
     summary["cuda"]          = torch.version.cuda
+    # --- Reproducibility runtime state snapshot ---
+    # Included in summary so Cell 1 logs the live torch state alongside
+    # package versions — giving a complete single-screen reproducibility picture.
+    summary["deterministic_algorithms"] = torch.are_deterministic_algorithms_enabled()
+    summary["cudnn_benchmark"]          = torch.backends.cudnn.benchmark
+    summary["cudnn_deterministic"]      = torch.backends.cudnn.deterministic
+    summary["PYTHONHASHSEED"]           = os.environ.get("PYTHONHASHSEED", "NOT SET")
+    summary["CUBLAS_WORKSPACE_CONFIG"]  = os.environ.get("CUBLAS_WORKSPACE_CONFIG", "NOT SET")
+    summary["TOKENIZERS_PARALLELISM"]   = os.environ.get("TOKENIZERS_PARALLELISM", "NOT SET")
     return summary
