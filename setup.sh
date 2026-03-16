@@ -148,20 +148,15 @@ sync_dependencies() {
 check_dependency_drift() {
     echo " Checking for dependency drift..."
 
-    # 1. Detect if pyproject.toml is newer than uv.lock — indicates uv.lock
-    #    was not regenerated after a dependency change, meaning the lockfile
-    #    is stale and does not reflect the current pyproject.toml spec.
+    # 1. Detect if pyproject.toml is newer than uv.lock
     if [ "$PROJECT_ROOT/pyproject.toml" -nt "$PROJECT_ROOT/uv.lock" ]; then
         echo "ERROR: pyproject.toml is newer than uv.lock — lockfile is stale."
-        echo "       Someone edited pyproject.toml without regenerating uv.lock."
         echo "       To fix deliberately: uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
         exit 1
     fi
     echo " pyproject.toml vs uv.lock timestamp — ok (lockfile is not stale)"
 
-    # 2. Verify uv.lock is consistent with pyproject.toml using uv's own checker.
-    #    'uv lock --check' exits non-zero if the lockfile would change on re-solve,
-    #    catching cases where pyproject.toml constraints no longer satisfy uv.lock pins.
+    # 2. uv's own lockfile consistency check
     if $UV lock --check 2>/dev/null; then
         echo " uv lock --check — lockfile is consistent with pyproject.toml"
     else
@@ -170,27 +165,20 @@ check_dependency_drift() {
         exit 1
     fi
 
-    # 3. Verify installed packages match uv.lock exactly.
-    #    'uv sync --frozen --check' (uv >=0.4) exits non-zero if the venv
-    #    diverges from the lockfile — catching manual pip installs or removals
-    #    that happened after setup. This is the primary drift detection gate.
+    # 3. Verify installed packages match uv.lock exactly
     if $UV sync --frozen --dev --check 2>/dev/null; then
         echo " uv sync --frozen --check — installed packages match uv.lock exactly"
     else
         echo "ERROR: Installed packages diverge from uv.lock."
-        echo "       This usually means someone ran 'pip install' manually after setup."
         echo "       To fix: bash setup.sh  (re-syncs from uv.lock)"
         exit 1
     fi
 
-    # 4. Cross-check critical package versions directly in Python as a final
-    #    sanity gate — uv sync --check may not exist in older uv builds,
-    #    so this Python check is the fallback that always works.
+    # 4. Cross-check critical package versions directly in Python
     $PYTHON -c "
 import importlib.metadata as meta
+from packaging.version import Version
 
-# Critical packages with minimum versions required for this project.
-# These are a subset of pyproject.toml — add more if drift in these causes breakage.
 required = {
     'torch':            ('2.0.0',  '2.0.1+cu117'),
     'transformers':     ('4.35.0', None),
@@ -201,8 +189,6 @@ required = {
     'numpy':            ('1.24.0', None),
     'pandas':           ('2.2.0',  None),
 }
-
-from packaging.version import Version
 drift = []
 for pkg, (min_ver, exact_ver) in required.items():
     try:
@@ -210,20 +196,16 @@ for pkg, (min_ver, exact_ver) in required.items():
         if Version(installed) < Version(min_ver):
             drift.append(f'{pkg}: installed {installed} < required {min_ver}')
         elif exact_ver and installed != exact_ver:
-            # Warn on exact mismatch (torch wheel) but do not hard-fail —
-            # a newer compatible wheel is acceptable; a CPU wheel is not.
             print(f'  WARNING: {pkg} installed={installed}, expected={exact_ver} (check wheel type)')
         else:
             print(f'  {pkg:<20} {installed} — ok')
     except meta.PackageNotFoundError:
         drift.append(f'{pkg}: NOT INSTALLED')
-
 if drift:
     print('ERROR: Dependency drift detected:')
     for d in drift:
         print(f'  {d}')
     raise SystemExit(1)
-
 print('  All critical package versions verified — no drift detected')
 "
 }
@@ -256,43 +238,237 @@ for var, expected in checks.items():
 "
 }
 
+write_repro_module() {
+    # Generate src/repro.py — the canonical parity module imported by BOTH
+    # the notebook (Cell 1) and CLI scripts to guarantee identical reproducibility
+    # settings regardless of how the process was launched.
+    #
+    # Problem this solves:
+    #   setup.sh sets env vars and torch flags in the shell process.
+    #   The Jupyter kernel launches in a FRESH process — it inherits nothing.
+    #   A notebook running the same code as a CLI script silently uses different
+    #   settings, breaking notebook/CLI parity and making results non-reproducible.
+    #
+    # Solution:
+    #   src/repro.py is the single source of truth for all reproducibility config.
+    #   It reads .env, applies torch flags, and verifies everything is correct.
+    #   Both notebook Cell 1 and CLI scripts call: from src.repro import configure
+    #   This guarantees parity regardless of launch method.
+    echo " Writing src/repro.py — notebook/CLI parity module..."
+    mkdir -p "$PROJECT_ROOT/src"
+    cat > "$PROJECT_ROOT/src/repro.py" << 'PYEOF'
+# src/repro.py
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/repro.py
+#
+# Canonical reproducibility configuration module.
+# Import and call configure() as the FIRST statement in every notebook cell 1
+# and every CLI training/evaluation script to guarantee notebook/CLI parity.
+#
+# Usage in notebook Cell 1:
+#   from src.repro import configure
+#   configure()
+#
+# Usage in CLI scripts:
+#   from src.repro import configure
+#   configure()
+#
+# What it does:
+#   1. Loads .env (sets PYTHONHASHSEED, CUBLAS_WORKSPACE_CONFIG, TOKENIZERS_PARALLELISM)
+#   2. Seeds Python random, numpy, and torch with PYTHONHASHSEED
+#   3. Enables torch.use_deterministic_algorithms(True, warn_only=False)
+#   4. Sets cudnn.benchmark=False and cudnn.deterministic=True
+#   5. Verifies all settings took effect — raises AssertionError if not
+#   6. Returns a config dict for logging/manifest inclusion
+import os
+import random
+import logging
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# These values must match setup.sh and .env exactly.
+# If you change them here, update setup.sh, .env, and regenerate uv.lock.
+_EXPECTED_PYTHONHASHSEED = "0"
+_EXPECTED_CUBLAS_CFG = ":4096:8"
+_EXPECTED_TOKENIZERS_PAR = "false"
+_RANDOM_SEED = 0
+
+
+def _load_dotenv(project_root: Optional[Path] = None) -> None:
+    """Load .env from project root. Tries python-dotenv first, falls back to manual parse."""
+    root = project_root or Path(__file__).resolve().parent.parent
+    env_path = root / ".env"
+    if not env_path.exists():
+        raise FileNotFoundError(
+            f".env not found at {env_path}. "
+            "Run bash setup.sh to generate it."
+        )
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=False)
+        logger.debug("  .env loaded via python-dotenv")
+    except ImportError:
+        # Fallback: manual parse without python-dotenv
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    key = key.replace("export ", "").strip()
+                    val = val.strip()
+                    if key not in os.environ:
+                        os.environ[key] = val
+        logger.debug("  .env loaded via manual parse (python-dotenv not installed)")
+
+
+def _apply_torch_flags() -> None:
+    """Apply deterministic torch settings. Must be called after env vars are set."""
+    import torch
+
+    # CUBLAS_WORKSPACE_CONFIG must be set in env BEFORE this call —
+    # torch reads it at import time on some builds, but use_deterministic_algorithms
+    # enforces it at runtime. Setting it here is belt-and-suspenders.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", _EXPECTED_CUBLAS_CFG)
+
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def _seed_all(seed: int) -> None:
+    """Seed Python random, numpy, and torch for full reproducibility."""
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
+def _verify() -> dict:
+    """Verify all reproducibility settings are active. Raises AssertionError on failure."""
+    import torch
+
+    checks = {}
+
+    # Env vars
+    for var, expected in [
+        ("PYTHONHASHSEED",         _EXPECTED_PYTHONHASHSEED),
+        ("CUBLAS_WORKSPACE_CONFIG", _EXPECTED_CUBLAS_CFG),
+        ("TOKENIZERS_PARALLELISM",  _EXPECTED_TOKENIZERS_PAR),
+    ]:
+        actual = os.environ.get(var)
+        assert actual == expected, (
+            f"{var}={actual!r} — expected {expected!r}. "
+            f"Call configure() before importing torch or any ML library."
+        )
+        checks[var] = actual
+
+    # Torch flags
+    assert torch.are_deterministic_algorithms_enabled(), \
+        "torch.use_deterministic_algorithms not enabled — call configure() first"
+    checks["deterministic_algorithms"] = True
+
+    assert not torch.backends.cudnn.benchmark, \
+        "cudnn.benchmark=True — non-deterministic algorithm selection active"
+    checks["cudnn_benchmark"] = False
+
+    assert torch.backends.cudnn.deterministic, \
+        "cudnn.deterministic=False — non-deterministic cuDNN ops active"
+    checks["cudnn_deterministic"] = True
+
+    return checks
+
+
+def configure(
+    project_root: Optional[Path] = None,
+    verbose: bool = True,
+) -> dict:
+    """
+    Apply and verify all reproducibility settings.
+    Call as the FIRST statement in every notebook Cell 1 and CLI script.
+
+    Returns a config dict suitable for logging or manifest inclusion.
+
+    Example:
+        from src.repro import configure
+        repro_cfg = configure()
+    """
+    _load_dotenv(project_root)
+    _apply_torch_flags()
+    _seed_all(_RANDOM_SEED)
+    cfg = _verify()
+
+    if verbose:
+        import torch
+        print("  [repro] Reproducibility configured:")
+        print(f"    PYTHONHASHSEED={cfg['PYTHONHASHSEED']}")
+        print(f"    CUBLAS_WORKSPACE_CONFIG={cfg['CUBLAS_WORKSPACE_CONFIG']}")
+        print(f"    TOKENIZERS_PARALLELISM={cfg['TOKENIZERS_PARALLELISM']}")
+        print(f"    deterministic_algorithms=True | cudnn.benchmark=False | cudnn.deterministic=True")
+        print(f"    seeds: random={_RANDOM_SEED}, numpy={_RANDOM_SEED}, torch={_RANDOM_SEED}")
+        if torch.cuda.is_available():
+            print(f"    torch.cuda.manual_seed_all({_RANDOM_SEED}) applied to {torch.cuda.device_count()} GPU(s)")
+
+    return cfg
+PYEOF
+    echo " src/repro.py written"
+
+    # Verify the module is importable and configure() runs cleanly
+    $PYTHON -c "
+import sys
+sys.path.insert(0, '${PROJECT_ROOT}')
+from src.repro import configure
+cfg = configure(verbose=True)
+assert cfg['PYTHONHASHSEED'] == '0'
+assert cfg['CUBLAS_WORKSPACE_CONFIG'] == ':4096:8'
+assert cfg['TOKENIZERS_PARALLELISM'] == 'false'
+assert cfg['deterministic_algorithms'] is True
+assert cfg['cudnn_benchmark'] is False
+assert cfg['cudnn_deterministic'] is True
+print('  src/repro.configure() — import and execution verified')
+"
+}
+
 verify_numerical_stability() {
     echo " Verifying numerical/runtime stability configuration..."
     $PYTHON -c "
 import os, torch
 
-# 1. CUBLAS_WORKSPACE_CONFIG must be set before torch import
 cublas_cfg = os.environ.get('CUBLAS_WORKSPACE_CONFIG', '')
 assert cublas_cfg == ':4096:8', (
     f'CUBLAS_WORKSPACE_CONFIG={cublas_cfg!r} — must be :4096:8 for deterministic cuBLAS.'
 )
 print(f'  CUBLAS_WORKSPACE_CONFIG={cublas_cfg} — ok')
 
-# 2. Enable deterministic algorithms — warn_only=False raises on non-deterministic ops
 torch.use_deterministic_algorithms(True, warn_only=False)
 assert torch.are_deterministic_algorithms_enabled(), \
     'torch.use_deterministic_algorithms(True) did not take effect'
 print(f'  torch.use_deterministic_algorithms: enabled (warn_only=False)')
 
-# 3. Disable cuDNN benchmark — prevents auto-selection of non-deterministic algorithms
 torch.backends.cudnn.benchmark = False
 assert not torch.backends.cudnn.benchmark, \
     'cudnn.benchmark=True — non-deterministic algorithm selection is active'
 print(f'  cudnn.benchmark: False — deterministic algorithm selection')
 
-# 4. Enable cuDNN deterministic mode — forces bit-exact cuDNN ops
 torch.backends.cudnn.deterministic = True
 assert torch.backends.cudnn.deterministic, \
     'cudnn.deterministic=False — cuDNN may produce non-deterministic results'
 print(f'  cudnn.deterministic: True — bit-exact cuDNN ops enabled')
 
-# 5. Verify PYTHONHASHSEED
 hashseed = os.environ.get('PYTHONHASHSEED', 'not set')
 assert hashseed == '0', \
     f'PYTHONHASHSEED={hashseed!r} — must be 0 for deterministic hash randomization'
 print(f'  PYTHONHASHSEED={hashseed} — deterministic hash randomization')
 
-# 6. Verify TOKENIZERS_PARALLELISM
 tok_par = os.environ.get('TOKENIZERS_PARALLELISM', 'not set')
 assert tok_par == 'false', \
     f'TOKENIZERS_PARALLELISM={tok_par!r} — must be false to prevent tokenizer fork deadlocks'
@@ -300,8 +476,8 @@ print(f'  TOKENIZERS_PARALLELISM={tok_par} — tokenizer fork safety enabled')
 
 print()
 print('  Numerical stability configuration verified.')
-print('  NOTE: Notebooks must also call torch.use_deterministic_algorithms(True, warn_only=False)')
-print('        in Cell 1 before any GPU ops.')
+print('  NOTE: Notebooks must call: from src.repro import configure; configure()')
+print('        This is the ONLY correct way to ensure notebook/CLI parity.')
 "
 }
 
@@ -527,6 +703,9 @@ manifest = {
         'cudnn_benchmark': torch.backends.cudnn.benchmark,
         'cudnn_deterministic': torch.backends.cudnn.deterministic,
     },
+    # --- Notebook/CLI parity ---
+    'parity_module': 'src/repro.py',
+    'parity_usage': 'from src.repro import configure; configure()',
     # --- Hardware targets (from setup.sh constants) ---
     'hardware_target': {
         'gpu_name': '${TARGET_GPU_NAME}',
@@ -568,6 +747,7 @@ print(f'  git sha: ${GIT_SHA} | branch: ${GIT_BRANCH} | dirty files: ${GIT_DIRTY
 print(f'  uv.lock sha256: ${UVLOCK_SHA256}')
 print(f'  repro env: PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 TOKENIZERS_PARALLELISM=false')
 print(f'  numerical stability: deterministic_algorithms=True cudnn.benchmark=False cudnn.deterministic=True')
+print(f'  parity module: src/repro.py — use: from src.repro import configure; configure()')
 "
 }
 
@@ -614,6 +794,7 @@ echo " spaCy model: ${SPACY_MODEL} ${SPACY_MODEL_VERSION} (pinned + checksummed)
 echo " Offline mode: OFFLINE=1 bash setup.sh (requires .cache/spacy/ wheel)"
 echo " Repro vars:   PYTHONHASHSEED=0 | CUBLAS_WORKSPACE_CONFIG=:4096:8 | TOKENIZERS_PARALLELISM=false"
 echo " Stability:    deterministic_algorithms=True | cudnn.benchmark=False | cudnn.deterministic=True"
+echo " Parity:       src/repro.py — from src.repro import configure; configure()"
 echo "============================================================"
 check_uv
 check_lockfile
@@ -623,6 +804,7 @@ verify_python
 sync_dependencies
 check_dependency_drift
 write_repro_env
+write_repro_module
 verify_numerical_stability
 download_nlp_models
 run_env_smoke_tests
@@ -632,11 +814,13 @@ register_kernel
 verify_tests
 echo "============================================================"
 echo " Environment ready."
-echo " Activate:  source .venv/bin/activate"
-echo " Kernel:    HallucinationLegalRAG (${TARGET_PYTHON_VERSION})"
-echo " Manifest:  logs/environment_manifest.json"
-echo " Repro env: source .env  (or dotenv.load_dotenv() in notebook)"
-echo " CPU mode:  SKIP_GPU=1 bash setup.sh"
-echo " Dry run:   DRY_RUN=1 bash setup.sh"
-echo " Offline:   OFFLINE=1 bash setup.sh"
+echo " Activate:   source .venv/bin/activate"
+echo " Kernel:     HallucinationLegalRAG (${TARGET_PYTHON_VERSION})"
+echo " Manifest:   logs/environment_manifest.json"
+echo " Repro env:  source .env  (or dotenv.load_dotenv() in notebook)"
+echo " Parity:     Add to notebook Cell 1:"
+echo "               from src.repro import configure; configure()"
+echo " CPU mode:   SKIP_GPU=1 bash setup.sh"
+echo " Dry run:    DRY_RUN=1 bash setup.sh"
+echo " Offline:    OFFLINE=1 bash setup.sh"
 echo "============================================================"
