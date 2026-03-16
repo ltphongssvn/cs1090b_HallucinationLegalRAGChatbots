@@ -79,11 +79,14 @@ preflight_fast_checks() {
         [[ "$line" =~ ^(pyproject|uv\.lock\ not) ]] && failures+=("$line")
     done <<< "$output"
 
+    # Skip GPU hardware checks in CI — no GPU available on CI runners
+    if [ "${CI:-}" != "1" ]; then
     output=$(_check_nvidia_smi_present 2>&1)
     echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
     echo "$output" | grep "^nvidia-smi not" | grep -q "." && failures+=("$(echo "$output" | grep '^nvidia-smi not')")
+    fi
 
-    if command -v nvidia-smi &>/dev/null; then
+    if [ "${CI:-}" != "1" ] && command -v nvidia-smi &>/dev/null; then
         output=$(_check_gpu_count_smi 2>&1)
         echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
         echo "$output" | grep "^GPU count" | grep -q "detected" && failures+=("$(echo "$output" | grep '^GPU count')")

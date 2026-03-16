@@ -131,7 +131,7 @@ jobs:
         run: uv sync --frozen --dev
 
       - name: Bootstrap environment (CPU-only, no downloads, no Jupyter)
-        run: SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 LOG_LEVEL=1 bash setup.sh
+        run: SKIP_GPU=1 NO_DOWNLOAD=1 NO_JUPYTER=1 LOG_LEVEL=1 CI=1 bash setup.sh
         env:
           PYTHONHASHSEED: "0"
           CUBLAS_WORKSPACE_CONFIG: ":4096:8"
@@ -211,7 +211,7 @@ jobs:
             --output=logs/pip-audit.json \
             2>&1 || true
           uv run python -c "
-          import json, sys, pathlib
+          import json, pathlib
           p = pathlib.Path('logs/pip-audit.json')
           if not p.exists():
               print('pip-audit output not found — skipping')
