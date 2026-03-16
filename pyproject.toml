@@ -10,30 +10,45 @@ requires-python = ">=3.11"
 dependencies = [
   "ipykernel",
   "jupyterlab",
-  # Data
+  # --- Data ---
   "datasets>=2.16",
   "pandas>=2.2.0",
   "numpy>=1.24.0,<2.0.0",
-  # Deep Learning
+  # --- Deep Learning ---
   "torch>=2.0",
   "transformers>=4.35,<4.41",
   "sentence-transformers>=2.2",
-  # NLP
+  # Multi-GPU distributed training across 4x L4 GPUs
+  "accelerate>=0.20",
+  # --- NLP ---
   "gensim>=4.3",
   "spacy>=3.7",
-  # RAG
+  # --- RAG ---
   "langchain>=0.1",
   "faiss-cpu>=1.7",
-  # Knowledge Graph
+  # --- Knowledge Graph ---
   "networkx>=3.4.0",
-  # Evaluation & Viz
+  # --- Evaluation & Metrics ---
+  # Recall@k, Precision@k, NDCG@10, MRR for retrieval benchmarking
+  "evaluate>=0.4",
+  # NLI-based faithfulness + claim-level hallucination rate (RAGAS framework)
+  "ragas>=0.1",
+  # Generation-level ROUGE for response quality
+  "rouge-score>=0.1",
+  # --- Experiment Tracking ---
+  # W&B: log retrieval metrics, hallucination rates, training curves per architecture
+  # Enables comparison of TF-IDF vs CNN vs LSTM vs BERT vs KG retrievers
+  "wandb>=0.16",
+  # --- Viz & Analysis ---
   "scikit-learn>=1.5.0",
   "matplotlib",
   "seaborn>=0.13.0",
-  # Utilities
+  # --- Utilities ---
   "requests",
   "pillow",
   "ipywidgets>=8.1.8",
+  "python-dotenv>=1.0",
+  "tqdm>=4.66",
 ]
 [dependency-groups]
 dev = [
@@ -52,4 +67,5 @@ markers = [
     "integration: Pipeline on frozen fixtures",
     "contract: Schema, provenance, quality thresholds",
     "regression: Guard against schema drift",
+    "gpu: Requires CUDA GPU",
 ]
