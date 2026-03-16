@@ -2,12 +2,7 @@
 # scripts/bootstrap_env.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/bootstrap_env.sh
 # Responsibility: base environment bootstrap — uv, lockfile, venv, deps, drift.
-# Python drift check logic lives in src/drift_check.py.
 # Sourced by setup.sh — defines functions only, no top-level execution.
-#
-# Mutating steps and their DRY_RUN behaviour:
-#   ensure_venv        — would create/delete .venv
-#   sync_dependencies  — would install packages from uv.lock
 
 _check_disk_space() {
     local free_gb msg
@@ -29,8 +24,12 @@ _check_lockfile_present() {
         echo -e "  ${C_RED}✗${C_RESET} uv.lock not found"
         echo "uv.lock not found — run: uv lock && git add uv.lock && git commit"; ok=false
     fi
-    [ "$ok" = "true" ] && _msg_ok "pyproject.toml + uv.lock: present"
-    [ "$ok" = "false" ] && return 1
+    # Use if/fi instead of && pattern — avoids set -e triggering on false condition
+    if [ "$ok" = "true" ]; then
+        _msg_ok "pyproject.toml + uv.lock: present"
+        return 0
+    fi
+    return 1
 }
 
 _check_uv_present() {
@@ -116,7 +115,8 @@ verify_python() {
 }
 
 sync_dependencies() {
-    _require_uv; _require_python
+    # DRY_RUN guard BEFORE _require_python — dry-run must work without a venv
+    _require_uv
 
     if _is_dry_run; then
         _msg_dry_run "sync packages from uv.lock" "uv sync --frozen --dev"
@@ -124,18 +124,15 @@ sync_dependencies() {
         step_end "sync_dependencies" "DRY"; return
     fi
 
+    _require_python
     _msg_info "Syncing from uv.lock (--frozen) — may take minutes on first run..."
     _msg_info "uv caches wheels in ~/.cache/uv — subsequent runs are fast"
-    _msg_info "--dev explicit: ensures pytest/mypy/pip-audit/cyclonedx-bom always installed"
+    _msg_info "--dev explicit: ensures pytest/mypy/ruff/pip-audit always installed"
     "$UV" sync --frozen --dev
     _msg_ok "Dependencies synced from uv.lock"
 }
 
 _run_vulnerability_audit() {
-    # Vulnerability audit via pip-audit — scans all installed packages against
-    # the OSV (Open Source Vulnerabilities) database.
-    # For legal AI: ensures no known CVEs in the dependency chain that could
-    # compromise data integrity, model outputs, or compliance posture.
     _require_python
     _msg_info "Running vulnerability audit (pip-audit against OSV database)..."
 
@@ -143,7 +140,7 @@ _run_vulnerability_audit() {
         _msg_warn "pip-audit not found" \
             "pip-audit is not installed in the venv" \
             "action-required" \
-            "STEP=sync_dependencies bash setup.sh  (pip-audit is a dev dependency)"
+            "STEP=sync_dependencies bash setup.sh"
         return 0
     fi
 
@@ -155,7 +152,6 @@ _run_vulnerability_audit() {
         2>&1) && audit_exit=0 || audit_exit=$?
 
     if [ "$audit_exit" -ne 0 ]; then
-        # Parse JSON to count and display vulnerabilities clearly
         local vuln_count
         vuln_count=$(echo "$audit_output" | $PYTHON -c "
 import json, sys
@@ -172,11 +168,9 @@ except Exception:
         _msg_warn "Vulnerability audit found issues" \
             "${vuln_count} package(s) with known CVEs" \
             "action-required" \
-            "Review above CVEs. Update affected packages in pyproject.toml, then: uv lock && bash setup.sh"
-        # Warn but do not hard-fail — allows setup to complete on air-gapped nodes
-        # where pip-audit cannot reach OSV. Treat as gate in CI via: make audit
+            "Review CVEs above. Update affected packages in pyproject.toml, then: uv lock && bash setup.sh"
     else
-        _msg_ok "Vulnerability audit passed — no known CVEs in installed packages"
+        _msg_ok "Vulnerability audit passed — no known CVEs"
     fi
 }
 
@@ -184,7 +178,6 @@ check_dependency_drift() {
     _require_uv; _require_python
     echo " Checking for dependency drift..."
 
-    # --- Tier 1: Timestamp gate ---
     if [ "${PROJECT_ROOT}/pyproject.toml" -nt "${PROJECT_ROOT}/uv.lock" ]; then
         _msg_error "Stale uv.lock" "pyproject.toml is newer than uv.lock" \
             "Collaborators will install different versions" \
@@ -193,7 +186,6 @@ check_dependency_drift() {
     fi
     _msg_ok "pyproject.toml vs uv.lock timestamp — ok"
 
-    # --- Tier 2: uv lockfile consistency ---
     "$UV" lock --check 2>/dev/null && _msg_ok "uv lock --check — consistent" || {
         _msg_error "uv.lock inconsistency" "uv lock --check failed" \
             "pyproject.toml constraints no longer satisfy uv.lock pins" \
@@ -201,7 +193,6 @@ check_dependency_drift() {
         exit 1
     }
 
-    # --- Tier 3: venv vs lockfile sync check ---
     "$UV" sync --frozen --dev --check 2>/dev/null && _msg_ok "uv sync --check — matches uv.lock" || {
         _msg_error "Package drift" "Installed packages diverge from uv.lock" \
             "Manual pip install after setup — results not reproducible" \
@@ -209,7 +200,6 @@ check_dependency_drift() {
         exit 1
     }
 
-    # --- Tiers 4+5: metadata + import/functional (src/drift_check.py) ---
     _msg_info "Running src/drift_check.py (Tier 4: metadata, Tier 5: import + functional)..."
     $PYTHON "${PROJECT_ROOT}/src/drift_check.py" || {
         _msg_error "Dependency drift check failed" "src/drift_check.py exited non-zero" \
@@ -219,6 +209,5 @@ check_dependency_drift() {
     }
     _msg_ok "Dependency drift check complete — all tiers passed"
 
-    # --- Tier 6: Vulnerability audit ---
     _run_vulnerability_audit
 }

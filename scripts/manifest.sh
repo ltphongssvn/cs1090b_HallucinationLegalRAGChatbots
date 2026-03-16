@@ -4,14 +4,6 @@
 # Responsibility: environment manifest + SBOM generation.
 # Python logic lives in src/manifest_collector.py.
 # Sourced by setup.sh — defines functions only, no top-level execution.
-#
-# Artifacts written:
-#   logs/environment_manifest.json  — full environment provenance
-#   logs/sbom.json                  — CycloneDX SBOM (all installed packages)
-#   logs/sbom.xml                   — CycloneDX SBOM in XML format
-#
-# Mutating steps and DRY_RUN behaviour:
-#   write_manifest — previewed, not executed under DRY_RUN=1
 
 _write_manifest_file() {
     local manifest_json="$1"
@@ -43,29 +35,19 @@ print(f'    cpu: {cpu.get(\"cpu_model\",\"unknown\")} | cores: {cpu.get(\"logica
 }
 
 _generate_sbom() {
-    # Generate CycloneDX SBOM (Software Bill of Materials).
-    # For legal AI: provides a complete, auditable record of all software
-    # components — required for compliance, vulnerability management, and
-    # supply chain integrity verification.
-    # Output: logs/sbom.json (CycloneDX JSON) + logs/sbom.xml (CycloneDX XML)
     _require_python
-    _msg_info "Generating CycloneDX SBOM (Software Bill of Materials)..."
+    _msg_info "Generating CycloneDX SBOM..."
 
     if ! $PYTHON -m cyclonedx_py --help &>/dev/null 2>&1; then
-        _msg_warn "cyclonedx-bom not found" \
-            "cyclonedx-bom not installed in venv" \
-            "informational" \
-            "STEP=sync_dependencies bash setup.sh  (cyclonedx-bom is a dev dependency)"
+        _msg_warn "cyclonedx-bom not found" "cyclonedx-bom not installed" \
+            "informational" "STEP=sync_dependencies bash setup.sh"
         return 0
     fi
 
     mkdir -p "${PROJECT_ROOT}/logs"
 
-    # Generate JSON SBOM
     if $PYTHON -m cyclonedx_py environment \
-        --of JSON \
-        --output-file "${PROJECT_ROOT}/logs/sbom.json" \
-        2>/dev/null; then
+        --of JSON --output-file "${PROJECT_ROOT}/logs/sbom.json" 2>/dev/null; then
         local pkg_count
         pkg_count=$($PYTHON -c "
 import json
@@ -75,28 +57,22 @@ print(len(data.get('components', [])))
 " 2>/dev/null || echo "?")
         _msg_ok "SBOM (JSON) → logs/sbom.json (${pkg_count} components)"
     else
-        _msg_warn "SBOM JSON generation failed" \
-            "cyclonedx_py exited non-zero for JSON output" \
-            "informational" \
-            "Manual: .venv/bin/python -m cyclonedx_py environment --of JSON --output-file logs/sbom.json"
+        _msg_warn "SBOM JSON generation failed" "cyclonedx_py exited non-zero" \
+            "informational" "Manual: .venv/bin/python -m cyclonedx_py environment --of JSON --output-file logs/sbom.json"
     fi
 
-    # Generate XML SBOM
     if $PYTHON -m cyclonedx_py environment \
-        --of XML \
-        --output-file "${PROJECT_ROOT}/logs/sbom.xml" \
-        2>/dev/null; then
+        --of XML --output-file "${PROJECT_ROOT}/logs/sbom.xml" 2>/dev/null; then
         _msg_ok "SBOM (XML)  → logs/sbom.xml"
     else
-        _msg_warn "SBOM XML generation failed" \
-            "cyclonedx_py exited non-zero for XML output" \
-            "informational" \
-            "Manual: .venv/bin/python -m cyclonedx_py environment --of XML --output-file logs/sbom.xml"
+        _msg_warn "SBOM XML generation failed" "cyclonedx_py exited non-zero" \
+            "informational" "Manual: .venv/bin/python -m cyclonedx_py environment --of XML --output-file logs/sbom.xml"
     fi
 }
 
 write_manifest() {
-    _require_python; _require_hardware_detected
+    # DRY_RUN guard BEFORE _require_python — dry-run must work without a venv
+    _require_hardware_detected
 
     if _is_dry_run; then
         local git_sha; git_sha=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
@@ -107,7 +83,9 @@ write_manifest() {
         step_end "write_manifest" "DRY"; return
     fi
 
-    echo " Writing environment manifest + SBOM..."
+    _require_python
+
+    echo " Writing environment manifest + SBOM (via src/manifest_collector.py)..."
     local git_sha git_branch git_dirty uvlock_sha256
     git_sha=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo "not-a-git-repo")
     git_branch=$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
