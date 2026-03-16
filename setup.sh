@@ -51,6 +51,7 @@ source "$PROJECT_ROOT/scripts/setup_nlp.sh"
 source "$PROJECT_ROOT/scripts/setup_notebook.sh"
 source "$PROJECT_ROOT/scripts/validate_tests.sh"
 source "$PROJECT_ROOT/scripts/manifest.sh"
+source "$PROJECT_ROOT/scripts/download_datasets.sh"
 
 trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
 
@@ -151,6 +152,7 @@ run_step run_env_smoke_tests
 run_step run_gpu_smoke_tests
 run_step write_manifest
 run_step register_kernel
+run_step download_datasets        # setup_datasets (MUTATING, respects NO_DOWNLOAD=1)
 run_step verify_tests
 
 print_summary

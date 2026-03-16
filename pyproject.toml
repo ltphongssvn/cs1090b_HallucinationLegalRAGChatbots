@@ -17,6 +17,8 @@ dependencies = [
   "transformers>=4.35,<4.41",
   "sentence-transformers>=2.2",
   "accelerate>=0.20",
+  # Parameter-efficient fine-tuning (LoRA/prefix-tuning for Legal-BERT)
+  "peft>=0.7",
   # --- NLP ---
   "gensim>=4.3",
   "spacy>=3.7",
@@ -49,10 +51,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "types-requests>=2.32.4.20260107",
-    # Vulnerability scanning — audit all installed packages against OSV database
-    # Run via: uv run pip-audit   or: STEP=check_dependency_drift bash setup.sh
     "pip-audit>=2.7",
-    # SBOM generation in CycloneDX format — required for legal AI compliance
     "cyclonedx-bom>=4.4",
 ]
 [tool.pytest.ini_options]

@@ -21,6 +21,7 @@ REQUIRED: list[tuple[str, str, str, str | None]] = [
     ("numpy",            "numpy",          "1.24.0", None),
     ("pandas",           "pandas",         "2.2.0",  None),
     ("accelerate",       "accelerate",     "0.20.0", None),
+    ("peft",             "peft",           "0.7.0",  None),
     ("evaluate",         "evaluate",       "0.4.0",  None),
     ("ragas",            "ragas",          "0.1.0",  None),
     ("wandb",            "wandb",          "0.16.0", None),
@@ -90,14 +91,21 @@ def _check_pandas(mod: object) -> str:
 
 def _check_accelerate(mod: object) -> str:
     import accelerate  # type: ignore[import]
-    # Functional: confirm Accelerator class is importable (core class for multi-GPU)
     from accelerate import Accelerator  # type: ignore[import]
     return f"version={accelerate.__version__}, Accelerator importable"
 
 
+def _check_peft(mod: object) -> str:
+    import peft  # type: ignore[import]
+    from peft import LoraConfig, TaskType  # type: ignore[import]
+    # Functional: instantiate a LoraConfig — confirms PEFT core API accessible
+    cfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=8, lora_alpha=16)
+    assert cfg.r == 8, f"LoraConfig.r={cfg.r}, expected 8"
+    return f"version={peft.__version__}, LoraConfig(r=8) ok"
+
+
 def _check_evaluate(mod: object) -> str:
     import evaluate  # type: ignore[import]
-    # Functional: confirm module loads (metric loading requires network; skip here)
     return f"version={evaluate.__version__}, module ok"
 
 
@@ -108,9 +116,8 @@ def _check_ragas(mod: object) -> str:
 
 def _check_wandb(mod: object) -> str:
     import wandb  # type: ignore[import]
-    # Functional: confirm sdk object is accessible without network call
-    assert hasattr(wandb, "init"), "wandb.init not found — unexpected install"
-    assert hasattr(wandb, "log"),  "wandb.log not found — unexpected install"
+    assert hasattr(wandb, "init"), "wandb.init not found"
+    assert hasattr(wandb, "log"),  "wandb.log not found"
     return f"version={wandb.__version__}, init/log API accessible"
 
 
@@ -124,6 +131,7 @@ FUNCTIONAL_CHECKS: list[tuple[str, Callable[[object], str]]] = [
     ("numpy",        _check_numpy),
     ("pandas",       _check_pandas),
     ("accelerate",   _check_accelerate),
+    ("peft",         _check_peft),
     ("evaluate",     _check_evaluate),
     ("ragas",        _check_ragas),
     ("wandb",        _check_wandb),
