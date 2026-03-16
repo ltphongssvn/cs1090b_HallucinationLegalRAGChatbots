@@ -382,8 +382,25 @@ print(f'  kernel path: {spec[\"resource_dir\"]}')
 }
 
 verify_tests() {
-    echo " Verifying pytest test collection..."
-    $UV run pytest --co -q || echo "WARNING: No tests collected yet"
+    echo " Verifying test suite..."
+
+    # Count unit-marked tests — if any exist, run them as the real gate.
+    # Unit tests are pure-function / no-I/O by marker contract, so they are
+    # always safe and fast to run during setup verification.
+    # Collection-only (--co) is the fallback for a fresh repo with no tests yet.
+    UNIT_COUNT=$($UV run pytest tests/ --co -q -m unit 2>/dev/null | grep -c "^tests/" || true)
+
+    if [ "${UNIT_COUNT}" -gt 0 ]; then
+        echo " Found ${UNIT_COUNT} unit tests — running as verification gate..."
+        $UV run pytest tests/ -m unit -q --tb=short && \
+            echo " Unit tests passed — environment verified" || \
+            { echo "ERROR: Unit tests failed — environment may be broken"; exit 1; }
+    else
+        echo " No unit tests found yet — falling back to collection check..."
+        $UV run pytest tests/ --co -q 2>/dev/null && \
+            echo " Test collection ok — no unit tests to run yet" || \
+            echo "WARNING: Test collection failed — check src/ imports"
+    fi
 }
 
 echo "============================================================"
