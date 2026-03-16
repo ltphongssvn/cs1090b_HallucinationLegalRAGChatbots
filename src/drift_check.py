@@ -3,7 +3,6 @@
 # Responsibility: verify installed package versions meet minimum requirements
 #                 and that actual imports + functional calls succeed.
 # Called by scripts/bootstrap_env.sh Tier 4+5 via: $PYTHON src/drift_check.py
-# Keeping this in Python (not a shell heredoc) enables mypy, ruff, and pytest.
 import importlib
 import importlib.metadata as meta
 import sys
@@ -11,7 +10,7 @@ from typing import Callable
 
 from packaging.version import Version  # type: ignore[import]
 
-# Core packages: (dist_name, import_name, min_version, exact_version_or_None)
+# (dist_name, import_name, min_version, exact_version_or_None)
 REQUIRED: list[tuple[str, str, str, str | None]] = [
     ("torch",            "torch",          "2.0.0",  "2.0.1+cu117"),
     ("transformers",     "transformers",   "4.35.0", None),
@@ -21,10 +20,15 @@ REQUIRED: list[tuple[str, str, str, str | None]] = [
     ("scikit-learn",     "sklearn",        "1.5.0",  None),
     ("numpy",            "numpy",          "1.24.0", None),
     ("pandas",           "pandas",         "2.2.0",  None),
+    ("accelerate",       "accelerate",     "0.20.0", None),
+    ("evaluate",         "evaluate",       "0.4.0",  None),
+    ("ragas",            "ragas",          "0.1.0",  None),
+    ("wandb",            "wandb",          "0.16.0", None),
 ]
 
-# Functional checks: (import_name, check_fn, description)
-# Each check_fn receives the imported module and must not raise on success.
+FIX_HINT = "rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)"
+
+
 def _check_torch(mod: object) -> str:
     import torch  # type: ignore[import]
     t = torch.tensor([1.0, 2.0, 3.0])
@@ -84,6 +88,32 @@ def _check_pandas(mod: object) -> str:
     return f"version={pd.__version__}, DataFrame ok"
 
 
+def _check_accelerate(mod: object) -> str:
+    import accelerate  # type: ignore[import]
+    # Functional: confirm Accelerator class is importable (core class for multi-GPU)
+    from accelerate import Accelerator  # type: ignore[import]
+    return f"version={accelerate.__version__}, Accelerator importable"
+
+
+def _check_evaluate(mod: object) -> str:
+    import evaluate  # type: ignore[import]
+    # Functional: confirm module loads (metric loading requires network; skip here)
+    return f"version={evaluate.__version__}, module ok"
+
+
+def _check_ragas(mod: object) -> str:
+    import ragas  # type: ignore[import]
+    return f"version={ragas.__version__}, module ok"
+
+
+def _check_wandb(mod: object) -> str:
+    import wandb  # type: ignore[import]
+    # Functional: confirm sdk object is accessible without network call
+    assert hasattr(wandb, "init"), "wandb.init not found — unexpected install"
+    assert hasattr(wandb, "log"),  "wandb.log not found — unexpected install"
+    return f"version={wandb.__version__}, init/log API accessible"
+
+
 FUNCTIONAL_CHECKS: list[tuple[str, Callable[[object], str]]] = [
     ("torch",        _check_torch),
     ("transformers", _check_transformers),
@@ -93,17 +123,15 @@ FUNCTIONAL_CHECKS: list[tuple[str, Callable[[object], str]]] = [
     ("sklearn",      _check_sklearn),
     ("numpy",        _check_numpy),
     ("pandas",       _check_pandas),
+    ("accelerate",   _check_accelerate),
+    ("evaluate",     _check_evaluate),
+    ("ragas",        _check_ragas),
+    ("wandb",        _check_wandb),
 ]
-
-FIX_HINT = "rm -rf .venv && bash setup.sh  (reinstalls from uv.lock)"
 
 
 def tier4_metadata_check() -> list[str]:
-    """
-    Tier 4: metadata version check via importlib.metadata.
-    Fast — no import needed. Catches missing installs and version mismatches.
-    NOTE: passes even for broken installs (missing .so). Tier 5 catches those.
-    """
+    """Tier 4: metadata version check. Fast — no import needed."""
     drift: list[str] = []
     for dist_name, _import_name, min_ver, exact_ver in REQUIRED:
         try:
@@ -123,11 +151,7 @@ def tier4_metadata_check() -> list[str]:
 
 
 def tier5_import_functional_check() -> list[str]:
-    """
-    Tier 5: actual import + minimal functional call.
-    Catches broken installs that pass metadata: missing .so, ABI mismatch,
-    corrupt wheel, missing C extension.
-    """
+    """Tier 5: actual import + functional call. Catches broken .so / ABI mismatch."""
     failed: list[str] = []
     func_map = {name: fn for name, fn in FUNCTIONAL_CHECKS}
 
@@ -136,8 +160,7 @@ def tier5_import_functional_check() -> list[str]:
             mod = importlib.import_module(import_name)
         except ImportError as e:
             print(f"\033[0;31m  ✗ {dist_name}: import failed — {e}\033[0m")
-            print(f"    Why: Package metadata exists but module cannot load")
-            print(f"         Likely: missing .so, ABI mismatch, or corrupt wheel")
+            print(f"    Why: metadata exists but module cannot load (missing .so / ABI mismatch)")
             print(f"    Fix: {FIX_HINT}")
             failed.append(dist_name)
             continue
@@ -149,12 +172,12 @@ def tier5_import_functional_check() -> list[str]:
 
         check_fn = func_map.get(import_name)
         if check_fn is None:
-            print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok (no functional check defined)")
+            print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok (no functional check)")
             continue
 
         try:
             result = check_fn(mod)
-            print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok | functional: {result}")
+            print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok | {result}")
         except Exception as e:
             print(f"\033[0;31m  ✗ {dist_name}: import ok but functional call failed — {e}\033[0m")
             print(f"    Why: C extension loaded but core op is broken")
@@ -168,18 +191,17 @@ def main() -> None:
     print("  Tier 4: metadata version check...")
     drift = tier4_metadata_check()
     if drift:
-        print("\n  \033[0;31mDrift detected — packages below minimum required versions:\033[0m")
+        print("\n  \033[0;31mDrift detected:\033[0m")
         for d in drift:
             print(f"  \033[0;31m  • {d}\033[0m")
         print(f"  \033[0;36m  Fix: bash setup.sh\033[0m")
         sys.exit(1)
     print("  Metadata versions ok — proceeding to import verification")
 
-    print("\n  Tier 5: actual import + functional call (catches broken .so / ABI issues)...")
+    print("\n  Tier 5: actual import + functional call...")
     failed = tier5_import_functional_check()
     if failed:
         print(f"\n\033[0;31m  {len(failed)} package(s) failed: {failed}\033[0m")
-        print(f"\033[0;36m  These passed metadata but failed at runtime.\033[0m")
         print(f"\033[0;36m  Fix: {FIX_HINT}\033[0m")
         sys.exit(1)
 

@@ -2,7 +2,6 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/src/manifest_collector.py
 # Responsibility: collect all environment state and print as JSON to stdout.
 # Called by scripts/manifest.sh via: $PYTHON src/manifest_collector.py <args>
-# Keeping this in Python (not a shell heredoc) enables mypy, ruff, and pytest.
 import argparse
 import importlib.metadata as meta
 import json
@@ -67,7 +66,6 @@ def get_installed_versions(pkgs: list[str]) -> dict[str, str]:
 
 
 def parse_freeze(freeze_str: str) -> dict[str, str]:
-    """Convert pip freeze output into {package: version} dict."""
     result: dict[str, str] = {}
     for line in freeze_str.strip().splitlines():
         line = line.strip()
@@ -82,7 +80,6 @@ def parse_freeze(freeze_str: str) -> dict[str, str]:
 
 
 def get_cpu_info() -> dict[str, object]:
-    """CPU/RAM metadata — useful for DataLoader worker capacity profiling."""
     info: dict[str, object] = {
         "physical_cores": "unknown",
         "logical_cores": "unknown",
@@ -118,7 +115,6 @@ def get_cpu_info() -> dict[str, object]:
 
 
 def get_gpu_list() -> list[dict[str, object]]:
-    """Query torch for per-GPU properties."""
     import torch  # type: ignore[import]
     gpus: list[dict[str, object]] = []
     if torch.cuda.is_available():
@@ -134,7 +130,6 @@ def get_gpu_list() -> list[dict[str, object]]:
 
 
 def collect(args: argparse.Namespace) -> dict[str, object]:
-    """Collect all manifest data and return as a dict."""
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
     import spacy  # type: ignore[import]
@@ -145,31 +140,24 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
 
     return {
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        # --- Repo provenance ---
         "git_sha": args.git_sha,
         "git_branch": args.git_branch,
         "git_dirty_files": int(args.git_dirty) if args.git_dirty.isdigit() else -1,
         "uv_lock_sha256": args.uvlock_sha256,
-        # --- Tool versions ---
         "uv_version": args.uv_version,
-        # --- Cluster / host provenance ---
         "hostname": args.hostname,
         "slurm_job_id": args.slurm_job_id,
         "slurm_job_name": args.slurm_job_name,
         "slurm_nodelist": args.slurm_nodelist,
-        # --- CPU / RAM ---
         "cpu": get_cpu_info(),
-        # --- Python ---
         "python": sys.version,
         "python_path": sys.path,
         "platform": platform.platform(),
-        # --- CUDA environment variables ---
         "cuda_env": {
             "CUDA_HOME": os.environ.get("CUDA_HOME", "NOT SET"),
             "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "NOT SET"),
             "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", "NOT SET"),
         },
-        # --- Reproducibility ---
         "repro_env": {
             "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED", "NOT SET"),
             "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG", "NOT SET"),
@@ -183,7 +171,6 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         },
         "parity_module": "src/repro.py",
         "parity_usage": "from src.repro import configure; configure()",
-        # --- Hardware targets ---
         "hardware_target": {
             "gpu_name": args.target_gpu_name,
             "gpu_count": int(args.target_gpu_count),
@@ -194,7 +181,6 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "python_version": args.target_python_version,
             "min_disk_gb": int(args.target_min_disk_gb),
         },
-        # --- Detected hardware ---
         "hardware_detected": {
             "gpu_name": args.detected_gpu_name,
             "gpu_count": args.detected_gpu_count,
@@ -203,7 +189,6 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
             "cudnn": args.detected_cudnn,
             "hardware_match": args.hardware_match,
         },
-        # --- Torch & CUDA (actual) ---
         "torch": torch.__version__,
         "torch_cuda_runtime": torch.version.cuda,
         "driver_cuda": get_driver_cuda(),
@@ -213,18 +198,22 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
         "cuda_available": torch.cuda.is_available(),
         "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "gpus": gpus,
-        # --- NLP / RAG libraries ---
         "transformers": transformers.__version__,
         "spacy": spacy.__version__,
         "spacy_model": args.spacy_model,
         "spacy_model_version": nlp.meta.get("version"),
         "spacy_model_sha256": args.spacy_model_sha256,
         "faiss": get_faiss_version(),
-        # --- Package snapshots ---
+        # Core + new DL tooling snapshot
         "installed_packages": get_installed_versions([
             "torch", "transformers", "datasets", "faiss-cpu", "spacy",
             "scikit-learn", "numpy", "pandas", "langchain", "gensim",
-            "sentence-transformers", "networkx", "pytest", "mypy", "hypothesis",
+            "sentence-transformers", "networkx",
+            # Multi-GPU, eval, experiment tracking
+            "accelerate", "evaluate", "ragas", "rouge-score",
+            "wandb",
+            # Dev
+            "pytest", "mypy", "hypothesis",
         ]),
         "freeze_snapshot": freeze_parsed,
         "freeze_snapshot_raw": args.freeze,
@@ -233,18 +222,15 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Collect environment manifest and print JSON.")
-    # Repo provenance
     parser.add_argument("--git-sha",         required=True)
     parser.add_argument("--git-branch",      required=True)
     parser.add_argument("--git-dirty",       required=True)
     parser.add_argument("--uvlock-sha256",   required=True)
-    # Tool versions / cluster
     parser.add_argument("--uv-version",      default="unknown")
     parser.add_argument("--hostname",        default="unknown")
     parser.add_argument("--slurm-job-id",    default="none")
     parser.add_argument("--slurm-job-name",  default="none")
     parser.add_argument("--slurm-nodelist",  default="none")
-    # Hardware targets
     parser.add_argument("--target-gpu-name",       required=True)
     parser.add_argument("--target-gpu-count",      required=True)
     parser.add_argument("--target-cap-major",      required=True)
@@ -254,17 +240,14 @@ def main() -> None:
     parser.add_argument("--target-driver-cuda",    required=True)
     parser.add_argument("--target-python-version", required=True)
     parser.add_argument("--target-min-disk-gb",    required=True)
-    # Detected hardware
     parser.add_argument("--detected-gpu-name",     required=True)
     parser.add_argument("--detected-gpu-count",    required=True)
     parser.add_argument("--detected-torch-cuda",   required=True)
     parser.add_argument("--detected-driver-cuda",  required=True)
     parser.add_argument("--detected-cudnn",        required=True)
     parser.add_argument("--hardware-match",        required=True)
-    # NLP
     parser.add_argument("--spacy-model",           required=True)
     parser.add_argument("--spacy-model-sha256",    required=True)
-    # Freeze snapshot
     parser.add_argument("--freeze",                default="unavailable")
 
     args = parser.parse_args()
