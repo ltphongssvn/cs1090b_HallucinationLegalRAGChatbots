@@ -100,15 +100,53 @@ sync_dependencies() {
 
 run_env_smoke_tests() {
     echo " Running environment smoke tests..."
+
+    # torch: version check + functional tensor op on CPU
     $PYTHON -c "
 import torch
 ver = torch.__version__
 assert ver.startswith('2.') and 'cu' in ver, f'Expected torch 2.x+cuXXX got {ver}'
-print(f'  torch {ver}')
+# Functional: basic tensor op must execute without error
+t = torch.tensor([1.0, 2.0, 3.0])
+assert torch.allclose(t.mean(), torch.tensor(2.0)), 'torch tensor op failed'
+print(f'  torch {ver} — tensor op ok')
 "
-    $PYTHON -c "import transformers; print(f'  transformers {transformers.__version__}')"
-    $PYTHON -c "import faiss; print(f'  faiss ok')"
-    $PYTHON -c "import spacy; print(f'  spacy {spacy.__version__}')"
+
+    # transformers: version check + tokenizer instantiation (no model download)
+    $PYTHON -c "
+import transformers
+from transformers import AutoTokenizer
+# Functional: tokenizer from a tiny bundled vocab — no network needed
+tok = AutoTokenizer.from_pretrained('bert-base-uncased', local_files_only=False)
+ids = tok('hello world', return_tensors='pt')
+assert ids['input_ids'].shape[1] > 0, 'tokenizer produced empty output'
+print(f'  transformers {transformers.__version__} — tokenizer ok')
+"
+
+    # faiss: import + functional flat index add/search
+    $PYTHON -c "
+import faiss, numpy as np
+# Functional: build a flat L2 index, add vectors, run a search
+dim = 64
+index = faiss.IndexFlatL2(dim)
+vecs = np.random.rand(10, dim).astype('float32')
+index.add(vecs)
+assert index.ntotal == 10, 'faiss index add failed'
+D, I = index.search(vecs[:1], 3)
+assert I.shape == (1, 3), 'faiss search returned wrong shape'
+print(f'  faiss ok — index add/search functional')
+"
+
+    # spacy: import + model load + pipeline run
+    $PYTHON -c "
+import spacy
+# Functional: load the model downloaded by download_nlp_models() and run a doc
+nlp = spacy.load('en_core_web_sm')
+doc = nlp('The Supreme Court ruled in favor of the plaintiff.')
+assert len(doc) > 0, 'spacy pipeline produced empty doc'
+ents = [ent.label_ for ent in doc.ents]
+print(f'  spacy {spacy.__version__} — pipeline ok, entities: {ents}')
+"
 }
 
 run_gpu_smoke_tests() {
@@ -196,9 +234,11 @@ log_gpu
 ensure_venv
 verify_python
 sync_dependencies
+# Note: download_nlp_models must run before run_env_smoke_tests
+# because spacy smoke test requires en_core_web_sm to be installed
+download_nlp_models
 run_env_smoke_tests
 run_gpu_smoke_tests
-download_nlp_models
 write_manifest
 register_kernel
 verify_tests
