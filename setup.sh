@@ -363,14 +363,22 @@ print(f'  uv.lock sha256: ${UVLOCK_SHA256}')
 
 register_kernel() {
     echo " Registering Jupyter kernel..."
-    $PYTHON -m ipykernel install --user --name hallucination-legal-rag --display-name "HallucinationLegalRAG (3.11.9)"
-    $PYTHON -c "
-import subprocess, json
-result = subprocess.run(['jupyter', 'kernelspec', 'list', '--json'], capture_output=True, text=True)
-kernels = json.loads(result.stdout).get('kernelspecs', {})
-assert 'hallucination-legal-rag' in kernels, 'Kernel registration failed'
-print('  kernel verified in kernelspec list')
-" || echo "WARNING: Could not verify kernel — jupyter may not be on PATH"
+    $PYTHON -m ipykernel install --user \
+        --name hallucination-legal-rag \
+        --display-name "HallucinationLegalRAG (3.11.9)"
+
+    # Verify using the venv's own jupyter, not whatever is on PATH —
+    # this ensures we're checking the same installation that will run the notebook
+    $PYTHON -m jupyter kernelspec list --json 2>/dev/null | $PYTHON -c "
+import sys, json
+data = json.load(sys.stdin)
+kernels = data.get('kernelspecs', {})
+assert 'hallucination-legal-rag' in kernels, \
+    'Kernel registration failed — not found in venv jupyter kernelspec list'
+spec = kernels['hallucination-legal-rag']
+print(f'  kernel verified via venv jupyter: {spec[\"spec\"][\"display_name\"]}')
+print(f'  kernel path: {spec[\"resource_dir\"]}')
+" || echo "WARNING: Could not verify kernel via venv jupyter — ipykernel may not be fully installed"
 }
 
 verify_tests() {
