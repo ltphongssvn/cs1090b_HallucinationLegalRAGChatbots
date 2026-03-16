@@ -80,14 +80,8 @@ jobs:
           enable-cache: true
       - run: uv python install 3.11.9
       - run: uv sync --frozen --dev
-      - name: Write .env and src/repro.py for CI
-        run: |
-          printf "export PYTHONHASHSEED=0
-export CUBLAS_WORKSPACE_CONFIG=:4096:8
-export TOKENIZERS_PARALLELISM=false
-export RANDOM_SEED=0
-" > .env
-          mkdir -p src logs
+      - name: Write CI reproducibility env
+        run: python scripts/ci_write_env.py
       - name: CPU inference forward pass
         run: |
           uv run python -c "
