@@ -32,16 +32,13 @@
 #   src/drift_check.py        — drift check Python logic (lintable/typed/testable)
 set -euo pipefail
 [ "${DEBUG:-0}" = "1" ] && set -x
-
 # --- Reproducibility: set before any Python or library is invoked ---
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export TOKENIZERS_PARALLELISM=false
-
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
-
 # Source all modules — lib.sh must be first (defines shared state + log level)
 # shellcheck source=scripts/lib.sh
 source "$PROJECT_ROOT/scripts/lib.sh"
@@ -52,9 +49,7 @@ source "$PROJECT_ROOT/scripts/setup_notebook.sh"
 source "$PROJECT_ROOT/scripts/validate_tests.sh"
 source "$PROJECT_ROOT/scripts/manifest.sh"
 source "$PROJECT_ROOT/scripts/download_datasets.sh"
-
 trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
-
 # ===========================================================================
 # preflight_fast_checks — spans bootstrap_env + validate_gpu helpers
 # ===========================================================================
@@ -67,11 +62,11 @@ preflight_fast_checks() {
 
     output=$(_check_disk_space 2>&1)
     echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-    echo "$output" | grep "^Disk:" | grep -q "." && failures+=("$(echo "$output" | grep '^Disk:')")
+    { echo "$output" | grep -q "^Disk:"; } && failures+=("$(echo "$output" | grep '^Disk:')") || true
 
     output=$(_check_uv_present 2>&1)
     echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-    echo "$output" | grep "^uv not" | grep -q "." && failures+=("$(echo "$output" | grep '^uv not')")
+    { echo "$output" | grep -q "^uv not"; } && failures+=("$(echo "$output" | grep '^uv not')") || true
 
     output=$(_check_lockfile_present 2>&1)
     echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
@@ -81,19 +76,19 @@ preflight_fast_checks() {
 
     # Skip GPU hardware checks in CI — no GPU available on CI runners
     if [ "${CI:-}" != "1" ]; then
-    output=$(_check_nvidia_smi_present 2>&1)
-    echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-    echo "$output" | grep "^nvidia-smi not" | grep -q "." && failures+=("$(echo "$output" | grep '^nvidia-smi not')")
+        output=$(_check_nvidia_smi_present 2>&1)
+        echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
+        { echo "$output" | grep -q "^nvidia-smi not"; } && failures+=("$(echo "$output" | grep '^nvidia-smi not')") || true
     fi
 
     if [ "${CI:-}" != "1" ] && command -v nvidia-smi &>/dev/null; then
         output=$(_check_gpu_count_smi 2>&1)
         echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-        echo "$output" | grep "^GPU count" | grep -q "detected" && failures+=("$(echo "$output" | grep '^GPU count')")
+        { echo "$output" | grep -q "^GPU count.*detected"; } && failures+=("$(echo "$output" | grep '^GPU count')") || true
 
         output=$(_check_gpu_name_smi 2>&1)
         echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-        echo "$output" | grep "^GPU name" | grep -q "detected" && failures+=("$(echo "$output" | grep '^GPU name')")
+        { echo "$output" | grep -q "^GPU name.*detected"; } && failures+=("$(echo "$output" | grep '^GPU name')") || true
 
         _check_driver_cuda_smi
     fi
@@ -113,12 +108,10 @@ preflight_fast_checks() {
     fi
     _msg_ok "All preflight fast checks passed."
 }
-
 # ===========================================================================
 # Main execution
 # ===========================================================================
 [ -n "${STEP:-}" ] && echo -e "${C_BOLD}${C_CYAN}Single-step mode: STEP=${STEP}${C_RESET}\n"
-
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_MAGENTA}${C_BOLD} DRY RUN MODE — no files written, no packages installed${C_RESET}"
@@ -129,7 +122,6 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
     echo -e "${C_DIM} Read-only steps run normally.${C_RESET}"
     echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}\n"
 fi
-
 echo -e "${C_BOLD}============================================================${C_RESET}"
 echo -e "${C_BOLD} cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap${C_RESET}"
 echo -e " Target: ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME} | Python ${TARGET_PYTHON_VERSION} | torch 2.0.1+cu117"
@@ -137,7 +129,6 @@ echo -e " Driver CUDA: ${TARGET_DRIVER_CUDA} (forward-compat) | torch runtime: $
 echo -e " Repro: PYTHONHASHSEED=${REPRO_PYTHONHASHSEED} | CUBLAS=${REPRO_CUBLAS_CFG} | RANDOM_SEED=${RANDOM_SEED}"
 echo -e " Modes: DRY_RUN=${DRY_RUN:-0} | SKIP_GPU=${SKIP_GPU:-0} | NO_DOWNLOAD=${NO_DOWNLOAD:-0} | NO_JUPYTER=${NO_JUPYTER:-0} | LOG_LEVEL=${LOG_LEVEL}"
 echo -e "${C_BOLD}============================================================${C_RESET}"
-
 run_step preflight_fast_checks
 run_step check_uv
 run_step check_lockfile
@@ -155,11 +146,9 @@ run_step run_env_smoke_tests
 run_step run_gpu_smoke_tests
 run_step write_manifest
 run_step register_kernel
-run_step download_datasets        # setup_datasets (MUTATING, respects NO_DOWNLOAD=1)
+run_step download_datasets
 run_step verify_tests
-
 print_summary
-
 echo -e "${C_BOLD}============================================================${C_RESET}"
 echo -e "${C_GREEN}${C_BOLD} Environment ready.${C_RESET}"
 echo -e ""
