@@ -7,12 +7,11 @@
 # Log levels (set via LOG_LEVEL env var):
 #   LOG_LEVEL=0 — quiet:   ERROR only
 #   LOG_LEVEL=1 — normal:  ERROR + WARN + OK  (default)
-#   LOG_LEVEL=2 — verbose: all messages including INFO (LOG_LEVEL=2 or VERBOSE=1)
+#   LOG_LEVEL=2 — verbose: all messages including INFO
 #
 # Example: LOG_LEVEL=0 bash setup.sh   (CI — errors only)
 #          LOG_LEVEL=2 bash setup.sh   (debugging — all output)
 #          VERBOSE=1   bash setup.sh   (alias for LOG_LEVEL=2)
-
 # ===========================================================================
 # Hardware target constants
 # ===========================================================================
@@ -25,7 +24,6 @@ TARGET_TORCH_CUDA_RUNTIME="11.7"
 TARGET_DRIVER_CUDA="12.8"
 TARGET_PYTHON_VERSION="3.11.9"
 TARGET_MIN_DISK_GB=50
-
 # ===========================================================================
 # Reproducibility constants
 # ===========================================================================
@@ -33,7 +31,6 @@ RANDOM_SEED=0
 REPRO_PYTHONHASHSEED=0
 REPRO_CUBLAS_CFG=":4096:8"
 REPRO_TOKENIZERS_PAR="false"
-
 # ===========================================================================
 # Pinned spaCy model
 # ===========================================================================
@@ -41,7 +38,6 @@ SPACY_MODEL="en_core_web_sm"
 SPACY_MODEL_VERSION="3.8.0"
 SPACY_MODEL_URL="https://github.com/explosion/spacy-models/releases/download/${SPACY_MODEL}-${SPACY_MODEL_VERSION}/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
 SPACY_MODEL_SHA256="5e97b9ec4f95153b992896c5c45b1a00c3fcde7f764426c5370f2f11e71abef2"  # pragma: allowlist secret
-
 # ===========================================================================
 # Runtime state
 # ===========================================================================
@@ -52,19 +48,13 @@ DETECTED_TORCH_CUDA="UNDETECTED"
 DETECTED_CUDNN="UNDETECTED"
 HARDWARE_MATCH="true"
 UV=""
-
 # ===========================================================================
-# Log level — controls message verbosity
-# LOG_LEVEL=0: quiet  (ERROR only)         — use for CI / automated pipelines
-# LOG_LEVEL=1: normal (ERROR+WARN+OK)      — default
-# LOG_LEVEL=2: verbose (all + INFO)        — use for debugging
-# VERBOSE=1 is an alias for LOG_LEVEL=2
+# Log level
 # ===========================================================================
 if [ "${VERBOSE:-0}" = "1" ]; then
     LOG_LEVEL=2
 fi
 LOG_LEVEL="${LOG_LEVEL:-1}"
-
 # ===========================================================================
 # Colors — disabled if not a TTY or LOG_LEVEL=0
 # ===========================================================================
@@ -76,7 +66,6 @@ else
     C_RESET=""; C_BOLD=""; C_GREEN=""; C_YELLOW=""; C_RED=""
     C_CYAN=""; C_DIM=""; C_BLUE=""; C_MAGENTA=""
 fi
-
 # ===========================================================================
 # Step framework
 # ===========================================================================
@@ -84,14 +73,11 @@ SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
 _step_start_time=0
 SETUP_START_TIME=$(date +%s)
 _CURRENT_STEP="(none)"
-
 step_begin() {
     _CURRENT_STEP="$1"
     _step_start_time=$(date +%s)
-    # Always print step header regardless of LOG_LEVEL — lets user track progress
     echo -e "${C_BOLD}${C_CYAN}▶ $1${C_RESET}"
 }
-
 step_end() {
     local name="$1" status="${2:-PASS}" duration=$(( $(date +%s) - _step_start_time ))
     _CURRENT_STEP="(none)"
@@ -103,17 +89,19 @@ step_end() {
         DRY)  SUMMARY_STATUS+=("${C_MAGENTA}DRY${C_RESET}") ;;
         *)    SUMMARY_STATUS+=("${C_RED}FAIL${C_RESET}") ;;
     esac
-    # Print duration only at verbose level — avoids clutter at normal/quiet
-    [ "${LOG_LEVEL}" -ge 2 ] && echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
+    # Use if/fi — avoids set -e killing script when LOG_LEVEL < 2
+    if [ "${LOG_LEVEL}" -ge 2 ]; then
+        echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
+    fi
 }
-
 print_summary() {
     local total_elapsed=$(( $(date +%s) - SETUP_START_TIME ))
     local mm=$(( total_elapsed / 60 )) ss=$(( total_elapsed % 60 ))
     echo -e "\n${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_BOLD} Setup Summary  ${C_DIM}(total: ${mm}m ${ss}s)${C_RESET}"
-    [ "${DRY_RUN:-0}" = "1" ] && \
+    if [ "${DRY_RUN:-0}" = "1" ]; then
         echo -e "${C_MAGENTA}${C_BOLD} DRY RUN — no files written, no packages installed${C_RESET}"
+    fi
     echo -e "${C_BOLD}============================================================${C_RESET}"
     printf "  %-40s %-8s %s\n" "Step" "Status" "Duration"
     printf "  %-40s %-8s %s\n" "----" "------" "--------"
@@ -124,7 +112,6 @@ print_summary() {
     done
     echo -e "${C_BOLD}============================================================${C_RESET}"
 }
-
 run_step() {
     local fn="$1"; shift
     if [ -n "${STEP:-}" ] && [ "$STEP" != "$fn" ]; then
@@ -133,20 +120,11 @@ run_step() {
     fi
     step_begin "$fn"; "$fn" "$@"; step_end "$fn" "PASS"
 }
-
 # ===========================================================================
-# Messaging helpers — respect LOG_LEVEL
-#
-# Level mapping:
-#   _msg_error → always printed (LOG_LEVEL 0+) — errors must never be silenced
-#   _msg_warn  → printed at LOG_LEVEL 1+        — warnings visible in normal mode
-#   _msg_ok    → printed at LOG_LEVEL 1+        — pass confirmations in normal mode
-#   _msg_info  → printed at LOG_LEVEL 2 only    — verbose detail, silent in CI
-#   _msg_skip  → printed at LOG_LEVEL 1+        — skip notices in normal mode
-#   _msg_dry_run → printed at LOG_LEVEL 1+      — dry-run previews in normal mode
+# Messaging helpers — use if/fi throughout to avoid set -e footguns.
+# The pattern '[ condition ] && cmd' exits 1 when condition is false,
+# which kills the script under set -e. Always use if/fi instead.
 # ===========================================================================
-
-# ERROR — always printed regardless of LOG_LEVEL
 _msg_error() {
     local topic="$1" what="$2" why="$3" fix="$4"
     echo -e "\n${C_RED}${C_BOLD}  ✗ ERROR — ${topic}${C_RESET}"
@@ -154,53 +132,40 @@ _msg_error() {
     echo -e "${C_DIM}    Why:   ${why}${C_RESET}"
     echo -e "${C_CYAN}    Fix:   ${fix}${C_RESET}\n"
 }
-
-# WARN — printed at LOG_LEVEL 1+ (normal and verbose)
 _msg_warn() {
-    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    if [ "${LOG_LEVEL}" -lt 1 ]; then return 0; fi
     local topic="$1" what="$2" severity="$3" action="$4"
     local tag
-    [ "$severity" = "action-required" ] && \
-        tag="${C_YELLOW}[ACTION REQUIRED]${C_RESET}" || \
+    if [ "$severity" = "action-required" ]; then
+        tag="${C_YELLOW}[ACTION REQUIRED]${C_RESET}"
+    else
         tag="${C_DIM}[informational]${C_RESET}"
+    fi
     echo -e "${C_YELLOW}  ⚠ WARNING — ${topic}${C_RESET} ${tag}"
     echo -e "${C_YELLOW}    ${what}${C_RESET}"
     echo -e "${C_CYAN}    → ${action}${C_RESET}"
 }
-
-# OK — printed at LOG_LEVEL 1+ (normal and verbose)
 _msg_ok() {
-    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    if [ "${LOG_LEVEL}" -lt 1 ]; then return 0; fi
     echo -e "  ${C_GREEN}✓${C_RESET} $1"
 }
-
-# INFO — printed at LOG_LEVEL 2 only (verbose)
-# Silent in normal (LOG_LEVEL=1) and quiet (LOG_LEVEL=0) modes.
-# Use for: progress detail, intermediate values, diagnostic context.
 _msg_info() {
-    [ "${LOG_LEVEL}" -lt 2 ] && return 0
+    if [ "${LOG_LEVEL}" -lt 2 ]; then return 0; fi
     echo -e "  ${C_BLUE}ℹ${C_RESET} $1"
 }
-
-# SKIP — printed at LOG_LEVEL 1+
 _msg_skip() {
-    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    if [ "${LOG_LEVEL}" -lt 1 ]; then return 0; fi
     echo -e "  ${C_DIM}⊘ $1${C_RESET}"
 }
-
-# DRY RUN — printed at LOG_LEVEL 1+
 _msg_dry_run() {
-    [ "${LOG_LEVEL}" -lt 1 ] && return 0
+    if [ "${LOG_LEVEL}" -lt 1 ]; then return 0; fi
     local action="$1" target="$2"
     echo -e "  ${C_MAGENTA}⊡ DRY RUN${C_RESET} — would ${action}: ${C_DIM}${target}${C_RESET}"
 }
-
 _is_dry_run() { [ "${DRY_RUN:-0}" = "1" ]; }
-
 # ===========================================================================
 # Strict failure handling — ERR trap + signal handlers
 # ===========================================================================
-
 _on_error() {
     local line="$1" cmd="$2"
     echo -e "\n${C_RED}${C_BOLD}============================================================${C_RESET}"
@@ -214,7 +179,6 @@ _on_error() {
     echo -e "${C_DIM}  Hint: LOG_LEVEL=2 bash setup.sh for verbose output${C_RESET}\n"
     print_summary
 }
-
 _on_sigint() {
     echo -e "\n\n${C_YELLOW}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_YELLOW}${C_BOLD}  SETUP INTERRUPTED — Ctrl+C received${C_RESET}"
@@ -226,7 +190,6 @@ _on_sigint() {
     print_summary
     exit 130
 }
-
 _on_sigterm() {
     echo -e "\n\n${C_RED}${C_BOLD}============================================================${C_RESET}"
     echo -e "${C_RED}${C_BOLD}  SETUP TERMINATED — SIGTERM received${C_RESET}"
@@ -237,10 +200,8 @@ _on_sigterm() {
     print_summary
     exit 143
 }
-
 trap '_on_sigint'  INT
 trap '_on_sigterm' TERM
-
 # ===========================================================================
 # Defensive guards
 # ===========================================================================
@@ -253,7 +214,6 @@ _require_project_root() {
         exit 1
     fi
 }
-
 _require_uv() {
     if [ -z "${UV:-}" ]; then
         if command -v uv &>/dev/null; then UV=$(command -v uv)
@@ -272,7 +232,6 @@ _require_uv() {
         exit 1
     fi
 }
-
 _require_python() {
     if [ ! -x "${PYTHON}" ]; then
         _msg_error "venv Python not found" "No executable at '${PYTHON}'" \
@@ -289,7 +248,6 @@ _require_python() {
         exit 1
     fi
 }
-
 _require_hardware_detected() {
     if [ "${DETECTED_GPU_COUNT}" = "UNDETECTED" ] || \
        [ "${DETECTED_TORCH_CUDA}" = "UNDETECTED" ] || \
@@ -301,7 +259,6 @@ _require_hardware_detected() {
         detect_hardware
     fi
 }
-
 _require_repro_env() {
     if [ ! -f "${PROJECT_ROOT}/.env" ]; then
         _msg_error ".env not found" "No .env at ${PROJECT_ROOT}/.env" \
