@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs and manifests (runtime-generated)
+logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# NLP model cache
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uv
+.python-version
