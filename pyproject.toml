@@ -34,6 +34,7 @@ dependencies = [
   "python-dotenv>=1.0",
   "tqdm>=4.66",
 ]
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.151.9",
@@ -49,6 +50,12 @@ dev = [
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]
+
+[tool.uv]
+# Ensure torch resolves from the cu117 index — prevents accidental CPU-only wheel
+# on fresh installs. This cluster runs CUDA 11.7 runtime (driver 12.8 forward-compat).
+extra-index-url = ["https://download.pytorch.org/whl/cu117"]
+
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",
@@ -60,15 +67,26 @@ markers = [
     "regression: Guard against schema drift",
     "gpu: Requires CUDA GPU",
 ]
+
 [tool.ruff]
 line-length = 120
+
 [tool.ruff.lint]
 per-file-ignores = {"tests/*.py" = ["E402"]}
 select = ["E", "F", "I"]
 ignore = ["E501"]
+
 [tool.mypy]
 ignore_missing_imports = false
 
 [[tool.mypy.overrides]]
 module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm"]
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
