@@ -52,8 +52,6 @@ dev = [
 ]
 
 [tool.uv]
-# Ensure torch resolves from the cu117 index — prevents accidental CPU-only wheel
-# on fresh installs. This cluster runs CUDA 11.7 runtime (driver 12.8 forward-compat).
 extra-index-url = ["https://download.pytorch.org/whl/cu117"]
 
 [tool.pytest.ini_options]
@@ -86,6 +84,12 @@ ignore_missing_imports = true
 [tool.coverage.run]
 source = ["src"]
 branch = true
+omit = [
+    # Requires real CSV data files — covered by integration tests with fixtures
+    "src/extract.py",
+    # Called by bash scripts (setup.sh) — not unit-testable without full cluster
+    "src/manifest_collector.py",
+]
 
 [tool.coverage.report]
 fail_under = 80

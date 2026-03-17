@@ -1,10 +1,10 @@
 # tests/test_environment_coverage.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/tests/test_environment_coverage.py
+import logging
+
 import pytest
 
 pytestmark = pytest.mark.unit
-
 from unittest.mock import MagicMock, patch
 
 from src.environment import (
@@ -51,10 +51,29 @@ class TestCheckGpu:
 
 
 class TestCheckCompat:
-    @patch("src.environment.importlib.import_module")
-    def test_compat_missing_dep_noted(self, mock_import):
-        mock_import.side_effect = ImportError("missing")
-        with pytest.raises(AssertionError, match="could not verify"):
+    def test_compat_warn_rule_does_not_raise(self):
+        # _check_compat with a warn-severity rule must NOT raise.
+        # Uses the CompatRule mock pattern — tests logic, not live packages.
+        from src.environment import CompatRule
+
+        warn_rule = CompatRule(name="test_warn", check=lambda: True, message="warn msg", severity="warn")
+        with patch("src.environment._build_compat_rules", return_value=[warn_rule]):
+            _check_compat()  # must not raise
+
+    def test_compat_error_rule_raises(self):
+        # _check_compat with an error-severity rule MUST raise AssertionError.
+        from src.environment import CompatRule
+
+        error_rule = CompatRule(name="test_error", check=lambda: True, message="hard blocker", severity="error")
+        with patch("src.environment._build_compat_rules", return_value=[error_rule]):
+            with pytest.raises(AssertionError, match="hard blocker"):
+                _check_compat()
+
+    def test_compat_rule_not_firing_does_not_raise(self):
+        from src.environment import CompatRule
+
+        never = CompatRule(name="never", check=lambda: False, message="never fires", severity="error")
+        with patch("src.environment._build_compat_rules", return_value=[never]):
             _check_compat()
 
 
@@ -81,8 +100,6 @@ class TestRunEnvironmentChecks:
     @patch("src.environment._check_gpu_available")
     @patch("src.environment._check_deps")
     def test_logs_pass(self, *mocks):
-        import logging
-
         logger = logging.getLogger("test_env")
         msgs: list = []
         h = logging.Handler()
@@ -133,21 +150,10 @@ class TestCheckDepsSuccess:
 
 
 class TestCheckCompatSuccess:
-    @patch("src.environment.importlib.import_module")
-    def test_compat_passes(self, mock_import):
-        torch_mod = MagicMock()
-        torch_mod.__version__ = "2.0.0+cu117"
-        transformers_mod = MagicMock()
-        transformers_mod.__version__ = "4.38.0"
+    def test_compat_passes_with_no_firing_rules(self):
+        # Proves _check_compat passes when no rules fire.
+        from src.environment import CompatRule
 
-        def side_effect(name):
-            if name == "torch":
-                return torch_mod
-            if name == "transformers":
-                return transformers_mod
-            m = MagicMock()
-            m.__version__ = "99.0"
-            return m
-
-        mock_import.side_effect = side_effect
-        _check_compat()
+        no_fire = CompatRule(name="no_fire", check=lambda: False, message="won't fire", severity="error")
+        with patch("src.environment._build_compat_rules", return_value=[no_fire]):
+            _check_compat()
