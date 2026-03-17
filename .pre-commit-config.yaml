@@ -18,25 +18,25 @@ repos:
     hooks:
       - id: block-large-files
         name: Block Large Model/Binary Files
-        entry: sh -c 'git diff --cached --name-only | grep -qE "\.(h5|pkl|pth|onnx|parquet|sqlite3|bin|pt|safetensors)$" && echo "ERROR - Large model/binary file detected. Use DVC or HF Hub instead. Remove with: git rm --cached <file>" && exit 1 || exit 0'
+        entry: bash scripts/hooks/block_large_files.sh
         language: system
         pass_filenames: false
 
       - id: check-env-files
         name: Block .env Files
-        entry: sh -c 'git diff --cached --name-only | grep -qE "^\.env(\..+)?$" && echo "ERROR - .env file detected. Never commit secrets!" && exit 1 || exit 0'
+        entry: bash scripts/hooks/block_env_files.sh
         language: system
         pass_filenames: false
 
       - id: block-cluster-credentials
         name: Block Cluster Credential Files
-        entry: sh -c 'git diff --cached --name-only | grep -qE "(\.pem|\.key|id_rsa|id_ed25519|\.netrc|\.git-credentials)$" && echo "ERROR - Credential file detected. Never commit SSH keys or tokens!" && exit 1 || exit 0'
+        entry: bash scripts/hooks/block_credentials.sh
         language: system
         pass_filenames: false
 
       - id: verify-selective-staging
         name: Verify Selective Staging
-        entry: sh -c 'echo "Staged files:" && git diff --cached --name-only'
+        entry: bash scripts/hooks/verify_staging.sh
         language: system
         pass_filenames: false
         stages: [pre-commit]
@@ -66,7 +66,7 @@ repos:
       - id: check-symlinks
         name: Check for Broken Symlinks
 
-  # ---- Python Quality (pre-commit: fast) ----
+  # ---- Python Quality ----
   - repo: local
     hooks:
       - id: ruff-check
@@ -100,20 +100,15 @@ repos:
   - repo: local
     hooks:
       - id: pytest-coverage-push
-        name: Pytest Coverage (unit + contract, 80% min)
-        entry: bash -c 'echo "========================================"
-          && echo "  COVERAGE GATE - 80% Per-File Min"
-          && echo "========================================"
-          && uv run pytest tests/ -m "unit or contract" -q --tb=short --cov=src --cov-report=term-missing --no-header
-          && echo "PASSED - Coverage gate green"
-          || (echo "FAILED - Fix coverage before push" && exit 1)'
+        name: Pytest Coverage (unit + contract 80% min)
+        entry: bash scripts/hooks/pre_push_coverage.sh
         language: system
         pass_filenames: false
         stages: [pre-push]
 
       - id: security-audit-push
-        name: Security Audit (pip-audit, non-blocking)
-        entry: bash -c 'mkdir -p logs && uv run pip-audit --format=json --progress-spinner=off --output=logs/pip-audit-precommit.json 2>&1 || true && uv run python scripts/ci_audit_report.py logs/pip-audit-precommit.json'
+        name: Security Audit (pip-audit non-blocking)
+        entry: bash scripts/hooks/pre_push_security.sh
         language: system
         pass_filenames: false
         stages: [pre-push]
