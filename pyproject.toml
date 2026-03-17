@@ -45,6 +45,8 @@ dev = [
     "pip-audit>=2.7",
     "cyclonedx-bom>=4.4",
     "ruff>=0.4",
+    "pre-commit>=3.7",
+    "detect-secrets>=1.5",
 ]
 [tool.pytest.ini_options]
 filterwarnings = [
