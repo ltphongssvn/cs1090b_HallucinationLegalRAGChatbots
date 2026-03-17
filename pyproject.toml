@@ -42,6 +42,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "types-requests>=2.32.4.20260107",
     "pandas-stubs>=2.2",
+    "types-tqdm>=4.66",
     "pip-audit>=2.7",
     "cyclonedx-bom>=4.4",
     "ruff>=0.4",
@@ -62,5 +63,12 @@ markers = [
 [tool.ruff]
 line-length = 120
 [tool.ruff.lint]
+per-file-ignores = {"tests/*.py" = ["E402"]}
 select = ["E", "F", "I"]
 ignore = ["E501"]
+[tool.mypy]
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm"]
+ignore_missing_imports = true
