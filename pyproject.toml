@@ -89,6 +89,8 @@ omit = [
     "src/extract.py",
     # Called by bash scripts (setup.sh) — not unit-testable without full cluster
     "src/manifest_collector.py",
+    # Called by bash scripts via: $PYTHON src/drift_check.py — same pattern
+    "src/drift_check.py",
 ]
 
 [tool.coverage.report]
