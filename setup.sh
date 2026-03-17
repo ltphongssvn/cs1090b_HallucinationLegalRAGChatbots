@@ -1,46 +1,15 @@
 #!/usr/bin/env bash
 # setup.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/setup.sh
-#
 # Thin orchestrator — sources modular scripts, then runs each step.
-# All logic lives in scripts/*.sh; this file contains no implementation.
-#
-# Usage:        bash setup.sh
-# Debug:        DEBUG=1 bash setup.sh
-# Skip GPU:     SKIP_GPU=1 bash setup.sh
-# Dry run:      DRY_RUN=1 bash setup.sh
-# Offline:      OFFLINE=1 bash setup.sh
-# No download:  NO_DOWNLOAD=1 bash setup.sh
-# No Jupyter:   NO_JUPYTER=1 bash setup.sh
-# Single step:  STEP=<name> bash setup.sh
-#
-# Log level:    LOG_LEVEL=<0|1|2> bash setup.sh
-#               0 = quiet   — ERROR only (CI / automated pipelines)
-#               1 = normal  — ERROR + WARN + OK (default)
-#               2 = verbose — all messages including INFO
-#   Alias:      VERBOSE=1 bash setup.sh  (same as LOG_LEVEL=2)
-#
-# Module map:
-#   scripts/lib.sh            — constants, colors, step framework, messaging, guards
-#   scripts/bootstrap_env.sh  — uv, lockfile, venv, deps, drift
-#   scripts/validate_gpu.sh   — GPU detection, hardware policy, smoke tests
-#   scripts/setup_nlp.sh      — spaCy model download and verification
-#   scripts/setup_notebook.sh — repro env, repro module, stability, kernel
-#   scripts/validate_tests.sh — env smoke tests, unit test gate
-#   scripts/manifest.sh       — environment manifest collection and write
-#   src/manifest_collector.py — manifest Python logic (lintable/typed/testable)
-#   src/drift_check.py        — drift check Python logic (lintable/typed/testable)
 set -euo pipefail
 [ "${DEBUG:-0}" = "1" ] && set -x
-# --- Reproducibility: set before any Python or library is invoked ---
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export TOKENIZERS_PARALLELISM=false
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
-# Source all modules — lib.sh must be first (defines shared state + log level)
-# shellcheck source=scripts/lib.sh
 source "$PROJECT_ROOT/scripts/lib.sh"
 source "$PROJECT_ROOT/scripts/bootstrap_env.sh"
 source "$PROJECT_ROOT/scripts/validate_gpu.sh"
@@ -50,9 +19,15 @@ source "$PROJECT_ROOT/scripts/validate_tests.sh"
 source "$PROJECT_ROOT/scripts/manifest.sh"
 source "$PROJECT_ROOT/scripts/download_datasets.sh"
 trap '_on_error "$LINENO" "$BASH_COMMAND"' ERR
-# ===========================================================================
-# preflight_fast_checks — spans bootstrap_env + validate_gpu helpers
-# ===========================================================================
+
+_print_output_lines() {
+    # Print only status lines from captured output — safe under pipefail
+    local output="$1"
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*[✓⚠ℹ] ]] && echo "$line" || true
+    done <<< "$output"
+}
+
 preflight_fast_checks() {
     _require_project_root
     echo " Running preflight fast checks (pre-venv, seconds)..."
@@ -60,35 +35,34 @@ preflight_fast_checks() {
     local failures=()
     local output
 
-    output=$(_check_disk_space 2>&1)
-    echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-    { echo "$output" | grep -q "^Disk:"; } && failures+=("$(echo "$output" | grep '^Disk:')") || true
+    output=$(_check_disk_space 2>&1) || true
+    _print_output_lines "$output"
+    [[ "$output" == *"Disk:"* ]] && failures+=("$(echo "$output" | grep '^Disk:' || true)")
 
-    output=$(_check_uv_present 2>&1)
-    echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-    { echo "$output" | grep -q "^uv not"; } && failures+=("$(echo "$output" | grep '^uv not')") || true
+    output=$(_check_uv_present 2>&1) || true
+    _print_output_lines "$output"
+    [[ "$output" == *"uv not"* ]] && failures+=("$(echo "$output" | grep '^uv not' || true)")
 
-    output=$(_check_lockfile_present 2>&1)
-    echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
+    output=$(_check_lockfile_present 2>&1) || true
+    _print_output_lines "$output"
     while IFS= read -r line; do
-        [[ "$line" =~ ^(pyproject|uv\.lock\ not) ]] && failures+=("$line")
+        [[ "$line" =~ ^(pyproject|uv\.lock\ not) ]] && failures+=("$line") || true
     done <<< "$output"
 
-    # Skip GPU hardware checks in CI — no GPU available on CI runners
     if [ "${CI:-}" != "1" ]; then
-        output=$(_check_nvidia_smi_present 2>&1)
-        echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-        { echo "$output" | grep -q "^nvidia-smi not"; } && failures+=("$(echo "$output" | grep '^nvidia-smi not')") || true
+        output=$(_check_nvidia_smi_present 2>&1) || true
+        _print_output_lines "$output"
+        [[ "$output" == *"nvidia-smi not"* ]] && failures+=("$(echo "$output" | grep '^nvidia-smi not' || true)")
     fi
 
     if [ "${CI:-}" != "1" ] && command -v nvidia-smi &>/dev/null; then
-        output=$(_check_gpu_count_smi 2>&1)
-        echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-        { echo "$output" | grep -q "^GPU count.*detected"; } && failures+=("$(echo "$output" | grep '^GPU count')") || true
+        output=$(_check_gpu_count_smi 2>&1) || true
+        _print_output_lines "$output"
+        [[ "$output" == *"detected"* && "$output" == *"GPU count"* ]] && failures+=("$(echo "$output" | grep '^GPU count' || true)")
 
-        output=$(_check_gpu_name_smi 2>&1)
-        echo "$output" | grep -E "^  [✓⚠ℹ]" | cat
-        { echo "$output" | grep -q "^GPU name.*detected"; } && failures+=("$(echo "$output" | grep '^GPU name')") || true
+        output=$(_check_gpu_name_smi 2>&1) || true
+        _print_output_lines "$output"
+        [[ "$output" == *"detected"* && "$output" == *"GPU name"* ]] && failures+=("$(echo "$output" | grep '^GPU name' || true)")
 
         _check_driver_cuda_smi
     fi
@@ -108,9 +82,7 @@ preflight_fast_checks() {
     fi
     _msg_ok "All preflight fast checks passed."
 }
-# ===========================================================================
-# Main execution
-# ===========================================================================
+
 [ -n "${STEP:-}" ] && echo -e "${C_BOLD}${C_CYAN}Single-step mode: STEP=${STEP}${C_RESET}\n"
 if [ "${DRY_RUN:-0}" = "1" ]; then
     echo -e "${C_MAGENTA}${C_BOLD}============================================================${C_RESET}"
