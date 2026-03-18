@@ -2,7 +2,7 @@
 # TDD unit tests for HF dataset schema contract — no real network calls.
 import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable
 from unittest.mock import patch
 
 import pytest
@@ -25,8 +25,17 @@ class CourtListenerDatasetProbe:
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
 
-    def load(self, streaming: bool = True) -> Iterator[dict[str, Any]]:
-        """Load dataset. trust_remote_code is intentionally never passed."""
+    def load(self, streaming: bool = True) -> Iterable[dict[str, Any]]:
+        """Load dataset. trust_remote_code is intentionally never passed.
+
+        Returns Iterable (not Iterator) — HF IterableDataset is iterable
+        but not an exhausted iterator until iter() is called on it.
+
+        Single-pass semantics: treat the returned object as single-pass.
+        Whether a second iteration re-streams or raises is HF implementation-
+        dependent and not guaranteed. If single-pass must be enforced
+        explicitly, wrap in an iterator: iter(probe.load()).
+        """
         from datasets import load_dataset
 
         return load_dataset(  # type: ignore[return-value]
@@ -35,12 +44,12 @@ class CourtListenerDatasetProbe:
 
     def validate_row(self, row: dict[str, Any]) -> list[str]:
         """
-        Return list of validation errors for a row. Empty list = valid.
+        Return list of all validation errors for a row. Empty list = valid.
 
-        Validation is independent per concern — not early-exit elif chains.
-        This ensures all errors are surfaced per row, not just the first one.
-        Type check and length check are separate guards to prevent TypeError
-        from len() on non-string values if the pipeline evolves.
+        Checks are independent — not early-exit elif chains — so all errors
+        surface per row, not just the first one.
+        Type check is a separate guard before len() to prevent TypeError
+        on non-string values.
         """
         errors: list[str] = []
 
@@ -57,7 +66,7 @@ class CourtListenerDatasetProbe:
 
         value = row[text_field]
 
-        # Check 3: text field is a string (explicit — guards against int/None/list)
+        # Check 3: text field is a string (guards against int/None/list)
         if not isinstance(value, str):
             errors.append(f"{text_field} must be str, got {type(value).__name__!r}: {value!r}")
             return errors  # len() on non-str would TypeError — stop here
@@ -132,19 +141,21 @@ class TestCourtListenerDatasetProbeContract:
         assert any("too short" in e for e in errors)
 
     def test_validate_row_catches_non_string_text(self, probe: CourtListenerDatasetProbe) -> None:
-        """Type safety: int/None/list in text field must be caught, not silently coerced."""
         for bad_value in (42, None, ["a", "b"], 3.14):
             row = {"text": bad_value, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
             errors = probe.validate_row(row)
             assert any("must be str" in e for e in errors), f"Expected type error for {bad_value!r}, got: {errors}"
 
     def test_validate_row_reports_all_errors_not_just_first(self, probe: CourtListenerDatasetProbe) -> None:
-        """All validation concerns surface independently — not early-exit on first error."""
-        bad = {"text": "short", "url": "x"}  # missing fields + short text
+        bad = {"text": "short", "url": "x"}
         errors = probe.validate_row(bad)
         assert any("Missing required fields" in e for e in errors)
         assert any("too short" in e for e in errors)
         assert len(errors) == 2
+
+    def test_load_single_pass_semantics_documented(self, probe: CourtListenerDatasetProbe) -> None:
+        """Contract: load() docstring must document single-pass semantics."""
+        assert "single-pass" in probe.load.__doc__.lower()
 
 
 class TestCourtListenerDatasetProbeLoad:
