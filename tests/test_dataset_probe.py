@@ -14,13 +14,16 @@ pytestmark = pytest.mark.unit
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
 HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
-# Pinned to the HEAD commit of pile-of-law/pile-of-law as of 2026-03-18.
-# Obtain updated hash with:
+# Pinned to HEAD commit of pile-of-law/pile-of-law as of 2026-03-18.
+# Update with:
 #   from huggingface_hub import list_repo_commits
 #   list(list_repo_commits('pile-of-law/pile-of-law', repo_type='dataset'))[0].commit_id
 PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
 
 from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
+
+# Mutable refs that must be rejected in REPRODUCIBLE mode.
+_MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
 
 
 class CourtListenerDatasetProbe:
@@ -29,9 +32,12 @@ class CourtListenerDatasetProbe:
     subset r_courtlistener_opinions.
 
     Reproducibility contract:
-      - REVISION must be a 40-char immutable commit SHA, never a mutable branch.
-      - trust_remote_code must not be enabled unless explicitly required and audited.
-      - Provenance is probe-level — call get_provenance() to log to W&B, not per-row.
+      - REPRODUCIBLE=True (default) enforces a pinned 40-char SHA at load() time.
+        Set REPRODUCIBLE=False only for fast exploration — never for training runs.
+      - trust_remote_code is never passed — remote code execution is a security
+        and reproducibility violation.
+      - Provenance is probe-level — call get_provenance() once at training start
+        and log to W&B; do not embed in data rows.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
@@ -39,16 +45,24 @@ class CourtListenerDatasetProbe:
     SPLIT = "train"
     REVISION = PINNED_REVISION
     PROBE_VERSION = "1.0"
+    REPRODUCIBLE = True  # set False only for exploration — never for training
     REQUIRED_FIELDS: frozenset[str] = frozenset({"text", "created_timestamp", "downloaded_timestamp", "url"})
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
 
     def load(self, streaming: bool = True) -> Iterable[dict[str, Any]]:
-        """Load dataset at pinned immutable revision. trust_remote_code never passed.
+        """Load dataset at pinned revision. trust_remote_code never passed.
 
-        Single-pass semantics: treat the returned object as single-pass.
-        Wrap in iter() to enforce single-pass explicitly.
+        Raises RuntimeError if REPRODUCIBLE=True and REVISION is a mutable ref.
+        Single-pass semantics: wrap in iter() to enforce single-pass explicitly.
         """
+        if self.REPRODUCIBLE and (self.REVISION in _MUTABLE_REFS or HEX_REVISION_RE.fullmatch(self.REVISION) is None):
+            raise RuntimeError(
+                f"Reproducibility violation: REVISION={self.REVISION!r} is mutable. "
+                "Set REVISION to a 40-char commit SHA, or set REPRODUCIBLE=False "
+                "to explicitly opt into non-deterministic exploration mode."
+            )
+
         from datasets import load_dataset
 
         return load_dataset(  # type: ignore[return-value]
@@ -73,6 +87,7 @@ class CourtListenerDatasetProbe:
             "revision": self.REVISION,
             "hf_datasets_version": datasets.__version__,
             "probe_version": self.PROBE_VERSION,
+            "reproducible": self.REPRODUCIBLE,
         }
 
     def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -107,19 +122,17 @@ class CourtListenerDatasetProbe:
         return errors
 
     def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize validated row into canonical form, preserving original metadata.
+        """Normalize validated row into canonical form, preserving upstream metadata.
 
-        Uses a shallow copy so upstream fields (jurisdiction, court level, judge)
-        survive normalization. The old text field is removed if renamed to 'text'
-        to prevent RAM duplication. Provenance is NOT embedded — call
-        get_provenance() once at training start and log to W&B.
+        Shallow copy preserves all upstream fields (jurisdiction, court level, judge).
+        Old text field is removed if renamed to 'text' to avoid RAM duplication.
+        Provenance is NOT embedded — call get_provenance() at training start.
         """
-        normalized = dict(row)  # shallow copy — preserve all upstream metadata
+        normalized = dict(row)
 
         text_field = self.resolve_text_field(row)
         text = str(row[text_field]).strip() if text_field else ""
 
-        # Remove old field if it differs from canonical 'text' — avoids RAM duplication
         if text_field and text_field != "text":
             normalized.pop(text_field, None)
 
@@ -180,6 +193,10 @@ class TestCourtListenerDatasetProbeContract:
     def test_fixture_is_deterministic(self, pinned_row: dict) -> None:
         reloaded = {k: v for k, v in json.loads(FIXTURE_PATH.read_text()).items() if k != "_fixture_meta"}
         assert pinned_row == reloaded
+
+    def test_fixture_revision_matches_probe_revision(self, fixture_data: dict) -> None:
+        """Fixture and probe must agree on revision — prevents silent sample drift."""
+        assert fixture_data["_fixture_meta"]["revision"] == CourtListenerDatasetProbe.REVISION
 
     def test_resolve_text_field_prefers_text_over_contents(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"text": "hello", "contents": "world", "url": "x", "created_timestamp": "", "downloaded_timestamp": ""}
@@ -251,10 +268,9 @@ class TestReproducibilityContract:
         assert meta["probe_version"] == probe.PROBE_VERSION
 
     def test_revision_must_not_be_mutable_branch(self, probe: CourtListenerDatasetProbe) -> None:
-        assert probe.REVISION not in {"main", "master", "latest", "HEAD", ""}
+        assert probe.REVISION not in _MUTABLE_REFS
 
     def test_revision_is_40char_sha(self, probe: CourtListenerDatasetProbe) -> None:
-        """git-blame contract: revision must be a 40-char hex SHA — no placeholders in prod."""
         assert HEX_REVISION_RE.fullmatch(probe.REVISION) is not None, (
             f"PINNED_REVISION must be a 40-char SHA, got: {probe.REVISION!r}"
         )
@@ -281,12 +297,63 @@ class TestReproducibilityContract:
         assert "trust_remote_code" not in mock_load.call_args.kwargs
 
 
+class TestReproducibilityEnforcement:
+    """Guardrail tests — ensure mutable refs are mechanically impossible in REPRODUCIBLE mode."""
+
+    @patch("datasets.load_dataset")
+    def test_reproducible_mode_rejects_main(self, mock_load, pinned_row: dict) -> None:
+        probe = CourtListenerDatasetProbe()
+        probe.REPRODUCIBLE = True
+        probe.REVISION = "main"
+        with pytest.raises(RuntimeError, match="Reproducibility violation"):
+            list(probe.load())
+
+    @patch("datasets.load_dataset")
+    def test_reproducible_mode_rejects_all_mutable_refs(self, mock_load, pinned_row: dict) -> None:
+        for bad_ref in _MUTABLE_REFS:
+            probe = CourtListenerDatasetProbe()
+            probe.REPRODUCIBLE = True
+            probe.REVISION = bad_ref
+            with pytest.raises(RuntimeError, match="Reproducibility violation"):
+                list(probe.load())
+
+    @patch("datasets.load_dataset")
+    def test_reproducible_mode_rejects_short_sha(self, mock_load, pinned_row: dict) -> None:
+        """7-char short SHAs are also mutable — require full 40-char SHA."""
+        probe = CourtListenerDatasetProbe()
+        probe.REPRODUCIBLE = True
+        probe.REVISION = "0dc9f2c"  # short SHA — rejected
+        with pytest.raises(RuntimeError, match="Reproducibility violation"):
+            list(probe.load())
+
+    @patch("datasets.load_dataset")
+    def test_exploration_mode_allows_mutable_ref(self, mock_load, pinned_row: dict) -> None:
+        """REPRODUCIBLE=False is the explicit opt-in for non-deterministic exploration."""
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
+        probe = CourtListenerDatasetProbe()
+        probe.REPRODUCIBLE = False
+        probe.REVISION = "main"
+        list(probe.load())  # must not raise
+
+    @patch("datasets.load_dataset")
+    def test_reproducible_mode_accepts_valid_40char_sha(self, mock_load, pinned_row: dict) -> None:
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
+        probe = CourtListenerDatasetProbe()
+        probe.REPRODUCIBLE = True
+        probe.REVISION = PINNED_REVISION
+        list(probe.load())  # must not raise
+
+    def test_default_mode_is_reproducible(self, probe: CourtListenerDatasetProbe) -> None:
+        """Default must be strict — exploration mode requires explicit opt-in."""
+        assert probe.REPRODUCIBLE is True
+
+
 class TestGetProvenance:
     def test_get_provenance_returns_dict(self, probe: CourtListenerDatasetProbe) -> None:
         assert isinstance(probe.get_provenance(), dict)
 
     def test_get_provenance_has_required_keys(self, probe: CourtListenerDatasetProbe) -> None:
-        required = {"dataset", "subset", "split", "revision", "hf_datasets_version", "probe_version"}
+        required = {"dataset", "subset", "split", "revision", "hf_datasets_version", "probe_version", "reproducible"}
         assert required <= set(probe.get_provenance().keys())
 
     def test_get_provenance_matches_probe_constants(self, probe: CourtListenerDatasetProbe) -> None:
@@ -294,9 +361,9 @@ class TestGetProvenance:
         assert prov["dataset"] == probe.DATASET_ID
         assert prov["revision"] == probe.REVISION
         assert prov["probe_version"] == probe.PROBE_VERSION
+        assert prov["reproducible"] == probe.REPRODUCIBLE
 
     def test_normalize_row_does_not_embed_provenance(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        """Provenance is probe-level — data records must stay clean."""
         result = probe.normalize_row(pinned_row)
         assert "_provenance" not in result
         assert "revision" not in result
@@ -329,7 +396,6 @@ class TestIterValidRows:
 
 class TestNormalizeRow:
     def test_preserves_upstream_metadata(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        """Shallow copy — upstream fields like judge, jurisdiction survive normalization."""
         row = {**pinned_row, "judge": "Smith J.", "jurisdiction": "federal"}
         result = probe.normalize_row(row)
         assert result.get("judge") == "Smith J."
@@ -344,7 +410,6 @@ class TestNormalizeRow:
         assert probe.normalize_row(row)["text"] == "leading and trailing"
 
     def test_renames_contents_to_text_and_removes_old_field(self, probe: CourtListenerDatasetProbe) -> None:
-        """contents renamed to text; old key removed to avoid RAM duplication."""
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
         result = probe.normalize_row(row)
         assert "text" in result
@@ -366,7 +431,6 @@ class TestNormalizeRow:
         assert result["source_url"] == result["url"]
 
     def test_output_has_canonical_keys_as_superset(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        """Canonical keys are a subset — upstream metadata is preserved, not replaced."""
         row = {**pinned_row, "dummy_judge": "Smith"}
         result = probe.normalize_row(row)
         expected = {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
