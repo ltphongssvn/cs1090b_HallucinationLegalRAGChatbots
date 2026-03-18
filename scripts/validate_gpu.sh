@@ -282,7 +282,7 @@ detect_hardware() {
     _require_python
     echo " Detecting hardware (post-venv, torch-level)..."
     local hw_json hw_err=0
-    hw_json=$(_query_torch_hardware 2>&1) || hw_err=$?
+    hw_json=$(_query_torch_hardware 2>/dev/null) || hw_err=$?
     if [ "$hw_err" -ne 0 ] || [ -z "$hw_json" ]; then
         _msg_error "Hardware query failed" "$hw_json"             "torch CUDA query failed — venv may be broken"             "STEP=sync_dependencies bash setup.sh"
         exit 1
