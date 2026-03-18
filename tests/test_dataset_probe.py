@@ -1,9 +1,10 @@
 # tests/test_dataset_probe.py
 # TDD unit tests for HF dataset schema contract — no real network calls.
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -48,34 +49,57 @@ class CourtListenerDatasetProbe:
 
         Checks are independent — not early-exit elif chains — so all errors
         surface per row, not just the first one.
-        Type check is a separate guard before len() to prevent TypeError
-        on non-string values.
         """
         errors: list[str] = []
 
-        # Check 1: required fields present (key existence, not value)
         missing = self.REQUIRED_FIELDS - set(row.keys())
         if missing:
             errors.append(f"Missing required fields: {sorted(missing)}")
 
-        # Check 2: text field exists
         text_field = self.resolve_text_field(row)
         if text_field is None:
             errors.append(f"No text field found in {sorted(row.keys())}")
-            return errors  # cannot proceed with text checks if field missing
+            return errors
 
         value = row[text_field]
 
-        # Check 3: text field is a string (guards against int/None/list)
         if not isinstance(value, str):
             errors.append(f"{text_field} must be str, got {type(value).__name__!r}: {value!r}")
-            return errors  # len() on non-str would TypeError — stop here
+            return errors
 
-        # Check 4: text meets minimum length threshold
         if len(value) < self.MIN_TEXT_LENGTH:
             errors.append(f"{text_field} too short: {len(value)} < {self.MIN_TEXT_LENGTH}")
 
         return errors
+
+    def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        """
+        Normalize a validated row into a canonical form for downstream pipeline use.
+
+        Responsibilities (single concern per step):
+          - Resolve and rename the text field to the canonical key 'text'
+          - Normalize timestamps to ISO-8601 date strings (YYYY-MM-DD)
+          - Strip leading/trailing whitespace from text
+          - Preserve all original fields; add 'source_url' as pipeline-friendly alias
+
+        Callers should validate_row() before normalize_row(). Behavior on
+        invalid rows is undefined.
+        """
+        text_field = self.resolve_text_field(row)
+        text = str(row[text_field]).strip() if text_field else ""
+
+        return {
+            "text": text,
+            "created_timestamp": self._normalize_timestamp(str(row.get("created_timestamp", ""))),
+            "downloaded_timestamp": self._normalize_timestamp(str(row.get("downloaded_timestamp", ""))),
+            "url": str(row.get("url", "")),
+            "source_url": str(row.get("url", "")),
+        }
+
+    def _normalize_timestamp(self, ts: str) -> str:
+        """Extract YYYY-MM-DD from timestamp string. Returns '' if unparseable."""
+        match = re.search(r"\d{4}-\d{2}-\d{2}", ts)
+        return match.group(0) if match else ""
 
     def resolve_text_field(self, row: dict[str, Any]) -> str | None:
         """Return the first available text field name, or None."""
@@ -87,6 +111,13 @@ class CourtListenerDatasetProbe:
         if field is None:
             raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
         return str(row[field])
+
+
+def _mock_iterable_dataset(rows: list[dict[str, Any]]) -> MagicMock:
+    """Return MagicMock simulating HF IterableDataset — iter() returns fresh iterator."""
+    mock_ds = MagicMock()
+    mock_ds.__iter__ = MagicMock(side_effect=lambda: iter(rows))
+    return mock_ds
 
 
 @pytest.fixture
@@ -154,8 +185,56 @@ class TestCourtListenerDatasetProbeContract:
         assert len(errors) == 2
 
     def test_load_single_pass_semantics_documented(self, probe: CourtListenerDatasetProbe) -> None:
-        """Contract: load() docstring must document single-pass semantics."""
         assert "single-pass" in probe.load.__doc__.lower()
+
+
+class TestNormalizeRow:
+    def test_normalize_row_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert "text" in result
+        assert isinstance(result["text"], str)
+        assert len(result["text"]) > 0
+
+    def test_normalize_row_strips_whitespace(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "  leading and trailing  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        result = probe.normalize_row(row)
+        assert result["text"] == "leading and trailing"
+
+    def test_normalize_row_renames_contents_to_text(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        result = probe.normalize_row(row)
+        assert "text" in result
+        assert result["text"] == "A" * 60
+
+    def test_normalize_row_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {
+            "text": "A" * 60,
+            "created_timestamp": "2022-01-15T10:30:00Z",
+            "downloaded_timestamp": "2022-06-01",
+            "url": "x",
+        }
+        result = probe.normalize_row(row)
+        assert result["created_timestamp"] == "2022-01-15"
+        assert result["downloaded_timestamp"] == "2022-06-01"
+
+    def test_normalize_row_empty_timestamp_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        result = probe.normalize_row(row)
+        assert result["created_timestamp"] == ""
+
+    def test_normalize_row_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert result["source_url"] == result["url"]
+
+    def test_normalize_row_output_has_canonical_keys(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert set(result.keys()) == {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+
+    def test_normalize_row_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        first = probe.normalize_row(pinned_row)
+        second = probe.normalize_row(first)
+        assert first["text"] == second["text"]
+        assert first["created_timestamp"] == second["created_timestamp"]
 
 
 class TestCourtListenerDatasetProbeLoad:
@@ -163,13 +242,13 @@ class TestCourtListenerDatasetProbeLoad:
     def test_load_does_not_pass_trust_remote_code(
         self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict
     ) -> None:
-        mock_load.return_value = iter([pinned_row])
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
         list(probe.load())
         assert mock_load.call_args.kwargs.get("trust_remote_code", False) is not True
 
     @patch("datasets.load_dataset")
     def test_load_uses_correct_dataset_id(self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        mock_load.return_value = iter([pinned_row])
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
         list(probe.load())
         args = mock_load.call_args.args
         assert args[0] == CourtListenerDatasetProbe.DATASET_ID
@@ -182,6 +261,14 @@ class TestCourtListenerDatasetProbeLoad:
 
     @patch("datasets.load_dataset")
     def test_first_row_passes_validation(self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        mock_load.return_value = iter([pinned_row])
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
         row = next(iter(probe.load()))
         assert probe.validate_row(row) == []
+
+    @patch("datasets.load_dataset")
+    def test_mock_iterable_dataset_supports_multiple_iter_calls(
+        self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
+        ds = probe.load()
+        assert list(ds) == list(ds) == [pinned_row]
