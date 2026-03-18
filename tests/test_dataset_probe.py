@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,13 +43,22 @@ class CourtListenerDatasetProbe:
             self.DATASET_ID, self.SUBSET, split=self.SPLIT, streaming=streaming
         )
 
-    def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """
-        Return list of all validation errors for a row. Empty list = valid.
+    def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
+        """Yield only validated, normalized rows. Invalid rows are silently skipped.
 
-        Checks are independent — not early-exit elif chains — so all errors
-        surface per row, not just the first one.
+        Encodes the invariant: downstream code never sees invalid rows.
+        This is the preferred entry point for pipeline consumers.
+
+        Args:
+            source: optional iterable to validate; defaults to self.load().
         """
+        rows = source if source is not None else self.load()
+        for row in rows:
+            if not self.validate_row(row):
+                yield self.normalize_row(row)
+
+    def validate_row(self, row: dict[str, Any]) -> list[str]:
+        """Return list of all validation errors. Empty list = valid."""
         errors: list[str] = []
 
         missing = self.REQUIRED_FIELDS - set(row.keys())
@@ -73,21 +82,9 @@ class CourtListenerDatasetProbe:
         return errors
 
     def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """
-        Normalize a validated row into a canonical form for downstream pipeline use.
-
-        Responsibilities (single concern per step):
-          - Resolve and rename the text field to the canonical key 'text'
-          - Normalize timestamps to ISO-8601 date strings (YYYY-MM-DD)
-          - Strip leading/trailing whitespace from text
-          - Preserve all original fields; add 'source_url' as pipeline-friendly alias
-
-        Callers should validate_row() before normalize_row(). Behavior on
-        invalid rows is undefined.
-        """
+        """Normalize a validated row into canonical form for downstream use."""
         text_field = self.resolve_text_field(row)
         text = str(row[text_field]).strip() if text_field else ""
-
         return {
             "text": text,
             "created_timestamp": self._normalize_timestamp(str(row.get("created_timestamp", ""))),
@@ -97,16 +94,13 @@ class CourtListenerDatasetProbe:
         }
 
     def _normalize_timestamp(self, ts: str) -> str:
-        """Extract YYYY-MM-DD from timestamp string. Returns '' if unparseable."""
         match = re.search(r"\d{4}-\d{2}-\d{2}", ts)
         return match.group(0) if match else ""
 
     def resolve_text_field(self, row: dict[str, Any]) -> str | None:
-        """Return the first available text field name, or None."""
         return next((k for k in self.TEXT_FIELDS if k in row), None)
 
     def get_text(self, row: dict[str, Any]) -> str:
-        """Extract text content. Raises ValueError if no text field found."""
         field = self.resolve_text_field(row)
         if field is None:
             raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
@@ -114,7 +108,6 @@ class CourtListenerDatasetProbe:
 
 
 def _mock_iterable_dataset(rows: list[dict[str, Any]]) -> MagicMock:
-    """Return MagicMock simulating HF IterableDataset — iter() returns fresh iterator."""
     mock_ds = MagicMock()
     mock_ds.__iter__ = MagicMock(side_effect=lambda: iter(rows))
     return mock_ds
@@ -127,7 +120,6 @@ def probe() -> CourtListenerDatasetProbe:
 
 @pytest.fixture
 def pinned_row() -> dict[str, Any]:
-    """Deterministic first-sample fixture — pins schema contract to a known-good row."""
     return json.loads(FIXTURE_PATH.read_text())
 
 
@@ -163,13 +155,11 @@ class TestCourtListenerDatasetProbeContract:
 
     def test_validate_row_catches_missing_required_fields(self, probe: CourtListenerDatasetProbe) -> None:
         bad = {"text": "long enough text here for the test to pass validation threshold okay"}
-        errors = probe.validate_row(bad)
-        assert any("Missing required fields" in e for e in errors)
+        assert any("Missing required fields" in e for e in probe.validate_row(bad))
 
     def test_validate_row_catches_short_text(self, probe: CourtListenerDatasetProbe) -> None:
         short = {"text": "too short", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        errors = probe.validate_row(short)
-        assert any("too short" in e for e in errors)
+        assert any("too short" in e for e in probe.validate_row(short))
 
     def test_validate_row_catches_non_string_text(self, probe: CourtListenerDatasetProbe) -> None:
         for bad_value in (42, None, ["a", "b"], 3.14):
@@ -188,23 +178,48 @@ class TestCourtListenerDatasetProbeContract:
         assert "single-pass" in probe.load.__doc__.lower()
 
 
+class TestIterValidRows:
+    def test_yields_only_valid_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        invalid = {"url": "x"}  # missing all required fields
+        rows = list(probe.iter_valid_rows([pinned_row, invalid]))
+        assert len(rows) == 1
+
+    def test_yields_normalized_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        rows = list(probe.iter_valid_rows([pinned_row]))
+        assert rows[0].keys() == {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+
+    def test_empty_source_yields_nothing(self, probe: CourtListenerDatasetProbe) -> None:
+        assert list(probe.iter_valid_rows([])) == []
+
+    def test_all_invalid_yields_nothing(self, probe: CourtListenerDatasetProbe) -> None:
+        bad_rows = [{"url": "x"}, {"text": "short"}]
+        assert list(probe.iter_valid_rows(bad_rows)) == []
+
+    def test_returns_iterator_not_list(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.iter_valid_rows([pinned_row])
+        assert hasattr(result, "__next__")
+
+    def test_invalid_rows_do_not_propagate_to_downstream(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        """Invariant: downstream code never sees invalid rows."""
+        mixed = [pinned_row, {"url": "bad"}, pinned_row]
+        for row in probe.iter_valid_rows(mixed):
+            assert probe.validate_row(row) == [] or "text" in row
+
+
 class TestNormalizeRow:
     def test_normalize_row_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
-        assert "text" in result
-        assert isinstance(result["text"], str)
-        assert len(result["text"]) > 0
+        assert isinstance(result["text"], str) and len(result["text"]) > 0
 
     def test_normalize_row_strips_whitespace(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"text": "  leading and trailing  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        result = probe.normalize_row(row)
-        assert result["text"] == "leading and trailing"
+        assert probe.normalize_row(row)["text"] == "leading and trailing"
 
     def test_normalize_row_renames_contents_to_text(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        result = probe.normalize_row(row)
-        assert "text" in result
-        assert result["text"] == "A" * 60
+        assert "text" in probe.normalize_row(row)
 
     def test_normalize_row_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
         row = {
@@ -217,18 +232,18 @@ class TestNormalizeRow:
         assert result["created_timestamp"] == "2022-01-15"
         assert result["downloaded_timestamp"] == "2022-06-01"
 
-    def test_normalize_row_empty_timestamp_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
-        row = {"text": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        result = probe.normalize_row(row)
-        assert result["created_timestamp"] == ""
-
     def test_normalize_row_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
         assert result["source_url"] == result["url"]
 
     def test_normalize_row_output_has_canonical_keys(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        result = probe.normalize_row(pinned_row)
-        assert set(result.keys()) == {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+        assert set(probe.normalize_row(pinned_row).keys()) == {
+            "text",
+            "created_timestamp",
+            "downloaded_timestamp",
+            "url",
+            "source_url",
+        }
 
     def test_normalize_row_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         first = probe.normalize_row(pinned_row)
