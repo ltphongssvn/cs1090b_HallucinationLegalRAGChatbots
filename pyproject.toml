@@ -10,10 +10,10 @@ dependencies = [
   "pandas>=2.2.0",
   "numpy>=1.24.0,<2.0.0",
   "torch>=2.0",
-  "transformers>=4.35,<4.40",
+  "transformers>=4.35,<4.41",
   "sentence-transformers>=2.2",
   "accelerate>=0.20",
-  "peft>=0.7",
+  "peft>=0.7,<0.10",
   "gensim>=4.3",
   "spacy>=3.7",
   "langchain>=0.1",
@@ -51,9 +51,6 @@ dev = [
     "detect-secrets>=1.5",
 ]
 
-[tool.uv]
-extra-index-url = ["https://download.pytorch.org/whl/cu117"]
-
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",
@@ -85,11 +82,8 @@ ignore_missing_imports = true
 source = ["src"]
 branch = true
 omit = [
-    # Requires real CSV data files — covered by integration tests with fixtures
     "src/extract.py",
-    # Called by bash scripts (setup.sh) — not unit-testable without full cluster
     "src/manifest_collector.py",
-    # Called by bash scripts via: $PYTHON src/drift_check.py — same pattern
     "src/drift_check.py",
 ]
 
