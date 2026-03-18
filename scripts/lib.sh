@@ -27,7 +27,7 @@ TARGET_MIN_DISK_GB=50
 # ===========================================================================
 # Reproducibility constants
 # ===========================================================================
-RANDOM_SEED=0
+export RANDOM_SEED=0
 REPRO_PYTHONHASHSEED=0
 REPRO_CUBLAS_CFG=":4096:8"
 REPRO_TOKENIZERS_PAR="false"
