@@ -9,6 +9,8 @@
     "subset": "r_courtlistener_opinions",
     "split": "train",
     "revision": "REPLACE_WITH_DATASET_COMMIT_HASH",
-    "text_sha256": "REPLACE_WITH_ACTUAL_SHA256"
+    "text_sha256": "REPLACE_WITH_ACTUAL_SHA256",
+    "hf_datasets_version": "4.7.0",
+    "probe_version": "1.0"
   }
 }

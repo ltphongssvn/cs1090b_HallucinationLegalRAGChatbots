@@ -12,7 +12,12 @@ import pytest
 pytestmark = pytest.mark.unit
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
-HEX_REVISION_RE = re.compile(r"^[0-9a-f]{7,64}$")
+HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# PINNED_REVISION: must be a 40-character hex commit SHA — never "main".
+# Obtain with: huggingface-cli repo info pile-of-law/pile-of-law --repo-type dataset
+# Update this before any training run whose results must be reproducible by date.
+PINNED_REVISION = "REPLACE_WITH_DATASET_COMMIT_HASH"
 
 from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
 
@@ -23,14 +28,17 @@ class CourtListenerDatasetProbe:
     subset r_courtlistener_opinions.
 
     Reproducibility contract:
-      - REVISION must be an immutable commit hash, not a mutable branch.
+      - REVISION must be a 40-char immutable commit SHA, never a mutable branch.
       - trust_remote_code must not be enabled unless explicitly required and audited.
+      - Provenance is carried by the probe, not embedded in data rows.
+        Call get_provenance() to log to W&B or any experiment tracker.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
     SUBSET = "r_courtlistener_opinions"
     SPLIT = "train"
-    REVISION = "REPLACE_WITH_DATASET_COMMIT_HASH"
+    REVISION = PINNED_REVISION
+    PROBE_VERSION = "1.0"
     REQUIRED_FIELDS: frozenset[str] = frozenset({"text", "created_timestamp", "downloaded_timestamp", "url"})
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
@@ -50,6 +58,23 @@ class CourtListenerDatasetProbe:
             streaming=streaming,
             revision=self.REVISION,
         )
+
+    def get_provenance(self) -> dict[str, Any]:
+        """Return full provenance dict for W&B / experiment logging.
+
+        Provenance is a probe-level concern — not embedded in data rows.
+        Log this once at training start, not per-row.
+        """
+        import datasets
+
+        return {
+            "dataset": self.DATASET_ID,
+            "subset": self.SUBSET,
+            "split": self.SPLIT,
+            "revision": self.REVISION,
+            "hf_datasets_version": datasets.__version__,
+            "probe_version": self.PROBE_VERSION,
+        }
 
     def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
         """Yield only validated, normalized rows. Invalid rows are skipped.
@@ -83,7 +108,11 @@ class CourtListenerDatasetProbe:
         return errors
 
     def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize validated row into canonical form for downstream use."""
+        """Normalize validated row into canonical form for downstream use.
+
+        Provenance is NOT embedded here — it is a probe-level concern.
+        Call get_provenance() once at training start and log to W&B.
+        """
         text_field = self.resolve_text_field(row)
         text = str(row[text_field]).strip() if text_field else ""
         return {
@@ -191,7 +220,16 @@ class TestCourtListenerDatasetProbeContract:
 class TestReproducibilityContract:
     def test_fixture_has_required_provenance_fields(self, fixture_data: dict) -> None:
         meta = fixture_data["_fixture_meta"]
-        required = {"sampled_at", "dataset", "subset", "split", "revision", "text_sha256"}
+        required = {
+            "sampled_at",
+            "dataset",
+            "subset",
+            "split",
+            "revision",
+            "text_sha256",
+            "hf_datasets_version",
+            "probe_version",
+        }
         assert required <= set(meta.keys()), f"Missing: {required - set(meta.keys())}"
 
     def test_fixture_metadata_matches_probe_constants(
@@ -202,18 +240,19 @@ class TestReproducibilityContract:
         assert meta["subset"] == probe.SUBSET
         assert meta["split"] == probe.SPLIT
         assert meta["revision"] == probe.REVISION
+        assert meta["probe_version"] == probe.PROBE_VERSION
 
     def test_revision_must_not_be_mutable_branch(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe.REVISION not in {"main", "master", "latest", "HEAD", ""}
 
-    def test_revision_is_commit_hash_or_explicit_placeholder(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_revision_is_40char_sha_or_explicit_placeholder(self, probe: CourtListenerDatasetProbe) -> None:
+        """git-blame contract: revision must be a 40-char SHA or the explicit placeholder."""
         assert (
             HEX_REVISION_RE.fullmatch(probe.REVISION) is not None
             or probe.REVISION == "REPLACE_WITH_DATASET_COMMIT_HASH"
-        )
+        ), f"Invalid revision: {probe.REVISION!r} — must be 40-char SHA"
 
     def test_fixture_text_sha256_matches_checksum_module(self, pinned_row: dict) -> None:
-        """Content fingerprint verified against checksums.py — not inline JSON (avoids detect-secrets)."""
         actual = hashlib.sha256(pinned_row["text"].encode("utf-8")).hexdigest()
         assert actual == COURTLISTENER_SAMPLE_TEXT_SHA256
 
@@ -233,6 +272,33 @@ class TestReproducibilityContract:
         mock_load.return_value = _mock_iterable_dataset([pinned_row])
         list(probe.load())
         assert "trust_remote_code" not in mock_load.call_args.kwargs
+
+
+class TestGetProvenance:
+    @patch("datasets.load_dataset")
+    def test_get_provenance_returns_dict(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
+        prov = probe.get_provenance()
+        assert isinstance(prov, dict)
+
+    @patch("datasets.load_dataset")
+    def test_get_provenance_has_required_keys(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
+        prov = probe.get_provenance()
+        required = {"dataset", "subset", "split", "revision", "hf_datasets_version", "probe_version"}
+        assert required <= set(prov.keys())
+
+    @patch("datasets.load_dataset")
+    def test_get_provenance_matches_probe_constants(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
+        prov = probe.get_provenance()
+        assert prov["dataset"] == probe.DATASET_ID
+        assert prov["revision"] == probe.REVISION
+        assert prov["probe_version"] == probe.PROBE_VERSION
+
+    def test_normalize_row_does_not_embed_provenance(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Provenance is probe-level, not row-level — data records must stay clean."""
+        result = probe.normalize_row(pinned_row)
+        assert "_provenance" not in result
+        assert "revision" not in result
+        assert "probe_version" not in result
 
 
 class TestIterValidRows:
