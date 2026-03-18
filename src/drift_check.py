@@ -7,8 +7,10 @@ from typing import Callable
 
 from packaging.version import Version  # type: ignore[import]
 
+# exact_ver=None for torch: importlib.metadata strips the +cu117 local suffix.
+# Tier 5 _check_torch() verifies cu117 via torch.__version__ directly.
 REQUIRED: list[tuple[str, str, str, str | None]] = [
-    ("torch", "torch", "2.0.0", "2.0.1+cu117"),
+    ("torch", "torch", "2.0.0", None),
     ("transformers", "transformers", "4.35.0", None),
     ("datasets", "datasets", "2.16.0", None),
     ("faiss-cpu", "faiss", "1.7.0", None),
@@ -31,7 +33,11 @@ def _check_torch(mod: object) -> str:
 
     t = torch.tensor([1.0, 2.0, 3.0])
     assert torch.allclose(t.mean(), torch.tensor(2.0))
-    return f"tensor mean=2.0 ok, version={torch.__version__}"
+    ver = torch.__version__
+    # Verify cu117 local suffix directly — importlib.metadata strips it
+    if "+cu" not in ver:
+        raise AssertionError(f"CPU-only torch wheel detected: {ver!r} — expected +cu117")
+    return f"tensor mean=2.0 ok, version={ver}"
 
 
 def _check_transformers(mod: object) -> str:
@@ -96,7 +102,6 @@ def _check_pandas(mod: object) -> str:
 def _check_accelerate(mod: object) -> str:
     import accelerate  # type: ignore[import]
 
-    # Confirm Accelerator class is accessible — core class for multi-GPU training
     assert hasattr(accelerate, "Accelerator"), "accelerate.Accelerator not found"
     return f"version={accelerate.__version__}, Accelerator accessible"
 

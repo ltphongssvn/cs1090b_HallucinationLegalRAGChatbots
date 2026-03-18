@@ -140,12 +140,12 @@ _run_vulnerability_audit() {
         return 0
     fi
 
-    local audit_output audit_exit=0
-    audit_output=$("$UV" run pip-audit --format=json --progress-spinner=off 2>&1) || audit_exit=$?
-    # Fallback: try direct pip-audit if uv run fails
-    if [ "$audit_exit" -ne 0 ]; then
-        audit_output=$($PYTHON -m pip_audit --format=json --progress-spinner=off 2>&1) || audit_exit=$?
-    fi
+    local audit_file audit_exit=0
+    audit_file=$(mktemp /tmp/pip-audit-XXXXXX.json)
+    "$UV" run pip-audit --format=json --progress-spinner=off --output="$audit_file" 2>/dev/null || audit_exit=$?
+    local audit_output=""
+    [ -f "$audit_file" ] && audit_output=$(cat "$audit_file")
+    rm -f "$audit_file"
 
     if [ "$audit_exit" -ne 0 ]; then
         local vuln_count
