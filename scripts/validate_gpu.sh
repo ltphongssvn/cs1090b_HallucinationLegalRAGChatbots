@@ -34,7 +34,7 @@ _check_gpu_name_smi() {
 
 _check_driver_cuda_smi() {
     local driver_cuda
-    driver_cuda=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' || echo '')
+    driver_cuda=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1 || echo '')
     if [ "${driver_cuda}" != "${TARGET_DRIVER_CUDA}" ]; then
         _msg_warn "Driver CUDA version mismatch" \
             "Detected driver CUDA ${driver_cuda}, target is ${TARGET_DRIVER_CUDA}" \
@@ -95,7 +95,7 @@ print(', '.join(names) if names else 'N/A')
         fi
     done
     if command -v nvidia-smi &>/dev/null; then
-        DETECTED_DRIVER_CUDA=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
+        DETECTED_DRIVER_CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1 || echo 'parse-failed')
         [ -z "$DETECTED_DRIVER_CUDA" ] && DETECTED_DRIVER_CUDA="parse-failed"
     else
         DETECTED_DRIVER_CUDA="nvidia-smi-not-found"
