@@ -24,7 +24,6 @@ _check_lockfile_present() {
         echo -e "  ${C_RED}✗${C_RESET} uv.lock not found"
         echo "uv.lock not found — run: uv lock && git add uv.lock && git commit"; ok=false
     fi
-    # Use if/fi instead of && pattern — avoids set -e triggering on false condition
     if [ "$ok" = "true" ]; then
         _msg_ok "pyproject.toml + uv.lock: present"
         return 0
@@ -115,7 +114,6 @@ verify_python() {
 }
 
 sync_dependencies() {
-    # DRY_RUN guard BEFORE _require_python — dry-run must work without a venv
     _require_uv
 
     if _is_dry_run; then
@@ -126,8 +124,6 @@ sync_dependencies() {
 
     _require_python
     _msg_info "Syncing from uv.lock (--frozen) — may take minutes on first run..."
-    _msg_info "uv caches wheels in ~/.cache/uv — subsequent runs are fast"
-    _msg_info "--dev explicit: ensures pytest/mypy/ruff/pip-audit always installed"
     "$UV" sync --frozen --dev
     _msg_ok "Dependencies synced from uv.lock"
 }
@@ -178,13 +174,11 @@ check_dependency_drift() {
     _require_uv; _require_python
     echo " Checking for dependency drift..."
 
-    if [ "${PROJECT_ROOT}/pyproject.toml" -nt "${PROJECT_ROOT}/uv.lock" ]; then
-        _msg_error "Stale uv.lock" "pyproject.toml is newer than uv.lock" \
-            "Collaborators will install different versions" \
-            "uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
-        exit 1
-    fi
-    _msg_ok "pyproject.toml vs uv.lock timestamp — ok"
+    # NOTE: Timestamp comparison (pyproject.toml -nt uv.lock) is intentionally
+    # omitted — git checkout sets mtime to current time, making the check always
+    # fire on freshly cloned/pulled repos. uv lock --check is the authoritative
+    # drift detector and catches all real constraint mismatches.
+    _msg_ok "pyproject.toml vs uv.lock — skipping mtime check (unreliable after git ops)"
 
     "$UV" lock --check 2>/dev/null && _msg_ok "uv lock --check — consistent" || {
         _msg_error "uv.lock inconsistency" "uv lock --check failed" \
