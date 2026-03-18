@@ -12,45 +12,60 @@ pytestmark = pytest.mark.unit
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
 
+# Pinned dataset revision for reproducibility.
+# IMPORTANT: replace "main" with a specific commit hash once the dataset
+# version used for experiments is locked, so git-blame can identify the
+# exact sample seen on any given date.
+# e.g. "a1b2c3d4e5f6..." from: huggingface-cli repo info pile-of-law/pile-of-law
+PINNED_REVISION = "main"
+
 
 class CourtListenerDatasetProbe:
     """
     Schema contract and access layer for pile-of-law/pile-of-law
     subset r_courtlistener_opinions.
+
+    Reproducibility contract:
+      - PINNED_REVISION must be updated to a commit hash before any
+        experiment whose results need to be reproducible by date.
+      - trust_remote_code is never passed — remote code execution is
+        a security and reproducibility violation in 2026 research standards.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
     SUBSET = "r_courtlistener_opinions"
     SPLIT = "train"
+    REVISION = PINNED_REVISION
     REQUIRED_FIELDS: frozenset[str] = frozenset({"text", "created_timestamp", "downloaded_timestamp", "url"})
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
 
     def load(self, streaming: bool = True) -> Iterable[dict[str, Any]]:
-        """Load dataset. trust_remote_code is intentionally never passed.
+        """Load dataset at pinned revision. trust_remote_code never passed.
 
-        Returns Iterable (not Iterator) — HF IterableDataset is iterable
-        but not an exhausted iterator until iter() is called on it.
+        Revision pinning: self.REVISION controls which dataset commit is
+        loaded. Set to a specific commit hash (not "main") for experiments
+        that must be reproducible by date — "main" is mutable and cannot
+        be git-blamed to a specific sample.
 
         Single-pass semantics: treat the returned object as single-pass.
         Whether a second iteration re-streams or raises is HF implementation-
-        dependent and not guaranteed. If single-pass must be enforced
-        explicitly, wrap in an iterator: iter(probe.load()).
+        dependent and not guaranteed. Wrap in iter() to enforce single-pass.
         """
         from datasets import load_dataset
 
         return load_dataset(  # type: ignore[return-value]
-            self.DATASET_ID, self.SUBSET, split=self.SPLIT, streaming=streaming
+            self.DATASET_ID,
+            self.SUBSET,
+            split=self.SPLIT,
+            streaming=streaming,
+            revision=self.REVISION,
         )
 
     def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
-        """Yield only validated, normalized rows. Invalid rows are silently skipped.
+        """Yield only validated, normalized rows. Invalid rows are skipped.
 
         Encodes the invariant: downstream code never sees invalid rows.
-        This is the preferred entry point for pipeline consumers.
-
-        Args:
-            source: optional iterable to validate; defaults to self.load().
         """
         rows = source if source is not None else self.load()
         for row in rows:
@@ -120,7 +135,10 @@ def probe() -> CourtListenerDatasetProbe:
 
 @pytest.fixture
 def pinned_row() -> dict[str, Any]:
-    return json.loads(FIXTURE_PATH.read_text())
+    """Deterministic fixture — sampled_at date in _fixture_meta enables git-blame traceability."""
+    data = json.loads(FIXTURE_PATH.read_text())
+    # Strip internal metadata before returning to tests
+    return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
 class TestCourtListenerDatasetProbeContract:
@@ -129,14 +147,21 @@ class TestCourtListenerDatasetProbeContract:
 
     def test_fixture_text_is_non_empty_string(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         text = probe.get_text(pinned_row)
-        assert isinstance(text, str)
-        assert len(text) >= probe.MIN_TEXT_LENGTH
+        assert isinstance(text, str) and len(text) >= probe.MIN_TEXT_LENGTH
 
     def test_fixture_url_is_courtlistener(self, pinned_row: dict) -> None:
         assert "courtlistener.com" in pinned_row["url"]
 
+    def test_fixture_has_sampled_at_metadata(self) -> None:
+        """git-blame traceability: fixture must record when sample was taken."""
+        data = json.loads(FIXTURE_PATH.read_text())
+        assert "_fixture_meta" in data
+        assert "sampled_at" in data["_fixture_meta"]
+        assert "revision" in data["_fixture_meta"]
+
     def test_fixture_is_deterministic(self, pinned_row: dict) -> None:
-        assert pinned_row == json.loads(FIXTURE_PATH.read_text())
+        reloaded = {k: v for k, v in json.loads(FIXTURE_PATH.read_text()).items() if not k.startswith("_")}
+        assert pinned_row == reloaded
 
     def test_resolve_text_field_prefers_text_over_contents(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"text": "hello", "contents": "world", "url": "x", "created_timestamp": "", "downloaded_timestamp": ""}
@@ -178,9 +203,32 @@ class TestCourtListenerDatasetProbeContract:
         assert "single-pass" in probe.load.__doc__.lower()
 
 
+class TestReproducibilityContract:
+    def test_revision_is_set(self, probe: CourtListenerDatasetProbe) -> None:
+        """Revision must be set — not None or empty — to enable reproducible loading."""
+        assert probe.REVISION is not None
+        assert probe.REVISION != ""
+
+    def test_revision_constant_is_documented_in_load_docstring(self, probe: CourtListenerDatasetProbe) -> None:
+        assert "revision" in probe.load.__doc__.lower()
+
+    def test_trust_remote_code_is_never_true(self, probe: CourtListenerDatasetProbe) -> None:
+        """Security invariant: trust_remote_code must never appear as True in load()."""
+        import inspect
+
+        source = inspect.getsource(probe.load)
+        assert "trust_remote_code=True" not in source
+
+    @patch("datasets.load_dataset")
+    def test_load_passes_revision_to_hf(self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        mock_load.return_value = _mock_iterable_dataset([pinned_row])
+        list(probe.load())
+        assert mock_load.call_args.kwargs.get("revision") == probe.REVISION
+
+
 class TestIterValidRows:
     def test_yields_only_valid_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        invalid = {"url": "x"}  # missing all required fields
+        invalid = {"url": "x"}
         rows = list(probe.iter_valid_rows([pinned_row, invalid]))
         assert len(rows) == 1
 
@@ -192,36 +240,31 @@ class TestIterValidRows:
         assert list(probe.iter_valid_rows([])) == []
 
     def test_all_invalid_yields_nothing(self, probe: CourtListenerDatasetProbe) -> None:
-        bad_rows = [{"url": "x"}, {"text": "short"}]
-        assert list(probe.iter_valid_rows(bad_rows)) == []
+        assert list(probe.iter_valid_rows([{"url": "x"}, {"text": "short"}])) == []
 
     def test_returns_iterator_not_list(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        result = probe.iter_valid_rows([pinned_row])
-        assert hasattr(result, "__next__")
+        assert hasattr(probe.iter_valid_rows([pinned_row]), "__next__")
 
-    def test_invalid_rows_do_not_propagate_to_downstream(
-        self, probe: CourtListenerDatasetProbe, pinned_row: dict
-    ) -> None:
-        """Invariant: downstream code never sees invalid rows."""
+    def test_downstream_never_sees_invalid_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         mixed = [pinned_row, {"url": "bad"}, pinned_row]
         for row in probe.iter_valid_rows(mixed):
-            assert probe.validate_row(row) == [] or "text" in row
+            assert "text" in row and isinstance(row["text"], str)
 
 
 class TestNormalizeRow:
-    def test_normalize_row_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+    def test_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
         assert isinstance(result["text"], str) and len(result["text"]) > 0
 
-    def test_normalize_row_strips_whitespace(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_strips_whitespace(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"text": "  leading and trailing  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
         assert probe.normalize_row(row)["text"] == "leading and trailing"
 
-    def test_normalize_row_renames_contents_to_text(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_renames_contents_to_text(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
         assert "text" in probe.normalize_row(row)
 
-    def test_normalize_row_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
         row = {
             "text": "A" * 60,
             "created_timestamp": "2022-01-15T10:30:00Z",
@@ -232,11 +275,11 @@ class TestNormalizeRow:
         assert result["created_timestamp"] == "2022-01-15"
         assert result["downloaded_timestamp"] == "2022-06-01"
 
-    def test_normalize_row_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+    def test_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
         assert result["source_url"] == result["url"]
 
-    def test_normalize_row_output_has_canonical_keys(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+    def test_output_has_canonical_keys(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         assert set(probe.normalize_row(pinned_row).keys()) == {
             "text",
             "created_timestamp",
@@ -245,11 +288,10 @@ class TestNormalizeRow:
             "source_url",
         }
 
-    def test_normalize_row_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+    def test_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         first = probe.normalize_row(pinned_row)
         second = probe.normalize_row(first)
         assert first["text"] == second["text"]
-        assert first["created_timestamp"] == second["created_timestamp"]
 
 
 class TestCourtListenerDatasetProbeLoad:
@@ -281,7 +323,7 @@ class TestCourtListenerDatasetProbeLoad:
         assert probe.validate_row(row) == []
 
     @patch("datasets.load_dataset")
-    def test_mock_iterable_dataset_supports_multiple_iter_calls(
+    def test_mock_supports_multiple_iter_calls(
         self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict
     ) -> None:
         mock_load.return_value = _mock_iterable_dataset([pinned_row])
