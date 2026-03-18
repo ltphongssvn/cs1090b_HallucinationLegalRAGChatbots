@@ -116,7 +116,7 @@ _print_hardware_table() {
 import json,sys
 for g in json.load(sys.stdin)['gpus']:
     print(f\"  GPU[{g['index']}]: {g['name']} | {g['vram_gb']}GB | cap {g['compute_capability']}\")
-"
+" || true
 }
 
 _compare_hardware_to_targets() {
@@ -202,15 +202,15 @@ for i in range(torch.cuda.device_count()):
     vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
     if TARGET_GPU_NAME not in name:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] wrong hardware: {name}\033[0m')
-        print(f'    Fix: Request {TARGET_GPU_COUNT}x NVIDIA {TARGET_GPU_NAME}')
+        print(f'    Fix: Request ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME}')
         failed = True
     elif cap < TARGET_CAP:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] compute cap {cap} < {TARGET_CAP}\033[0m')
-        print(f'    Fix: Request NVIDIA {TARGET_GPU_NAME} (compute cap {TARGET_CAP})')
+        print(f'    Fix: Request NVIDIA ${TARGET_GPU_NAME} (compute cap {TARGET_CAP})')
         failed = True
     elif vram_gb < TARGET_VRAM_GB_MIN:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] {vram_gb:.1f}GB < {TARGET_VRAM_GB_MIN}GB\033[0m')
-        print(f'    Fix: Request {TARGET_GPU_COUNT}x NVIDIA {TARGET_GPU_NAME}')
+        print(f'    Fix: Request ${TARGET_GPU_COUNT}x NVIDIA ${TARGET_GPU_NAME}')
         failed = True
     else:
         print(f'  \033[0;32m✓\033[0m GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB')
@@ -219,30 +219,20 @@ if failed: sys.exit(1)
 }
 
 _assert_gpu_tensor_op() {
-    # Tests a tensor round-trip on EVERY visible GPU, not just cuda:0.
-    # With 4x L4 GPUs, a faulty GPU[1-3] would silently pass a cuda:0-only test.
-    # Also verifies inter-GPU independence: each device gets its own allocation
-    # and the result is verified independently, catching partial CUDA failures.
     _require_python
     $PYTHON -c "
 import torch, sys
-
 n = torch.cuda.device_count()
 failed = False
-
 for i in range(n):
     device = f'cuda:{i}'
     try:
-        # Allocate, compute, and verify on this specific GPU
         t = torch.tensor([1.0, 2.0, 3.0], device=device)
         assert t.device.type == 'cuda', f'tensor not on CUDA — got {t.device}'
         assert t.device.index == i, f'tensor on wrong device index: {t.device.index} != {i}'
-
         result = t.mean().cpu()
         assert torch.allclose(result, torch.tensor(2.0)), \
             f'GPU[{i}] mean={result.item():.4f}, expected 2.0 — possible numerical error'
-
-        # Verify memory allocation and deallocation on this device
         mem_before = torch.cuda.memory_allocated(i)
         big = torch.zeros(1024, 1024, device=device)
         mem_after  = torch.cuda.memory_allocated(i)
@@ -250,21 +240,17 @@ for i in range(n):
             f'GPU[{i}] memory allocation did not increase — CUDA memory subsystem broken'
         del big
         torch.cuda.empty_cache()
-
         print(f'  \033[0;32m✓\033[0m GPU[{i}] ({torch.cuda.get_device_name(i)}) — tensor op + memory alloc/dealloc ok')
-
     except AssertionError as e:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] functional test failed\033[0m')
         print(f'    What:  {e}')
         print(f'    Why:   GPU[{i}] is faulty — training will fail or produce wrong results')
         print(f'    Fix:   Check GPU health: nvidia-smi -i {i}')
-        print(f'           Request a new allocation if GPU[{i}] is hardware-faulty')
         failed = True
     except Exception as e:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] unexpected error: {e}\033[0m')
         print(f'    Fix:   nvidia-smi -i {i}   |   STEP=run_gpu_smoke_tests bash setup.sh')
         failed = True
-
 if failed:
     sys.exit(1)
 print(f'  \033[0;32m✓\033[0m All {n} GPUs passed tensor op + memory alloc/dealloc')
@@ -282,11 +268,14 @@ log_gpu() {
         done
     else
         _msg_warn "nvidia-smi not found" "Cannot log pre-venv GPU details" \
-            "informational" "Check module loads if this is a GPU node"
+            "informational" "Not required for runtime"
     fi
-    command -v nvcc &>/dev/null && \
-        _msg_ok "CUDA toolkit (nvcc): $(nvcc --version | grep release | awk '{print $6}' | tr -d ',')" || \
+    # Use if/fi — avoids set -e killing script when nvcc is not on PATH
+    if command -v nvcc &>/dev/null; then
+        _msg_ok "CUDA toolkit (nvcc): $(nvcc --version | grep release | awk '{print $6}' | tr -d ',')"
+    else
         _msg_warn "nvcc not on PATH" "Toolkit version unverifiable" "informational" "Not required for runtime"
+    fi
 }
 
 detect_hardware() {
@@ -296,7 +285,11 @@ detect_hardware() {
     _parse_detected_hardware "$hw_json"
     _print_hardware_table "$hw_json"
     _compare_hardware_to_targets
-    [ "$HARDWARE_MATCH" = "false" ] && step_end "detect_hardware" "WARN" && return
+    # Use if/fi — avoids set -e footgun with && pattern
+    if [ "$HARDWARE_MATCH" = "false" ]; then
+        step_end "detect_hardware" "WARN"
+        return
+    fi
 }
 
 run_gpu_smoke_tests() {
@@ -306,11 +299,13 @@ run_gpu_smoke_tests() {
     fi
     _require_python; _require_hardware_detected
     echo " Running GPU smoke tests — enforcing TARGET_* constraints on all ${TARGET_GPU_COUNT} GPUs..."
-    [ "$HARDWARE_MATCH" = "false" ] && _msg_warn "Hardware mismatches were flagged" \
-        "DETECTED_* values do not match TARGET_* constants" "action-required" \
-        "Assertions below will hard-fail with specific details."
+    if [ "$HARDWARE_MATCH" = "false" ]; then
+        _msg_warn "Hardware mismatches were flagged" \
+            "DETECTED_* values do not match TARGET_* constants" "action-required" \
+            "Assertions below will hard-fail with specific details."
+    fi
     _assert_cuda_available
     _assert_gpu_count
     _assert_per_gpu_specs
-    _assert_gpu_tensor_op   # now tests ALL GPUs, not just cuda:0
+    _assert_gpu_tensor_op
 }
