@@ -100,7 +100,7 @@ except OSError: sys.exit(1)
     # as an unexpected package, causing drift detection to hard-fail or
     # silently overwrite it. Using uv pip install keeps the install
     # within uv's managed context.
-    "$UV" pip install --quiet "$SPACY_WHEEL" || {
+    "$UV" pip install --python "$PYTHON" --quiet "$SPACY_WHEEL" || {
         _msg_error "uv pip install failed" \
             "uv pip install $SPACY_WHEEL exited non-zero" \
             "spaCy model not installed — NER pipeline will fail at runtime" \
