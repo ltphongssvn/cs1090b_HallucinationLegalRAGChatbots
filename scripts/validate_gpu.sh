@@ -96,7 +96,10 @@ print(', '.join(names) if names else 'N/A')
     done
     if command -v nvidia-smi &>/dev/null; then
         DETECTED_DRIVER_CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' | head -1 || echo 'parse-failed')
-        [ -z "$DETECTED_DRIVER_CUDA" ] && DETECTED_DRIVER_CUDA="parse-failed"
+        # Use if/fi — avoids set -e footgun: [ -z ] && assignment exits 1 when var is set
+        if [ -z "$DETECTED_DRIVER_CUDA" ]; then
+            DETECTED_DRIVER_CUDA="parse-failed"
+        fi
     else
         DETECTED_DRIVER_CUDA="nvidia-smi-not-found"
     fi
@@ -244,7 +247,6 @@ for i in range(n):
     except AssertionError as e:
         print(f'\033[0;31m  ✗ ERROR — GPU[{i}] functional test failed\033[0m')
         print(f'    What:  {e}')
-        print(f'    Why:   GPU[{i}] is faulty — training will fail or produce wrong results')
         print(f'    Fix:   Check GPU health: nvidia-smi -i {i}')
         failed = True
     except Exception as e:
@@ -270,7 +272,6 @@ log_gpu() {
         _msg_warn "nvidia-smi not found" "Cannot log pre-venv GPU details" \
             "informational" "Not required for runtime"
     fi
-    # Use if/fi — avoids set -e killing script when nvcc is not on PATH
     if command -v nvcc &>/dev/null; then
         _msg_ok "CUDA toolkit (nvcc): $(nvcc --version | grep release | awk '{print $6}' | tr -d ',')"
     else
@@ -284,13 +285,14 @@ detect_hardware() {
     local hw_json hw_err=0
     hw_json=$(_query_torch_hardware 2>/dev/null) || hw_err=$?
     if [ "$hw_err" -ne 0 ] || [ -z "$hw_json" ]; then
-        _msg_error "Hardware query failed" "$hw_json"             "torch CUDA query failed — venv may be broken"             "STEP=sync_dependencies bash setup.sh"
+        _msg_error "Hardware query failed" "$hw_json" \
+            "torch CUDA query failed — venv may be broken" \
+            "STEP=sync_dependencies bash setup.sh"
         exit 1
     fi
     _parse_detected_hardware "$hw_json"
     _print_hardware_table "$hw_json"
     _compare_hardware_to_targets
-    # Use if/fi — avoids set -e footgun with && pattern
     if [ "$HARDWARE_MATCH" = "false" ]; then
         step_end "detect_hardware" "WARN"
         return
