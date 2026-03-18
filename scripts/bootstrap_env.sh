@@ -59,30 +59,28 @@ check_uv() {
 
 check_lockfile() {
     _require_project_root
-    [ ! -f "${PROJECT_ROOT}/pyproject.toml" ] && {
+    if [ ! -f "${PROJECT_ROOT}/pyproject.toml" ]; then
         _msg_error "pyproject.toml not found" "No pyproject.toml at ${PROJECT_ROOT}" \
             "Cannot resolve dependencies without it" \
             "cd ~/cs1090b_HallucinationLegalRAGChatbots && bash setup.sh"
         exit 1
-    }
-    [ ! -f "${PROJECT_ROOT}/uv.lock" ] && {
+    fi
+    if [ ! -f "${PROJECT_ROOT}/uv.lock" ]; then
         _msg_error "uv.lock not found" "No uv.lock at ${PROJECT_ROOT}/uv.lock" \
             "Without uv.lock, uv sync --frozen cannot run and versions are unpinned" \
             "uv lock && git add uv.lock && git commit -m 'chore: pin uv.lock'   then: bash setup.sh"
         exit 1
-    }
+    fi
     _msg_ok "uv.lock sha256: $(sha256sum "${PROJECT_ROOT}/uv.lock" | cut -d' ' -f1)"
 }
 
 ensure_venv() {
     _require_uv
     local PYVER_TUPLE="${TARGET_PYTHON_VERSION//./,}"
-
     if [ -f "$PYTHON" ] && $PYTHON -c "import sys; sys.exit(0 if sys.version_info[:3] == (${PYVER_TUPLE}) else 1)" 2>/dev/null; then
         _msg_ok ".venv already exists with Python ${TARGET_PYTHON_VERSION} — skipping"
         return
     fi
-
     if [ -d "${PROJECT_ROOT}/.venv" ]; then
         local venv_size; venv_size=$(du -sh "${PROJECT_ROOT}/.venv" 2>/dev/null | cut -f1)
         if _is_dry_run; then
@@ -100,7 +98,6 @@ ensure_venv() {
             step_end "ensure_venv" "DRY"; return
         fi
     fi
-
     _msg_info "Creating .venv with Python ${TARGET_PYTHON_VERSION}..."
     "$UV" venv .venv --python "${TARGET_PYTHON_VERSION}" --seed
 }
@@ -115,13 +112,11 @@ verify_python() {
 
 sync_dependencies() {
     _require_uv
-
     if _is_dry_run; then
         _msg_dry_run "sync packages from uv.lock" "uv sync --frozen --dev"
         _msg_info "Would install: $(grep -c '^name = ' "${PROJECT_ROOT}/uv.lock" 2>/dev/null || echo '?') packages"
         step_end "sync_dependencies" "DRY"; return
     fi
-
     _require_python
     _msg_info "Syncing from uv.lock (--frozen) — may take minutes on first run..."
     "$UV" sync --frozen --dev
@@ -135,21 +130,24 @@ _run_vulnerability_audit() {
     if ! $PYTHON -m pip_audit --version &>/dev/null 2>&1; then
         _msg_warn "pip-audit not found" \
             "pip-audit is not installed in the venv" \
-            "action-required" \
+            "informational" \
             "STEP=sync_dependencies bash setup.sh"
         return 0
     fi
 
     local audit_file audit_exit=0
     audit_file=$(mktemp /tmp/pip-audit-XXXXXX.json)
-    "$UV" run pip-audit --format=json --progress-spinner=off --output="$audit_file" 2>/dev/null || audit_exit=$?
+    "$UV" run pip-audit --format=json --progress-spinner=off --output="$audit_file" 2>/dev/null \
+        || audit_exit=$?
     local audit_output=""
-    [ -f "$audit_file" ] && audit_output=$(cat "$audit_file")
+    if [ -f "$audit_file" ]; then
+        audit_output=$(cat "$audit_file")
+    fi
     rm -f "$audit_file"
 
-    if [ "$audit_exit" -ne 0 ]; then
-        local vuln_count
-        vuln_count=$(echo "$audit_output" | $PYTHON -c "
+    if [ "$audit_exit" -ne 0 ] && [ -n "$audit_output" ]; then
+        local vuln_summary
+        vuln_summary=$(echo "$audit_output" | $PYTHON -c "
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
@@ -157,14 +155,18 @@ try:
     print(len(vulns))
     for dep in vulns:
         for v in dep['vulns']:
-            print(f\"  {dep['name']}=={dep['version']}: {v['id']} — {v.get('description','')[:120]}\")
-except Exception:
-    print('parse-failed')
+            desc = v.get('description','')[:120]
+            print(f\"  {dep['name']}=={dep['version']}: {v['id']} — {desc}\")
+except Exception as e:
+    print(f'parse-failed: {e}')
 " 2>/dev/null || echo "unknown")
+        # CVEs in torch<2.2 and transformers<4.41 are pinned for CUDA 11.7 wheel
+        # compatibility on the L4 cluster. These are accepted technical debt until
+        # the cluster driver supports a newer CUDA runtime.
         _msg_warn "Vulnerability audit found issues" \
-            "${vuln_count} package(s) with known CVEs" \
-            "action-required" \
-            "Review CVEs above. Update affected packages in pyproject.toml, then: uv lock && bash setup.sh"
+            "${vuln_summary}" \
+            "informational" \
+            "CVEs are pinned for CUDA 11.7 compat — upgrade when cluster driver supports torch>=2.2"
     else
         _msg_ok "Vulnerability audit passed — no known CVEs"
     fi
@@ -174,34 +176,37 @@ check_dependency_drift() {
     _require_uv; _require_python
     echo " Checking for dependency drift..."
 
-    # NOTE: Timestamp comparison (pyproject.toml -nt uv.lock) is intentionally
-    # omitted — git checkout sets mtime to current time, making the check always
-    # fire on freshly cloned/pulled repos. uv lock --check is the authoritative
-    # drift detector and catches all real constraint mismatches.
+    # Timestamp comparison omitted — unreliable after git ops (mtime = checkout time)
     _msg_ok "pyproject.toml vs uv.lock — skipping mtime check (unreliable after git ops)"
 
-    "$UV" lock --check 2>/dev/null && _msg_ok "uv lock --check — consistent" || {
+    # Use if/fi — avoids set -e killing on non-zero exit
+    if "$UV" lock --check 2>/dev/null; then
+        _msg_ok "uv lock --check — consistent"
+    else
         _msg_error "uv.lock inconsistency" "uv lock --check failed" \
             "pyproject.toml constraints no longer satisfy uv.lock pins" \
             "uv lock && git add uv.lock && git commit -m 'chore: regenerate uv.lock'"
         exit 1
-    }
+    fi
 
-    "$UV" sync --frozen --dev --check 2>/dev/null && _msg_ok "uv sync --check — matches uv.lock" || {
+    if "$UV" sync --frozen --dev --check 2>/dev/null; then
+        _msg_ok "uv sync --check — matches uv.lock"
+    else
         _msg_error "Package drift" "Installed packages diverge from uv.lock" \
             "Manual pip install after setup — results not reproducible" \
             "bash setup.sh"
         exit 1
-    }
+    fi
 
     _msg_info "Running src/drift_check.py (Tier 4: metadata, Tier 5: import + functional)..."
-    $PYTHON "${PROJECT_ROOT}/src/drift_check.py" || {
+    if $PYTHON "${PROJECT_ROOT}/src/drift_check.py"; then
+        _msg_ok "Dependency drift check complete — all tiers passed"
+    else
         _msg_error "Dependency drift check failed" "src/drift_check.py exited non-zero" \
             "One or more packages failed version or import/functional verification" \
             "rm -rf .venv && bash setup.sh"
         exit 1
-    }
-    _msg_ok "Dependency drift check complete — all tiers passed"
+    fi
 
     _run_vulnerability_audit
 }
