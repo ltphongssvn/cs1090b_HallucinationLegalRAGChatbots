@@ -37,7 +37,7 @@ REPRO_TOKENIZERS_PAR="false"
 SPACY_MODEL="en_core_web_sm"
 SPACY_MODEL_VERSION="3.8.0"
 SPACY_MODEL_URL="https://github.com/explosion/spacy-models/releases/download/${SPACY_MODEL}-${SPACY_MODEL_VERSION}/${SPACY_MODEL}-${SPACY_MODEL_VERSION}-py3-none-any.whl"
-SPACY_MODEL_SHA256="5e97b9ec4f95153b992896c5c45b1a00c3fcde7f764426c5370f2f11e71abef2"  # pragma: allowlist secret
+SPACY_MODEL_SHA256="1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85"  # pragma: allowlist secret
 # ===========================================================================
 # Runtime state
 # ===========================================================================
