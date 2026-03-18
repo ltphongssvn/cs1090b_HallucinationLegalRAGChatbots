@@ -14,10 +14,11 @@ pytestmark = pytest.mark.unit
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
 HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
-# PINNED_REVISION: must be a 40-character hex commit SHA — never "main".
-# Obtain with: huggingface-cli repo info pile-of-law/pile-of-law --repo-type dataset
-# Update this before any training run whose results must be reproducible by date.
-PINNED_REVISION = "REPLACE_WITH_DATASET_COMMIT_HASH"
+# Pinned to the HEAD commit of pile-of-law/pile-of-law as of 2026-03-18.
+# Obtain updated hash with:
+#   from huggingface_hub import list_repo_commits
+#   list(list_repo_commits('pile-of-law/pile-of-law', repo_type='dataset'))[0].commit_id
+PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
 
 from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
 
@@ -30,8 +31,7 @@ class CourtListenerDatasetProbe:
     Reproducibility contract:
       - REVISION must be a 40-char immutable commit SHA, never a mutable branch.
       - trust_remote_code must not be enabled unless explicitly required and audited.
-      - Provenance is carried by the probe, not embedded in data rows.
-        Call get_provenance() to log to W&B or any experiment tracker.
+      - Provenance is probe-level — call get_provenance() to log to W&B, not per-row.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
@@ -62,8 +62,7 @@ class CourtListenerDatasetProbe:
     def get_provenance(self) -> dict[str, Any]:
         """Return full provenance dict for W&B / experiment logging.
 
-        Provenance is a probe-level concern — not embedded in data rows.
-        Log this once at training start, not per-row.
+        Provenance is probe-level — log once at training start, not per-row.
         """
         import datasets
 
@@ -108,20 +107,29 @@ class CourtListenerDatasetProbe:
         return errors
 
     def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize validated row into canonical form for downstream use.
+        """Normalize validated row into canonical form, preserving original metadata.
 
-        Provenance is NOT embedded here — it is a probe-level concern.
-        Call get_provenance() once at training start and log to W&B.
+        Uses a shallow copy so upstream fields (jurisdiction, court level, judge)
+        survive normalization. The old text field is removed if renamed to 'text'
+        to prevent RAM duplication. Provenance is NOT embedded — call
+        get_provenance() once at training start and log to W&B.
         """
+        normalized = dict(row)  # shallow copy — preserve all upstream metadata
+
         text_field = self.resolve_text_field(row)
         text = str(row[text_field]).strip() if text_field else ""
-        return {
-            "text": text,
-            "created_timestamp": self._normalize_timestamp(str(row.get("created_timestamp", ""))),
-            "downloaded_timestamp": self._normalize_timestamp(str(row.get("downloaded_timestamp", ""))),
-            "url": str(row.get("url", "")),
-            "source_url": str(row.get("url", "")),
-        }
+
+        # Remove old field if it differs from canonical 'text' — avoids RAM duplication
+        if text_field and text_field != "text":
+            normalized.pop(text_field, None)
+
+        normalized["text"] = text
+        normalized["created_timestamp"] = self._normalize_timestamp(str(row.get("created_timestamp", "")))
+        normalized["downloaded_timestamp"] = self._normalize_timestamp(str(row.get("downloaded_timestamp", "")))
+        if "url" in row:
+            normalized["source_url"] = str(row["url"])
+
+        return normalized
 
     def _normalize_timestamp(self, ts: str) -> str:
         match = re.search(r"\d{4}-\d{2}-\d{2}", ts)
@@ -245,12 +253,11 @@ class TestReproducibilityContract:
     def test_revision_must_not_be_mutable_branch(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe.REVISION not in {"main", "master", "latest", "HEAD", ""}
 
-    def test_revision_is_40char_sha_or_explicit_placeholder(self, probe: CourtListenerDatasetProbe) -> None:
-        """git-blame contract: revision must be a 40-char SHA or the explicit placeholder."""
-        assert (
-            HEX_REVISION_RE.fullmatch(probe.REVISION) is not None
-            or probe.REVISION == "REPLACE_WITH_DATASET_COMMIT_HASH"
-        ), f"Invalid revision: {probe.REVISION!r} — must be 40-char SHA"
+    def test_revision_is_40char_sha(self, probe: CourtListenerDatasetProbe) -> None:
+        """git-blame contract: revision must be a 40-char hex SHA — no placeholders in prod."""
+        assert HEX_REVISION_RE.fullmatch(probe.REVISION) is not None, (
+            f"PINNED_REVISION must be a 40-char SHA, got: {probe.REVISION!r}"
+        )
 
     def test_fixture_text_sha256_matches_checksum_module(self, pinned_row: dict) -> None:
         actual = hashlib.sha256(pinned_row["text"].encode("utf-8")).hexdigest()
@@ -275,26 +282,21 @@ class TestReproducibilityContract:
 
 
 class TestGetProvenance:
-    @patch("datasets.load_dataset")
-    def test_get_provenance_returns_dict(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
-        prov = probe.get_provenance()
-        assert isinstance(prov, dict)
+    def test_get_provenance_returns_dict(self, probe: CourtListenerDatasetProbe) -> None:
+        assert isinstance(probe.get_provenance(), dict)
 
-    @patch("datasets.load_dataset")
-    def test_get_provenance_has_required_keys(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
-        prov = probe.get_provenance()
+    def test_get_provenance_has_required_keys(self, probe: CourtListenerDatasetProbe) -> None:
         required = {"dataset", "subset", "split", "revision", "hf_datasets_version", "probe_version"}
-        assert required <= set(prov.keys())
+        assert required <= set(probe.get_provenance().keys())
 
-    @patch("datasets.load_dataset")
-    def test_get_provenance_matches_probe_constants(self, mock_load, probe: CourtListenerDatasetProbe) -> None:
+    def test_get_provenance_matches_probe_constants(self, probe: CourtListenerDatasetProbe) -> None:
         prov = probe.get_provenance()
         assert prov["dataset"] == probe.DATASET_ID
         assert prov["revision"] == probe.REVISION
         assert prov["probe_version"] == probe.PROBE_VERSION
 
     def test_normalize_row_does_not_embed_provenance(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        """Provenance is probe-level, not row-level — data records must stay clean."""
+        """Provenance is probe-level — data records must stay clean."""
         result = probe.normalize_row(pinned_row)
         assert "_provenance" not in result
         assert "revision" not in result
@@ -308,7 +310,8 @@ class TestIterValidRows:
 
     def test_yields_normalized_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         rows = list(probe.iter_valid_rows([pinned_row]))
-        assert set(rows[0].keys()) == {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+        expected = {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+        assert expected.issubset(set(rows[0].keys()))
 
     def test_empty_source_yields_nothing(self, probe: CourtListenerDatasetProbe) -> None:
         assert list(probe.iter_valid_rows([])) == []
@@ -325,6 +328,13 @@ class TestIterValidRows:
 
 
 class TestNormalizeRow:
+    def test_preserves_upstream_metadata(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Shallow copy — upstream fields like judge, jurisdiction survive normalization."""
+        row = {**pinned_row, "judge": "Smith J.", "jurisdiction": "federal"}
+        result = probe.normalize_row(row)
+        assert result.get("judge") == "Smith J."
+        assert result.get("jurisdiction") == "federal"
+
     def test_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
         assert isinstance(result["text"], str) and len(result["text"]) > 0
@@ -333,9 +343,12 @@ class TestNormalizeRow:
         row = {"text": "  leading and trailing  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
         assert probe.normalize_row(row)["text"] == "leading and trailing"
 
-    def test_renames_contents_to_text(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_renames_contents_to_text_and_removes_old_field(self, probe: CourtListenerDatasetProbe) -> None:
+        """contents renamed to text; old key removed to avoid RAM duplication."""
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        assert "text" in probe.normalize_row(row)
+        result = probe.normalize_row(row)
+        assert "text" in result
+        assert "contents" not in result
 
     def test_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
         row = {
@@ -352,18 +365,22 @@ class TestNormalizeRow:
         result = probe.normalize_row(pinned_row)
         assert result["source_url"] == result["url"]
 
-    def test_output_canonical_keys(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        assert set(probe.normalize_row(pinned_row).keys()) == {
-            "text",
-            "created_timestamp",
-            "downloaded_timestamp",
-            "url",
-            "source_url",
-        }
+    def test_output_has_canonical_keys_as_superset(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Canonical keys are a subset — upstream metadata is preserved, not replaced."""
+        row = {**pinned_row, "dummy_judge": "Smith"}
+        result = probe.normalize_row(row)
+        expected = {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
+        assert expected.issubset(set(result.keys()))
+        assert result.get("dummy_judge") == "Smith"
 
     def test_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         first = probe.normalize_row(pinned_row)
         assert first["text"] == probe.normalize_row(first)["text"]
+
+    def test_does_not_embed_provenance(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert "_provenance" not in result
+        assert "revision" not in result
 
 
 class TestCourtListenerDatasetProbeLoad:
