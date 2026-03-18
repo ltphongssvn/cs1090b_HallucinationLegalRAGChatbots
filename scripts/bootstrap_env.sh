@@ -140,12 +140,8 @@ _run_vulnerability_audit() {
         return 0
     fi
 
-    local audit_output audit_exit
-    audit_output=$($PYTHON -m pip_audit \
-        --requirement <("$UV" pip list --format=freeze 2>/dev/null) \
-        --format=json \
-        --progress-spinner=off \
-        2>&1) && audit_exit=0 || audit_exit=$?
+    local audit_output audit_exit=0
+    audit_output=$("$UV" run pip-audit --format=json --progress-spinner=off 2>&1) || audit_exit=$?
 
     if [ "$audit_exit" -ne 0 ]; then
         local vuln_count

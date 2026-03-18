@@ -34,7 +34,7 @@ _check_gpu_name_smi() {
 
 _check_driver_cuda_smi() {
     local driver_cuda
-    driver_cuda=$(nvidia-smi | grep 'CUDA Version' | awk '{print $NF}')
+    driver_cuda=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version: \K[0-9.]+' || echo '')
     if [ "${driver_cuda}" != "${TARGET_DRIVER_CUDA}" ]; then
         _msg_warn "Driver CUDA version mismatch" \
             "Detected driver CUDA ${driver_cuda}, target is ${TARGET_DRIVER_CUDA}" \
@@ -281,7 +281,12 @@ log_gpu() {
 detect_hardware() {
     _require_python
     echo " Detecting hardware (post-venv, torch-level)..."
-    local hw_json; hw_json=$(_query_torch_hardware)
+    local hw_json hw_err=0
+    hw_json=$(_query_torch_hardware 2>&1) || hw_err=$?
+    if [ "$hw_err" -ne 0 ] || [ -z "$hw_json" ]; then
+        _msg_error "Hardware query failed" "$hw_json"             "torch CUDA query failed — venv may be broken"             "STEP=sync_dependencies bash setup.sh"
+        exit 1
+    fi
     _parse_detected_hardware "$hw_json"
     _print_hardware_table "$hw_json"
     _compare_hardware_to_targets
