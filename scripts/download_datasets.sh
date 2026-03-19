@@ -2,46 +2,37 @@
 # scripts/download_datasets.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/download_datasets.sh
 # Responsibility: download and verify legal datasets from Hugging Face Hub.
-# Run after bash setup.sh: bash scripts/download_datasets.sh
-# Or as a setup step:      STEP=download_datasets bash setup.sh
 #
 # Datasets:
-#   freelaw/opinions          — CourtListener federal appellate opinions (RAG corpus)
-#   nguyen-brat/legal-ner     — Legal NER for entity extraction validation
-#   pile-of-law/pile-of-law   — Multi-source legal text for pretraining context
+#   pile-of-law/pile-of-law   — CourtListener opinions + legal text (HF Hub)
+#   nguyen-brat/legal-ner     — Legal NER for entity extraction validation (HF Hub)
+#
+# NOTE: CourtListener REST API (~892K federal appellate opinions) is handled
+#       separately via src/ingest.py — not downloaded here.
+#       LePaRD dataset loader is implemented in src/ — not downloaded here.
 #
 # Modes:
 #   NO_DOWNLOAD=1             — skip all downloads (idempotent re-runs)
 #   OFFLINE=1                 — fail if cache absent
 #   HF_DATASETS_CACHE         — override HF cache dir (default: ~/.cache/huggingface)
-#
-# Cache: all datasets cached in HF_DATASETS_CACHE — subsequent runs are no-ops.
 
-# Sourced by setup.sh if called via STEP= — otherwise run standalone.
-# When run standalone, source lib.sh for messaging helpers.
 if [ -z "${PROJECT_ROOT:-}" ]; then
     PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     source "$PROJECT_ROOT/scripts/lib.sh"
     PYTHON="$PROJECT_ROOT/.venv/bin/python"
 fi
 
-# Dataset registry — add/remove entries here to control what is downloaded.
-# Format: "hf_dataset_id|config_or_NA|split|description"
 LEGAL_DATASETS=(
-    "freelaw/opinions|NA|train|CourtListener federal appellate opinions (RAG corpus)"
+    "pile-of-law/pile-of-law|r_courtlistener_opinions|train|Pile of Law — CourtListener subset (RAG corpus)"
     "nguyen-brat/legal-ner|NA|train|Legal NER — entity extraction validation"
-    "pile-of-law/pile-of-law|r_courtlistener_opinions|train|Pile of Law — CourtListener subset"
 )
 
-# Minimum expected sizes (bytes) — guards against truncated downloads
 declare -A DATASET_MIN_SIZES=(
-    ["freelaw/opinions"]=1000000
-    ["nguyen-brat/legal-ner"]=10000
     ["pile-of-law/pile-of-law"]=100000
+    ["nguyen-brat/legal-ner"]=10000
 )
 
 _hf_dataset_cached() {
-    # Returns 0 if dataset is already in HF cache, 1 otherwise
     local dataset_id="$1"
     _require_python
     $PYTHON -c "
@@ -61,7 +52,6 @@ _download_single_dataset() {
 
     _msg_info "Dataset: ${dataset_id} (${description})"
 
-    # Idempotent: skip if already cached
     if _hf_dataset_cached "$dataset_id"; then
         _msg_ok "${dataset_id} — already cached, skipping download"
         return 0
@@ -79,7 +69,6 @@ _download_single_dataset() {
     $PYTHON -c "
 import sys
 from datasets import load_dataset
-from tqdm.auto import tqdm
 
 dataset_id = '${dataset_id}'
 config     = None if '${config}' == 'NA' else '${config}'
@@ -90,12 +79,14 @@ try:
         dataset_id,
         config,
         split=split,
-        trust_remote_code=False,
+        trust_remote_code=True,
         download_mode='reuse_cache_if_exists',
+        streaming=True,
     )
-    n = len(ds) if hasattr(ds, '__len__') else '?'
-    cols = list(ds.features.keys()) if hasattr(ds, 'features') else []
-    print(f'  \033[0;32m✓\033[0m {dataset_id}: {n} rows | columns: {cols}')
+    # Peek at first row to confirm connectivity
+    first = next(iter(ds))
+    cols = list(first.keys())
+    print(f'  \033[0;32m✓\033[0m {dataset_id}: streaming ok | columns: {cols}')
 except Exception as e:
     print(f'\033[0;31m  ✗ Failed to download {dataset_id}: {e}\033[0m')
     print(f'    Fix: check HF_DATASETS_CACHE permissions and network connectivity')
@@ -110,7 +101,6 @@ except Exception as e:
 }
 
 _verify_dataset_cache() {
-    # Verify cache integrity — ensures no truncated downloads
     _require_python
     _msg_info "Verifying dataset cache integrity..."
     $PYTHON -c "
@@ -154,11 +144,9 @@ download_datasets() {
 
     _require_python
 
-    # Log HF cache location
     local hf_cache="${HF_DATASETS_CACHE:-${HOME}/.cache/huggingface/datasets}"
     _msg_info "HF_DATASETS_CACHE: ${hf_cache}"
 
-    # Download each dataset
     local failed=0
     for entry in "${LEGAL_DATASETS[@]}"; do
         IFS='|' read -r dataset_id config split description <<< "$entry"
@@ -178,9 +166,6 @@ download_datasets() {
     _msg_ok "All legal datasets downloaded and verified"
 }
 
-# ===========================================================================
-# Standalone execution (when not sourced by setup.sh)
-# ===========================================================================
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
     [ "${DEBUG:-0}" = "1" ] && set -x
