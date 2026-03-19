@@ -9,7 +9,7 @@
     "subset": "r_courtlistener_opinions",
     "split": "train",
     "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",
-    "text_sha256": "REPLACE_WITH_ACTUAL_SHA256",
+    "text_sha256": "5067f1d9eb0cf6c7781999be93652779718d8f0e21b6c4fae67580f4f2b6fb1a",
     "hf_datasets_version": "4.7.0",
     "probe_version": "1.0"
   }

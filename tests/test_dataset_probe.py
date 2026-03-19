@@ -22,8 +22,14 @@ PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlis
 
 from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
 
-# Mutable refs that must be rejected in REPRODUCIBLE mode.
 _MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
+
+_TS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}"), "datetime+tz"),
+    (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"), "datetime+utc"),
+    (re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"), "datetime"),
+    (re.compile(r"\d{4}-\d{2}-\d{2}"), "date"),
+]
 
 
 class CourtListenerDatasetProbe:
@@ -34,10 +40,8 @@ class CourtListenerDatasetProbe:
     Reproducibility contract:
       - REPRODUCIBLE=True (default) enforces a pinned 40-char SHA at load() time.
         Set REPRODUCIBLE=False only for fast exploration — never for training runs.
-      - trust_remote_code is never passed — remote code execution is a security
-        and reproducibility violation.
-      - Provenance is probe-level — call get_provenance() once at training start
-        and log to W&B; do not embed in data rows.
+      - trust_remote_code is never passed.
+      - Provenance is probe-level — call get_provenance() once at training start.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
@@ -45,7 +49,7 @@ class CourtListenerDatasetProbe:
     SPLIT = "train"
     REVISION = PINNED_REVISION
     PROBE_VERSION = "1.0"
-    REPRODUCIBLE = True  # set False only for exploration — never for training
+    REPRODUCIBLE = True
     REQUIRED_FIELDS: frozenset[str] = frozenset({"text", "created_timestamp", "downloaded_timestamp", "url"})
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
@@ -75,7 +79,6 @@ class CourtListenerDatasetProbe:
 
     def get_provenance(self) -> dict[str, Any]:
         """Return full provenance dict for W&B / experiment logging.
-
         Provenance is probe-level — log once at training start, not per-row.
         """
         import datasets
@@ -125,8 +128,8 @@ class CourtListenerDatasetProbe:
         """Normalize validated row into canonical form, preserving upstream metadata.
 
         Shallow copy preserves all upstream fields (jurisdiction, court level, judge).
-        Old text field is removed if renamed to 'text' to avoid RAM duplication.
-        Provenance is NOT embedded — call get_provenance() at training start.
+        Old text field removed if renamed to avoid RAM duplication.
+        Provenance NOT embedded — call get_provenance() at training start.
         """
         normalized = dict(row)
 
@@ -145,13 +148,29 @@ class CourtListenerDatasetProbe:
         return normalized
 
     def _normalize_timestamp(self, ts: str) -> str:
-        match = re.search(r"\d{4}-\d{2}-\d{2}", ts)
-        return match.group(0) if match else ""
+        """Extract the most precise ISO-8601 timestamp present in the string.
+
+        Preserves timezone and time-of-day semantics — legal documents carry
+        filing deadlines and appeal windows that are time-sensitive. Falling
+        back silently to date-only loses forensic value. Preference order:
+        datetime+tz > datetime+utc > datetime > date > empty string.
+        """
+        for pattern, _ in _TS_PATTERNS:
+            match = pattern.search(ts)
+            if match:
+                return match.group(0)
+        return ""
 
     def resolve_text_field(self, row: dict[str, Any]) -> str | None:
+        """Return the first available text field name, or None.
+        Prefers 'text' over 'contents' per TEXT_FIELDS priority order.
+        """
         return next((k for k in self.TEXT_FIELDS if k in row), None)
 
     def get_text(self, row: dict[str, Any]) -> str:
+        """Extract text content. Raises ValueError if no text field found.
+        Strict accessor — callers never implement fallback logic themselves.
+        """
         field = self.resolve_text_field(row)
         if field is None:
             raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
@@ -195,7 +214,6 @@ class TestCourtListenerDatasetProbeContract:
         assert pinned_row == reloaded
 
     def test_fixture_revision_matches_probe_revision(self, fixture_data: dict) -> None:
-        """Fixture and probe must agree on revision — prevents silent sample drift."""
         assert fixture_data["_fixture_meta"]["revision"] == CourtListenerDatasetProbe.REVISION
 
     def test_resolve_text_field_prefers_text_over_contents(self, probe: CourtListenerDatasetProbe) -> None:
@@ -242,6 +260,33 @@ class TestCourtListenerDatasetProbeContract:
         assert len(errors) == 2
 
 
+class TestNormalizeTimestamp:
+    def test_preserves_full_datetime_with_utc(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("2022-01-15T10:30:00Z") == "2022-01-15T10:30:00Z"
+
+    def test_preserves_full_datetime_with_tz_offset(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("2022-01-15T10:30:00+05:00") == "2022-01-15T10:30:00+05:00"
+
+    def test_preserves_datetime_without_tz(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("2022-01-15T10:30:00") == "2022-01-15T10:30:00"
+
+    def test_falls_back_to_date_only(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("2022-01-15") == "2022-01-15"
+
+    def test_extracts_from_surrounding_text(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("Filed on 2022-01-15T10:30:00Z per docket") == "2022-01-15T10:30:00Z"
+
+    def test_prefers_more_precise_over_less(self, probe: CourtListenerDatasetProbe) -> None:
+        result = probe._normalize_timestamp("2022-01-15T10:30:00Z")
+        assert "T" in result
+
+    def test_empty_string_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("") == ""
+
+    def test_unparseable_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
+        assert probe._normalize_timestamp("no date here") == ""
+
+
 class TestReproducibilityContract:
     def test_fixture_has_required_provenance_fields(self, fixture_data: dict) -> None:
         meta = fixture_data["_fixture_meta"]
@@ -267,6 +312,24 @@ class TestReproducibilityContract:
         assert meta["revision"] == probe.REVISION
         assert meta["probe_version"] == probe.PROBE_VERSION
 
+    def test_fixture_text_sha256_matches_checksum_module(self, pinned_row: dict) -> None:
+        """Content fingerprint verified against checksums.py — avoids detect-secrets JSON flag."""
+        actual = hashlib.sha256(pinned_row["text"].encode("utf-8")).hexdigest()
+        assert actual == COURTLISTENER_SAMPLE_TEXT_SHA256
+
+    def test_fixture_json_sha256_matches_checksum_module(self, fixture_data: dict) -> None:
+        """Enforce that the fixture JSON text_sha256 field is not a placeholder
+        and matches the authoritative value in checksums.py.
+        Prevents provenance metadata from appearing authoritative while being unenforced.
+        """
+        sha_in_json = fixture_data["_fixture_meta"]["text_sha256"]
+        assert sha_in_json != "REPLACE_WITH_ACTUAL_SHA256", (
+            "text_sha256 in fixture JSON is still a placeholder — replace with real SHA"
+        )
+        assert sha_in_json == COURTLISTENER_SAMPLE_TEXT_SHA256, (
+            "text_sha256 in fixture JSON does not match checksums.py — update one or the other"
+        )
+
     def test_revision_must_not_be_mutable_branch(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe.REVISION not in _MUTABLE_REFS
 
@@ -274,10 +337,6 @@ class TestReproducibilityContract:
         assert HEX_REVISION_RE.fullmatch(probe.REVISION) is not None, (
             f"PINNED_REVISION must be a 40-char SHA, got: {probe.REVISION!r}"
         )
-
-    def test_fixture_text_sha256_matches_checksum_module(self, pinned_row: dict) -> None:
-        actual = hashlib.sha256(pinned_row["text"].encode("utf-8")).hexdigest()
-        assert actual == COURTLISTENER_SAMPLE_TEXT_SHA256
 
     def test_sampled_at_is_iso_date(self, fixture_data: dict) -> None:
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", fixture_data["_fixture_meta"]["sampled_at"])
@@ -298,8 +357,6 @@ class TestReproducibilityContract:
 
 
 class TestReproducibilityEnforcement:
-    """Guardrail tests — ensure mutable refs are mechanically impossible in REPRODUCIBLE mode."""
-
     @patch("datasets.load_dataset")
     def test_reproducible_mode_rejects_main(self, mock_load, pinned_row: dict) -> None:
         probe = CourtListenerDatasetProbe()
@@ -319,16 +376,14 @@ class TestReproducibilityEnforcement:
 
     @patch("datasets.load_dataset")
     def test_reproducible_mode_rejects_short_sha(self, mock_load, pinned_row: dict) -> None:
-        """7-char short SHAs are also mutable — require full 40-char SHA."""
         probe = CourtListenerDatasetProbe()
         probe.REPRODUCIBLE = True
-        probe.REVISION = "0dc9f2c"  # short SHA — rejected
+        probe.REVISION = "0dc9f2c"
         with pytest.raises(RuntimeError, match="Reproducibility violation"):
             list(probe.load())
 
     @patch("datasets.load_dataset")
     def test_exploration_mode_allows_mutable_ref(self, mock_load, pinned_row: dict) -> None:
-        """REPRODUCIBLE=False is the explicit opt-in for non-deterministic exploration."""
         mock_load.return_value = _mock_iterable_dataset([pinned_row])
         probe = CourtListenerDatasetProbe()
         probe.REPRODUCIBLE = False
@@ -344,7 +399,6 @@ class TestReproducibilityEnforcement:
         list(probe.load())  # must not raise
 
     def test_default_mode_is_reproducible(self, probe: CourtListenerDatasetProbe) -> None:
-        """Default must be strict — exploration mode requires explicit opt-in."""
         assert probe.REPRODUCIBLE is True
 
 
@@ -415,13 +469,19 @@ class TestNormalizeRow:
         assert "text" in result
         assert "contents" not in result
 
-    def test_extracts_timestamp_date(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_preserves_full_datetime_in_timestamps(self, probe: CourtListenerDatasetProbe) -> None:
         row = {
             "text": "A" * 60,
             "created_timestamp": "2022-01-15T10:30:00Z",
-            "downloaded_timestamp": "2022-06-01",
+            "downloaded_timestamp": "2022-06-01T08:00:00+05:00",
             "url": "x",
         }
+        result = probe.normalize_row(row)
+        assert result["created_timestamp"] == "2022-01-15T10:30:00Z"
+        assert result["downloaded_timestamp"] == "2022-06-01T08:00:00+05:00"
+
+    def test_falls_back_to_date_only_when_no_time(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "A" * 60, "created_timestamp": "2022-01-15", "downloaded_timestamp": "2022-06-01", "url": "x"}
         result = probe.normalize_row(row)
         assert result["created_timestamp"] == "2022-01-15"
         assert result["downloaded_timestamp"] == "2022-06-01"
