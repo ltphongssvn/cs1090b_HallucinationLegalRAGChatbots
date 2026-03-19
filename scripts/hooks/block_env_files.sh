@@ -1,2 +1,8 @@
 #!/usr/bin/env bash
-git diff --cached --name-only | grep -qE "^\.env(\..+)?$" && echo "ERROR - .env file detected. Never commit secrets!" && exit 1 || exit 0
+blocked=$(git diff --cached --name-only | grep -E "^\.env(\..+)?$" | grep -vE "^\.env\.(template|example)$")
+if [ -n "$blocked" ]; then
+    echo "ERROR - .env file detected. Never commit secrets!"
+    echo "Blocked files: $blocked"
+    exit 1
+fi
+exit 0

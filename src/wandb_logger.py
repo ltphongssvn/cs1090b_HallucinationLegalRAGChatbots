@@ -116,3 +116,44 @@ def log_quality_signals(
         wandb.log({"data/quality/n_rows_sampled": min(len(rows), sample_size)})
 
     return signal_counts
+
+
+def setup_wandb_auth() -> None:
+    """Configure W&B authentication from environment.
+    Call once at process start before any wandb.init().
+    Supports both WANDB_API_KEY env var and wandb login --relogin.
+    """
+    import os
+
+    import wandb
+
+    api_key = os.environ.get("WANDB_API_KEY")
+    if api_key:
+        wandb.login(key=api_key, relogin=False)
+    elif os.environ.get("WANDB_MODE") in ("offline", "disabled"):
+        pass  # no auth needed
+    else:
+        # Fall back to cached credentials from wandb login
+        wandb.login(relogin=False)
+
+
+def load_artifact(
+    artifact_uri: str,
+    local_path: str,
+    project: str = "hallucination-legal-rag",
+) -> str:
+    """Download and return local path of a W&B artifact.
+
+    Args:
+        artifact_uri: W&B artifact URI e.g. 'entity/project/artifact:version'
+        local_path: local directory to download artifact into
+        project: W&B project name
+
+    Returns:
+        Local path to downloaded artifact directory.
+    """
+    import wandb
+
+    api = wandb.Api()
+    artifact = api.artifact(artifact_uri)
+    return artifact.download(root=local_path)

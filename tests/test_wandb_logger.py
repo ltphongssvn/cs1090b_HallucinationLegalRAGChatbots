@@ -104,3 +104,57 @@ class TestLogQualitySignals:
         result = log_quality_signals([])
         assert result == {}
         assert not mock_log.called
+
+
+class TestSetupWandbAuth:
+    @patch("wandb.login")
+    def test_uses_api_key_from_env(self, mock_login, monkeypatch) -> None:
+        monkeypatch.setenv("WANDB_API_KEY", "test-key-abc")
+        monkeypatch.delenv("WANDB_MODE", raising=False)
+        from src.wandb_logger import setup_wandb_auth
+
+        setup_wandb_auth()
+        mock_login.assert_called_once_with(key="test-key-abc", relogin=False)
+
+    @patch("wandb.login")
+    def test_skips_login_in_offline_mode(self, mock_login, monkeypatch) -> None:
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        monkeypatch.setenv("WANDB_MODE", "offline")
+        from src.wandb_logger import setup_wandb_auth
+
+        setup_wandb_auth()
+        mock_login.assert_not_called()
+
+    @patch("wandb.login")
+    def test_skips_login_in_disabled_mode(self, mock_login, monkeypatch) -> None:
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        monkeypatch.setenv("WANDB_MODE", "disabled")
+        from src.wandb_logger import setup_wandb_auth
+
+        setup_wandb_auth()
+        mock_login.assert_not_called()
+
+    @patch("wandb.login")
+    def test_falls_back_to_cached_credentials(self, mock_login, monkeypatch) -> None:
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        monkeypatch.delenv("WANDB_MODE", raising=False)
+        from src.wandb_logger import setup_wandb_auth
+
+        setup_wandb_auth()
+        mock_login.assert_called_once_with(relogin=False)
+
+
+class TestLoadArtifact:
+    @patch("wandb.Api")
+    def test_downloads_artifact_to_local_path(self, mock_api_cls, tmp_path) -> None:
+        from src.wandb_logger import load_artifact
+
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_artifact = MagicMock()
+        mock_artifact.download.return_value = str(tmp_path)
+        mock_api.artifact.return_value = mock_artifact
+        result = load_artifact("entity/project/dataset:v1", str(tmp_path))
+        mock_api.artifact.assert_called_once_with("entity/project/dataset:v1")
+        mock_artifact.download.assert_called_once_with(root=str(tmp_path))
+        assert result == str(tmp_path)
