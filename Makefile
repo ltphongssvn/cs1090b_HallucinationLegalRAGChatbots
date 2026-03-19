@@ -215,3 +215,10 @@ add-probe: ## Stage and commit all dataset probe files with standard message
 check-secrets: ## Run detect-secrets scan and update baseline
 	.venv/bin/detect-secrets scan --exclude-files '.*\.lock$$|.*\.log$$' > .secrets.baseline
 	git add .secrets.baseline
+
+ingest-dataset: ## Run ingestion pipeline — materializes HF dataset as local artifact
+	$(PYTHON) -m src.ingest \
+		--artifact-path $(ARTIFACT_PATH) \
+		--max-samples $(MAX_SAMPLES) \
+		--project $(WANDB_PROJECT) \
+		--wandb-mode $(WANDB_MODE)
