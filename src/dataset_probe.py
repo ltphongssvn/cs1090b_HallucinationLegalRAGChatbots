@@ -216,3 +216,59 @@ class CourtListenerDatasetProbe:
         if field is None:
             raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
         return str(row[field])
+
+
+class ModelQualitySignals:
+    """
+    Model-relevant quality signals for RAG pipeline rows.
+    These are soft warnings — not schema violations — returned as a list of
+    (signal_name, detail) tuples. Empty list = no signals triggered.
+    Callers decide whether to filter, flag, or pass rows downstream.
+    """
+
+    HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
+    CITATION_RE = re.compile(r"\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)")
+    BOILERPLATE_PHRASES = (
+        "all rights reserved",
+        "this page intentionally left blank",
+        "unpublished disposition",
+        "not for publication",
+        "do not cite",
+    )
+
+    @classmethod
+    def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
+        """Return quality signals for a normalized row. Empty = clean."""
+        signals: list[tuple[str, str]] = []
+        text: str = row.get(text_field, "")
+
+        # Approximate token length (whitespace-split — not tokenizer-specific)
+        token_count = len(text.split())
+        if token_count < 20:
+            signals.append(("truncated_document", f"~{token_count} tokens — likely truncated"))
+        if token_count > 100_000:
+            signals.append(("gigantic_document", f"~{token_count} tokens — may exceed model context"))
+
+        # HTML remnants
+        if cls.HTML_RE.search(text):
+            signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
+
+        # Unicode normalization check (NFC vs raw)
+        import unicodedata
+
+        if unicodedata.normalize("NFC", text) != text:
+            signals.append(("unicode_not_nfc", "Text is not NFC-normalized"))
+
+        # Boilerplate detection
+        lower = text.lower()
+        for phrase in cls.BOILERPLATE_PHRASES:
+            if phrase in lower:
+                signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
+                break
+
+        # Citation density (very low = may not be a real opinion)
+        citation_count = len(cls.CITATION_RE.findall(text))
+        if token_count > 100 and citation_count == 0:
+            signals.append(("no_citations", "No legal citations found — may be non-opinion text"))
+
+        return signals
