@@ -33,3 +33,4 @@ Thumbs.db
 # uv
 .python-version
 src/repro.py
+.hypothesis/
