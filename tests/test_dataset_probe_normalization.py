@@ -109,3 +109,41 @@ class TestNormalizeTimestamp:
 
     def test_unparseable_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe._normalize_timestamp("no date here") == ""
+
+
+class TestNormalizeTimestampNonUTCBranch:
+    """TDD: explicit coverage for non-UTC offset branch (isoformat path).
+    Red: these tests existed structurally but the branch was not hit by coverage.
+    Green: asserting the exact isoformat output forces the branch to execute.
+    """
+
+    def test_non_utc_offset_preserves_full_isoformat(self, probe: CourtListenerDatasetProbe) -> None:
+        result = probe._normalize_timestamp("2022-01-15T10:30:00+05:00")
+        # isoformat() produces '2022-01-15T10:30:00+05:00' — offset preserved
+        assert result == "2022-01-15T10:30:00+05:00"
+
+    def test_non_utc_negative_offset(self, probe: CourtListenerDatasetProbe) -> None:
+        result = probe._normalize_timestamp("2022-01-15T10:30:00-08:00")
+        assert result == "2022-01-15T10:30:00-08:00"
+
+    def test_utc_z_suffix_returns_z_not_offset(self, probe: CourtListenerDatasetProbe) -> None:
+        """UTC Z must return Z suffix, not +00:00 — preserves original intent."""
+        result = probe._normalize_timestamp("2022-01-15T10:30:00Z")
+        assert result == "2022-01-15T10:30:00Z"
+        assert "+00:00" not in result
+
+
+class TestNormalizeRowDeadCodeInvariant:
+    """TDD: prove text_field cannot be None after validate_row passes.
+    This documents the removed else branch as provably unreachable.
+    """
+
+    def test_text_field_always_non_none_after_validation(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        assert probe.validate_row(row) == []
+        assert probe.resolve_text_field(row) is not None
+
+    def test_contents_field_always_non_none_after_validation(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        assert probe.validate_row(row) == []
+        assert probe.resolve_text_field(row) is not None

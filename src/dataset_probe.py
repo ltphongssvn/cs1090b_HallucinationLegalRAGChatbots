@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
 HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
-
 _MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
 
 _TS_FORMATS: list[tuple[str, bool, bool]] = [
@@ -140,6 +139,9 @@ class CourtListenerDatasetProbe:
         Shallow copy preserves all upstream fields (jurisdiction, court, judge).
         Old text field removed if renamed to avoid RAM duplication.
         Provenance NOT embedded — call get_provenance() at training start.
+
+        Invariant: after validate_row() passes, resolve_text_field() always returns
+        a non-None field — the else branch is provably unreachable and removed.
         """
         errors = self.validate_row(row)
         if errors:
@@ -152,9 +154,12 @@ class CourtListenerDatasetProbe:
         normalized = dict(row)
 
         text_field = self.resolve_text_field(row)
-        text = str(row[text_field]).strip() if text_field else ""
+        # text_field is guaranteed non-None here: validate_row() ensures at least
+        # one TEXT_FIELDS key is present and its value is a non-empty string.
+        assert text_field is not None  # programming contract — not a data guard
+        text = str(row[text_field]).strip()
 
-        if text_field and text_field != "text":
+        if text_field != "text":
             normalized.pop(text_field, None)
 
         normalized["text"] = text
@@ -175,6 +180,9 @@ class CourtListenerDatasetProbe:
         Validates actual date semantics (rejects '9999-99-99', '2022-13-45', etc.).
         Preserves the most precise valid format found:
           datetime+tz > datetime > date > '' (unparseable or invalid).
+
+        Non-UTC offsets (e.g. +05:00) are preserved via isoformat() to retain
+        the original timezone context — legal filing times are jurisdiction-local.
         """
         candidate = _TS_EXTRACT_RE.search(ts)
         if not candidate:
@@ -188,6 +196,7 @@ class CourtListenerDatasetProbe:
                 if preserves_tz and parsed.tzinfo is not None:
                     if parsed.tzinfo == timezone.utc:
                         return parsed.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+                    # Non-UTC: preserve original offset via isoformat()
                     return parsed.isoformat()
                 if preserves_time:
                     return parsed.strftime("%Y-%m-%dT%H:%M:%S")
