@@ -186,3 +186,63 @@ class TestLogStats:
         assert stats["n_valid"] == 0
         assert stats["avg_token_length"] == 0
         assert stats["token_length_histogram"] == []
+
+
+class TestDatasetConfigHydra:
+    def test_from_hydra_with_plain_dict(self) -> None:
+        d = {
+            "dataset_id": "pile-of-law/pile-of-law",
+            "subset": "atticus_contracts",
+            "split": "train",
+            "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",  # pragma: allowlist secret
+            "reproducible": True,
+            "min_text_length": 100,
+            "streaming": True,
+            "text_fields": ["text", "contents"],
+            "required_fields": ["created_timestamp", "downloaded_timestamp", "url"],
+        }
+        cfg = DatasetConfig.from_hydra(d)
+        assert cfg.subset == "atticus_contracts"
+        assert cfg.min_text_length == 100
+        assert isinstance(cfg.text_fields, tuple)
+        assert isinstance(cfg.required_fields, frozenset)
+
+    def test_from_hydra_overrides_min_text_length(self) -> None:
+        d = {
+            "dataset_id": "pile-of-law/pile-of-law",
+            "subset": "r_courtlistener_opinions",
+            "split": "train",
+            "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",  # pragma: allowlist secret
+            "reproducible": False,
+            "min_text_length": 20,
+            "streaming": True,
+            "text_fields": ["text"],
+            "required_fields": ["url"],
+        }
+        cfg = DatasetConfig.from_hydra(d)
+        assert cfg.min_text_length == 20
+        assert cfg.reproducible is False
+
+    def test_hydra_yaml_files_exist(self) -> None:
+        from pathlib import Path
+
+        assert Path("configs/data/legal_rag.yaml").exists()
+        assert Path("configs/data/legal_rag_explore.yaml").exists()
+
+    def test_hydra_yaml_parseable(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path("configs/data/legal_rag.yaml").read_text())
+        assert cfg["subset"] == "r_courtlistener_opinions"
+        assert cfg["reproducible"] is True
+        assert cfg["min_text_length"] == 50
+
+    def test_hydra_explore_yaml_sets_reproducible_false(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path("configs/data/legal_rag_explore.yaml").read_text())
+        assert cfg["reproducible"] is False
