@@ -130,3 +130,56 @@ class TestDeadCodeInvariants:
     def test_get_text_returns_string_when_field_present(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"text": "some text content here", "url": "x"}
         assert probe.get_text(row) == "some text content here"
+
+
+class TestDLPipelineSemantics:
+    """Contract tests for properties relevant to DL/RAG pipelines."""
+
+    def test_non_whitespace_text_required(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "   \t\n  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        errors = probe.validate_row(row)
+        assert any("too short" in e for e in errors), (
+            "Whitespace-only text must fail — produces zero-content embeddings"
+        )
+
+    def test_minimum_token_floor_enforced(self, probe: CourtListenerDatasetProbe) -> None:
+        """MIN_TEXT_LENGTH=50 chars provides a rough token floor.
+        Shorter texts produce degenerate embeddings in DL pipelines.
+        """
+        short = {
+            "text": "x" * (probe.MIN_TEXT_LENGTH - 1),
+            "created_timestamp": "",
+            "downloaded_timestamp": "",
+            "url": "x",
+        }
+        assert any("too short" in e for e in probe.validate_row(short))
+
+    def test_url_field_is_non_empty_string_after_normalization(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert isinstance(result["url"], str) and len(result["url"]) > 0
+
+    def test_url_has_http_scheme(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """URL sanity — bare paths or malformed URLs break citation retrieval."""
+        result = probe.normalize_row(pinned_row)
+        assert result["url"].startswith(("http://", "https://")), (
+            f"URL must have http/https scheme, got: {result['url']!r}"
+        )
+
+    def test_source_metadata_retained_after_normalization(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        """Optional upstream metadata must survive normalization intact."""
+        row = {**pinned_row, "court_id": "ca9", "docket": "22-1234"}
+        result = probe.normalize_row(row)
+        assert result["court_id"] == "ca9"
+        assert result["docket"] == "22-1234"
+
+    def test_text_is_parseable_utf8_after_normalization(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        """Normalized text must round-trip through UTF-8 without loss."""
+        result = probe.normalize_row(pinned_row)
+        encoded = result["text"].encode("utf-8")
+        assert encoded.decode("utf-8") == result["text"]
