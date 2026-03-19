@@ -1,7 +1,5 @@
 # src/dataset_probe.py
 # Path: cs1090b_HallucinationLegalRAGChatbots/src/dataset_probe.py
-# Responsibility: HF dataset schema contract, validation, normalization for
-# pile-of-law/pile-of-law subset r_courtlistener_opinions.
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
@@ -140,8 +138,9 @@ class CourtListenerDatasetProbe:
         Old text field removed if renamed to avoid RAM duplication.
         Provenance NOT embedded — call get_provenance() at training start.
 
-        Invariant: after validate_row() passes, resolve_text_field() always returns
-        a non-None field — the else branch is provably unreachable and removed.
+        Invariants after validate_row() passes:
+          - resolve_text_field() always returns non-None (text_field guaranteed present)
+          - 'url' always present (in REQUIRED_FIELDS) so source_url assigned unconditionally
         """
         errors = self.validate_row(row)
         if errors:
@@ -154,9 +153,8 @@ class CourtListenerDatasetProbe:
         normalized = dict(row)
 
         text_field = self.resolve_text_field(row)
-        # text_field is guaranteed non-None here: validate_row() ensures at least
-        # one TEXT_FIELDS key is present and its value is a non-empty string.
-        assert text_field is not None  # programming contract — not a data guard
+        # Guaranteed non-None: validate_row() ensures a TEXT_FIELDS key is present.
+        assert text_field is not None
         text = str(row[text_field]).strip()
 
         if text_field != "text":
@@ -165,12 +163,12 @@ class CourtListenerDatasetProbe:
         normalized["text"] = text
         normalized["created_timestamp"] = self._normalize_timestamp(str(row.get("created_timestamp", "")))
         normalized["downloaded_timestamp"] = self._normalize_timestamp(str(row.get("downloaded_timestamp", "")))
-        if "url" in row:
-            # source_url is an intentional pipeline alias for url.
-            # Downstream RAG components reference source_url consistently,
-            # decoupling them from the raw field name which varies across
-            # pile-of-law subsets (some use url, others use href or link).
-            normalized["source_url"] = str(row["url"])
+        # source_url is an intentional pipeline alias for url.
+        # Downstream RAG components reference source_url consistently,
+        # decoupling them from the raw field name which varies across
+        # pile-of-law subsets (some use url, others use href or link).
+        # 'url' is always present: it is in REQUIRED_FIELDS, enforced by validate_row().
+        normalized["source_url"] = str(row["url"])
 
         return normalized
 
@@ -211,7 +209,9 @@ class CourtListenerDatasetProbe:
         return next((k for k in self.TEXT_FIELDS if k in row), None)
 
     def get_text(self, row: dict[str, Any]) -> str:
-        """Extract text content. Raises ValueError if no text field found."""
+        """Extract text content. Raises ValueError if no text field found.
+        Strict accessor — callers never implement fallback logic themselves.
+        """
         field = self.resolve_text_field(row)
         if field is None:
             raise ValueError(f"No text field in row keys: {sorted(row.keys())}")

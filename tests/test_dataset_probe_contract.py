@@ -107,3 +107,26 @@ class TestResolveTextField:
     def test_get_text_raises_on_missing_field(self, probe: CourtListenerDatasetProbe) -> None:
         with pytest.raises(ValueError, match="No text field"):
             probe.get_text({"url": "x"})
+
+
+class TestDeadCodeInvariants:
+    """TDD: document and enforce invariants that make dead branches impossible.
+    These tests serve as living proof that removed guards were correct to remove.
+    """
+
+    def test_url_always_present_after_validation(self, probe: CourtListenerDatasetProbe) -> None:
+        """url is in REQUIRED_FIELDS — always present after validate_row() passes.
+        Removes need for 'if url in row' guard in normalize_row().
+        """
+        row = {"text": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        assert probe.validate_row(row) == []
+        assert "url" in row
+
+    def test_get_text_raises_value_error_on_no_text_field(self, probe: CourtListenerDatasetProbe) -> None:
+        """get_text() raises ValueError when no text field present — direct call."""
+        with pytest.raises(ValueError, match="No text field in row keys"):
+            probe.get_text({"url": "x", "created_timestamp": "", "downloaded_timestamp": ""})
+
+    def test_get_text_returns_string_when_field_present(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"text": "some text content here", "url": "x"}
+        assert probe.get_text(row) == "some text content here"
