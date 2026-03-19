@@ -171,6 +171,10 @@ class CourtListenerDatasetProbe:
         normalized["created_timestamp"] = self._normalize_timestamp(str(row.get("created_timestamp", "")))
         normalized["downloaded_timestamp"] = self._normalize_timestamp(str(row.get("downloaded_timestamp", "")))
         if "url" in row:
+            # source_url is an intentional pipeline alias for url.
+            # Downstream RAG components reference source_url consistently,
+            # decoupling them from the raw field name which varies across
+            # pile-of-law subsets (some use url, others use href or link).
             normalized["source_url"] = str(row["url"])
 
         return normalized
