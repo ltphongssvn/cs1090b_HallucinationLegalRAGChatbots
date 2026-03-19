@@ -1,5 +1,5 @@
 # src/dataset_loader.py
-# Single-responsibility: load and stream validated rows from HF Hub.
+import collections
 import re
 from typing import Any, Iterable, Iterator
 
@@ -9,6 +9,21 @@ from src.row_validator import RowValidator
 
 HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
+
+
+def _histogram(values: list[int], bins: int = 10) -> list[dict[str, Any]]:
+    """Return a simple histogram as a list of {range, count} dicts."""
+    if not values:
+        return []
+    lo, hi = min(values), max(values)
+    if lo == hi:
+        return [{"range": f"{lo}-{hi}", "count": len(values)}]
+    width = (hi - lo) / bins
+    buckets = [0] * bins
+    for v in values:
+        idx = min(int((v - lo) / width), bins - 1)
+        buckets[idx] += 1
+    return [{"range": f"{int(lo + i * width)}-{int(lo + (i + 1) * width)}", "count": c} for i, c in enumerate(buckets)]
 
 
 class DatasetLoader:
@@ -57,3 +72,52 @@ class DatasetLoader:
             "hf_datasets_version": datasets.__version__,
             "reproducible": self._config.reproducible,
         }
+
+    def log_stats(
+        self,
+        source: Iterable[dict[str, Any]],
+        tokenizer: Any,
+        max_samples: int = 1000,
+    ) -> dict[str, Any]:
+        """Compute dataset statistics for W&B logging before training.
+
+        Computes: token length histogram, avg text length, court distribution.
+        Call once before any training run — log result to W&B via wandb.log().
+
+        Args:
+            source: iterable of raw (pre-validation) rows
+            tokenizer: tokenizer used for fine-tuning (must match training tokenizer)
+            max_samples: cap samples to keep this fast on large streaming datasets
+        """
+        token_lengths: list[int] = []
+        text_lengths: list[int] = []
+        court_counts: collections.Counter[str] = collections.Counter()
+        skipped = 0
+
+        for i, row in enumerate(source):
+            if i >= max_samples:
+                break
+            if self._validator.validate(row) != []:
+                skipped += 1
+                continue
+            normalized = self._normalizer.normalize(row)
+            text = normalized["text"]
+            token_lengths.append(len(tokenizer.encode(text)))
+            text_lengths.append(len(text))
+            court_id = str(row.get("court_id", "unknown"))
+            court_counts[court_id] += 1
+
+        n = len(token_lengths)
+        stats: dict[str, Any] = {
+            "n_valid": n,
+            "n_skipped": skipped,
+            "avg_token_length": sum(token_lengths) / n if n else 0,
+            "min_token_length": min(token_lengths) if n else 0,
+            "max_token_length": max(token_lengths) if n else 0,
+            "avg_text_length_chars": sum(text_lengths) / n if n else 0,
+            "court_distribution": dict(court_counts),
+            "token_length_histogram": _histogram(token_lengths),
+            "tokenizer_name": getattr(tokenizer, "name_or_path", str(tokenizer)),
+            **self.get_provenance(),
+        }
+        return stats

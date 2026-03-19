@@ -131,3 +131,58 @@ class TestLightningDataModuleImport:
 
         assert CourtListenerDataModule is not None
         assert CourtListenerIterableDataset is not None
+
+
+class TestLogStats:
+    def test_log_stats_returns_required_keys(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 42)
+        mock_tokenizer.name_or_path = "bert-base-uncased"
+
+        stats = loader.log_stats([valid_row, valid_row], mock_tokenizer, max_samples=10)
+        required = {
+            "n_valid",
+            "n_skipped",
+            "avg_token_length",
+            "min_token_length",
+            "max_token_length",
+            "avg_text_length_chars",
+            "court_distribution",
+            "token_length_histogram",
+            "tokenizer_name",
+        }
+        assert required <= set(stats.keys())
+
+    def test_log_stats_counts_valid_and_skipped(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
+        stats = loader.log_stats([valid_row, {"url": "x"}, valid_row], mock_tokenizer)
+        assert stats["n_valid"] == 2
+        assert stats["n_skipped"] == 1
+
+    def test_log_stats_respects_max_samples(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
+        stats = loader.log_stats([valid_row] * 100, mock_tokenizer, max_samples=5)
+        assert stats["n_valid"] <= 5
+
+    def test_log_stats_includes_provenance(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
+        stats = loader.log_stats([valid_row], mock_tokenizer)
+        assert "revision" in stats
+        assert "dataset" in stats
+
+    def test_log_stats_court_distribution(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
+        row_with_court = {**valid_row, "court_id": "ca9"}
+        stats = loader.log_stats([row_with_court, row_with_court], mock_tokenizer)
+        assert stats["court_distribution"].get("ca9") == 2
+
+    def test_log_stats_empty_source(self, loader: DatasetLoader) -> None:
+        mock_tokenizer = MagicMock()
+        stats = loader.log_stats([], mock_tokenizer)
+        assert stats["n_valid"] == 0
+        assert stats["avg_token_length"] == 0
+        assert stats["token_length_histogram"] == []
