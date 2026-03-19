@@ -42,6 +42,16 @@ class CourtListenerDatasetProbe:
         Set REPRODUCIBLE=False only for fast exploration — never for training runs.
       - trust_remote_code is never passed.
       - Provenance is probe-level — call get_provenance() once at training start.
+
+    validate_row / normalize_row contract:
+      - validate_row() returns all errors; empty list means valid.
+      - normalize_row() requires a pre-validated row. Raises ValueError if
+        validation fails — callers cannot accidentally normalize invalid rows.
+      - iter_valid_rows() is the preferred pipeline entry point.
+
+    REQUIRED_FIELDS intentionally excludes text-variant keys ('text', 'contents').
+    Text field presence and type are enforced separately via resolve_text_field(),
+    which supports both 'text' and 'contents' as valid field names.
     """
 
     DATASET_ID = "pile-of-law/pile-of-law"
@@ -50,7 +60,8 @@ class CourtListenerDatasetProbe:
     REVISION = PINNED_REVISION
     PROBE_VERSION = "1.0"
     REPRODUCIBLE = True
-    REQUIRED_FIELDS: frozenset[str] = frozenset({"text", "created_timestamp", "downloaded_timestamp", "url"})
+    # Text-variant fields excluded — presence enforced via resolve_text_field().
+    REQUIRED_FIELDS: frozenset[str] = frozenset({"created_timestamp", "downloaded_timestamp", "url"})
     TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
     MIN_TEXT_LENGTH = 50
 
@@ -96,6 +107,7 @@ class CourtListenerDatasetProbe:
     def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
         """Yield only validated, normalized rows. Invalid rows are skipped.
         Invariant: downstream code never sees invalid rows.
+        Preferred pipeline entry point — enforces validate-then-normalize automatically.
         """
         rows = source if source is not None else self.load()
         for row in rows:
@@ -103,7 +115,12 @@ class CourtListenerDatasetProbe:
                 yield self.normalize_row(row)
 
     def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """Return all validation errors. Empty list = valid."""
+        """Return all validation errors. Empty list = valid.
+
+        Checks are independent — all errors surface per row, not just the first.
+        Text field presence is checked via resolve_text_field(), independently
+        from REQUIRED_FIELDS, so both 'text' and 'contents' are accepted.
+        """
         errors: list[str] = []
 
         missing = self.REQUIRED_FIELDS - set(row.keys())
@@ -125,12 +142,24 @@ class CourtListenerDatasetProbe:
         return errors
 
     def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize validated row into canonical form, preserving upstream metadata.
+        """Normalize a pre-validated row into canonical form.
 
-        Shallow copy preserves all upstream fields (jurisdiction, court level, judge).
+        Precondition: row must pass validate_row() with no errors.
+        Raises ValueError if precondition is violated — programming error, not data error.
+        Use iter_valid_rows() to enforce the contract automatically in pipelines.
+
+        Shallow copy preserves all upstream fields (jurisdiction, court, judge).
         Old text field removed if renamed to avoid RAM duplication.
         Provenance NOT embedded — call get_provenance() at training start.
         """
+        errors = self.validate_row(row)
+        if errors:
+            raise ValueError(
+                f"normalize_row() called on invalid row — validate first.\n"
+                f"Errors: {errors}\n"
+                f"Use iter_valid_rows() to enforce validate-then-normalize automatically."
+            )
+
         normalized = dict(row)
 
         text_field = self.resolve_text_field(row)
@@ -151,9 +180,8 @@ class CourtListenerDatasetProbe:
         """Extract the most precise ISO-8601 timestamp present in the string.
 
         Preserves timezone and time-of-day semantics — legal documents carry
-        filing deadlines and appeal windows that are time-sensitive. Falling
-        back silently to date-only loses forensic value. Preference order:
-        datetime+tz > datetime+utc > datetime > date > empty string.
+        filing deadlines and appeal windows that are time-sensitive.
+        Preference order: datetime+tz > datetime+utc > datetime > date > ''.
         """
         for pattern, _ in _TS_PATTERNS:
             match = pattern.search(ts)
@@ -232,6 +260,7 @@ class TestCourtListenerDatasetProbeContract:
             probe.get_text({"url": "x"})
 
     def test_validate_row_catches_missing_required_fields(self, probe: CourtListenerDatasetProbe) -> None:
+        # Row with text but missing created_timestamp, downloaded_timestamp, url
         assert any(
             "Missing required fields" in e
             for e in probe.validate_row(
@@ -253,11 +282,43 @@ class TestCourtListenerDatasetProbeContract:
             assert any("must be str" in e for e in probe.validate_row(row)), f"Expected type error for {bad_value!r}"
 
     def test_validate_row_reports_all_errors(self, probe: CourtListenerDatasetProbe) -> None:
+        # Missing created_timestamp, downloaded_timestamp + short text
         bad = {"text": "short", "url": "x"}
         errors = probe.validate_row(bad)
         assert any("Missing required fields" in e for e in errors)
         assert any("too short" in e for e in errors)
         assert len(errors) == 2
+
+    def test_validate_row_accepts_contents_field(self, probe: CourtListenerDatasetProbe) -> None:
+        """'contents' is a valid text field — REQUIRED_FIELDS does not include 'text'."""
+        row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        assert probe.validate_row(row) == []
+
+
+class TestNormalizeRowContract:
+    def test_normalize_row_raises_on_invalid_input(self, probe: CourtListenerDatasetProbe) -> None:
+        invalid = {"url": "x"}
+        with pytest.raises(ValueError, match="normalize_row\\(\\) called on invalid row"):
+            probe.normalize_row(invalid)
+
+    def test_normalize_row_error_message_lists_violations(self, probe: CourtListenerDatasetProbe) -> None:
+        invalid = {"url": "x"}
+        with pytest.raises(ValueError, match="Missing required fields"):
+            probe.normalize_row(invalid)
+
+    def test_normalize_row_raises_on_short_text(self, probe: CourtListenerDatasetProbe) -> None:
+        short = {"text": "too short", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        with pytest.raises(ValueError, match="normalize_row\\(\\) called on invalid row"):
+            probe.normalize_row(short)
+
+    def test_normalize_row_accepts_valid_row(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        assert "text" in probe.normalize_row(pinned_row)
+
+    def test_iter_valid_rows_never_calls_normalize_on_invalid(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        mixed = [pinned_row, {"url": "bad"}, pinned_row]
+        assert len(list(probe.iter_valid_rows(mixed))) == 2
 
 
 class TestNormalizeTimestamp:
@@ -277,8 +338,7 @@ class TestNormalizeTimestamp:
         assert probe._normalize_timestamp("Filed on 2022-01-15T10:30:00Z per docket") == "2022-01-15T10:30:00Z"
 
     def test_prefers_more_precise_over_less(self, probe: CourtListenerDatasetProbe) -> None:
-        result = probe._normalize_timestamp("2022-01-15T10:30:00Z")
-        assert "T" in result
+        assert "T" in probe._normalize_timestamp("2022-01-15T10:30:00Z")
 
     def test_empty_string_returns_empty(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe._normalize_timestamp("") == ""
@@ -313,22 +373,13 @@ class TestReproducibilityContract:
         assert meta["probe_version"] == probe.PROBE_VERSION
 
     def test_fixture_text_sha256_matches_checksum_module(self, pinned_row: dict) -> None:
-        """Content fingerprint verified against checksums.py — avoids detect-secrets JSON flag."""
         actual = hashlib.sha256(pinned_row["text"].encode("utf-8")).hexdigest()
         assert actual == COURTLISTENER_SAMPLE_TEXT_SHA256
 
     def test_fixture_json_sha256_matches_checksum_module(self, fixture_data: dict) -> None:
-        """Enforce that the fixture JSON text_sha256 field is not a placeholder
-        and matches the authoritative value in checksums.py.
-        Prevents provenance metadata from appearing authoritative while being unenforced.
-        """
         sha_in_json = fixture_data["_fixture_meta"]["text_sha256"]
-        assert sha_in_json != "REPLACE_WITH_ACTUAL_SHA256", (
-            "text_sha256 in fixture JSON is still a placeholder — replace with real SHA"
-        )
-        assert sha_in_json == COURTLISTENER_SAMPLE_TEXT_SHA256, (
-            "text_sha256 in fixture JSON does not match checksums.py — update one or the other"
-        )
+        assert sha_in_json != "REPLACE_WITH_ACTUAL_SHA256", "text_sha256 in fixture JSON is still a placeholder"
+        assert sha_in_json == COURTLISTENER_SAMPLE_TEXT_SHA256
 
     def test_revision_must_not_be_mutable_branch(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe.REVISION not in _MUTABLE_REFS
@@ -388,7 +439,7 @@ class TestReproducibilityEnforcement:
         probe = CourtListenerDatasetProbe()
         probe.REPRODUCIBLE = False
         probe.REVISION = "main"
-        list(probe.load())  # must not raise
+        list(probe.load())
 
     @patch("datasets.load_dataset")
     def test_reproducible_mode_accepts_valid_40char_sha(self, mock_load, pinned_row: dict) -> None:
@@ -396,7 +447,7 @@ class TestReproducibilityEnforcement:
         probe = CourtListenerDatasetProbe()
         probe.REPRODUCIBLE = True
         probe.REVISION = PINNED_REVISION
-        list(probe.load())  # must not raise
+        list(probe.load())
 
     def test_default_mode_is_reproducible(self, probe: CourtListenerDatasetProbe) -> None:
         assert probe.REPRODUCIBLE is True
@@ -431,8 +482,7 @@ class TestIterValidRows:
 
     def test_yields_normalized_rows(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         rows = list(probe.iter_valid_rows([pinned_row]))
-        expected = {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
-        assert expected.issubset(set(rows[0].keys()))
+        assert {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}.issubset(set(rows[0].keys()))
 
     def test_empty_source_yields_nothing(self, probe: CourtListenerDatasetProbe) -> None:
         assert list(probe.iter_valid_rows([])) == []
@@ -459,9 +509,9 @@ class TestNormalizeRow:
         result = probe.normalize_row(pinned_row)
         assert isinstance(result["text"], str) and len(result["text"]) > 0
 
-    def test_strips_whitespace(self, probe: CourtListenerDatasetProbe) -> None:
-        row = {"text": "  leading and trailing  ", "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
-        assert probe.normalize_row(row)["text"] == "leading and trailing"
+    def test_strips_whitespace(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        row = {**pinned_row, "text": "  " + pinned_row["text"] + "  "}
+        assert probe.normalize_row(row)["text"] == pinned_row["text"]
 
     def test_renames_contents_to_text_and_removes_old_field(self, probe: CourtListenerDatasetProbe) -> None:
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
@@ -469,32 +519,29 @@ class TestNormalizeRow:
         assert "text" in result
         assert "contents" not in result
 
-    def test_preserves_full_datetime_in_timestamps(self, probe: CourtListenerDatasetProbe) -> None:
+    def test_preserves_full_datetime_in_timestamps(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         row = {
-            "text": "A" * 60,
+            **pinned_row,
             "created_timestamp": "2022-01-15T10:30:00Z",
             "downloaded_timestamp": "2022-06-01T08:00:00+05:00",
-            "url": "x",
         }
         result = probe.normalize_row(row)
         assert result["created_timestamp"] == "2022-01-15T10:30:00Z"
         assert result["downloaded_timestamp"] == "2022-06-01T08:00:00+05:00"
 
-    def test_falls_back_to_date_only_when_no_time(self, probe: CourtListenerDatasetProbe) -> None:
-        row = {"text": "A" * 60, "created_timestamp": "2022-01-15", "downloaded_timestamp": "2022-06-01", "url": "x"}
+    def test_falls_back_to_date_only_when_no_time(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        row = {**pinned_row, "created_timestamp": "2022-01-15", "downloaded_timestamp": "2022-06-01"}
         result = probe.normalize_row(row)
         assert result["created_timestamp"] == "2022-01-15"
         assert result["downloaded_timestamp"] == "2022-06-01"
 
     def test_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        result = probe.normalize_row(pinned_row)
-        assert result["source_url"] == result["url"]
+        assert probe.normalize_row(pinned_row)["source_url"] == pinned_row["url"]
 
     def test_output_has_canonical_keys_as_superset(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         row = {**pinned_row, "dummy_judge": "Smith"}
         result = probe.normalize_row(row)
-        expected = {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}
-        assert expected.issubset(set(result.keys()))
+        assert {"text", "created_timestamp", "downloaded_timestamp", "url", "source_url"}.issubset(set(result.keys()))
         assert result.get("dummy_judge") == "Smith"
 
     def test_idempotent(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
