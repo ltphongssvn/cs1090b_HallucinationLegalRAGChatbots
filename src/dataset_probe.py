@@ -42,6 +42,14 @@ class CourtListenerDatasetProbe:
         validation fails — callers cannot accidentally normalize invalid rows.
       - iter_valid_rows() is the preferred pipeline entry point.
 
+    TODO(architecture): this class is becoming a God object — consider splitting into:
+      - CourtListenerDatasetLoader (load, REVISION, REPRODUCIBLE)
+      - CourtListenerRowValidator (validate_row, REQUIRED_FIELDS, MIN_TEXT_LENGTH)
+      - CourtListenerRowNormalizer (normalize_row, _normalize_timestamp)
+      - CourtListenerProvenanceProvider (get_provenance, PROBE_VERSION)
+    TODO(config): DATASET_ID, REVISION, REPRODUCIBLE should be injectable via config
+      to support multi-dataset pipelines without subclassing.
+
     REQUIRED_FIELDS intentionally excludes text-variant keys ('text', 'contents').
     Text field presence and type are enforced separately via resolve_text_field().
     """
@@ -102,7 +110,7 @@ class CourtListenerDatasetProbe:
         """
         rows = source if source is not None else self.load()
         for row in rows:
-            if not self.validate_row(row):
+            if self.validate_row(row) == []:
                 yield self.normalize_row(row)
 
     def validate_row(self, row: dict[str, Any]) -> list[str]:
