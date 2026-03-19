@@ -12,7 +12,6 @@ _MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
 
 
 def _histogram(values: list[int], bins: int = 10) -> list[dict[str, Any]]:
-    """Return a simple histogram as a list of {range, count} dicts."""
     if not values:
         return []
     lo, hi = min(values), max(values)
@@ -35,15 +34,46 @@ class DatasetLoader:
         self._normalizer = RowNormalizer(config, self._validator)
 
     def load(self) -> Iterable[dict[str, Any]]:
-        """Load dataset at pinned revision. Raises RuntimeError if revision is mutable."""
+        """Load dataset. Enforces artifact boundary and revision pinning."""
+        # Block HF Hub in reproducible mode — trust_remote_code is a security violation
+        if self._config.reproducible and self._config.data_source == "hf":
+            raise RuntimeError(
+                "Reproducibility violation: HF Hub loading requires trust_remote_code=True "
+                "which executes arbitrary remote code. Use a preprocessed immutable artifact "
+                "for training. Set data_source='hf' with reproducible=False for ingestion only."
+            )
+
+        # Enforce immutable revision
         if self._config.reproducible and (
             self._config.revision in _MUTABLE_REFS or HEX_REVISION_RE.fullmatch(self._config.revision) is None
         ):
             raise RuntimeError(
                 f"Reproducibility violation: revision={self._config.revision!r} is mutable. "
-                "Set reproducible=False to opt into exploration mode."
+                "Set REVISION to a 40-char commit SHA, or set reproducible=False."
             )
 
+        if self._config.data_source == "artifact":
+            if not self._config.artifact_path:
+                raise ValueError(
+                    "data_source='artifact' requires artifact_path to be set. "
+                    "Run the ingestion pipeline first: make ingest-dataset"
+                )
+            if (
+                self._config.reproducible
+                and self._config.streaming
+                and not self._config.allow_streaming_in_artifact_mode
+            ):
+                raise RuntimeError(
+                    "Reproducibility violation: streaming=True in artifact mode adds "
+                    "non-determinism. Set allow_streaming_in_artifact_mode=True to "
+                    "explicitly opt in, or set streaming=False for exact reruns."
+                )
+            self._validate_artifact_manifest()
+            from datasets import load_from_disk  # type: ignore[import]
+
+            return load_from_disk(self._config.artifact_path)  # type: ignore[return-value]
+
+        # data_source == "hf" — ingestion mode only
         from datasets import load_dataset
 
         return load_dataset(  # type: ignore[return-value]
@@ -52,7 +82,28 @@ class DatasetLoader:
             split=self._config.split,
             streaming=self._config.streaming,
             revision=self._config.revision,
+            trust_remote_code=True,  # required by pile-of-law custom builder
         )
+
+    def _validate_artifact_manifest(self) -> None:
+        """Assert artifact manifest compatible with config if present."""
+        import json
+        import pathlib
+
+        assert self._config.artifact_path is not None
+        manifest_path = pathlib.Path(self._config.artifact_path) / "artifact_manifest.json"
+        if not manifest_path.exists():
+            return  # manifest absent — warn not fail (may predate manifest)
+
+        from src.dataset_config import ArtifactManifest
+
+        data = json.loads(manifest_path.read_text())
+        manifest = ArtifactManifest(**data)
+        issues = manifest.is_compatible_with(self._config)
+        if issues:
+            raise RuntimeError(
+                "Artifact manifest incompatible with current config:\n" + "\n".join(f"  - {i}" for i in issues)
+            )
 
     def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
         """Yield only validated, normalized rows. Invalid rows silently skipped."""
@@ -79,16 +130,7 @@ class DatasetLoader:
         tokenizer: Any,
         max_samples: int = 1000,
     ) -> dict[str, Any]:
-        """Compute dataset statistics for W&B logging before training.
-
-        Computes: token length histogram, avg text length, court distribution.
-        Call once before any training run — log result to W&B via wandb.log().
-
-        Args:
-            source: iterable of raw (pre-validation) rows
-            tokenizer: tokenizer used for fine-tuning (must match training tokenizer)
-            max_samples: cap samples to keep this fast on large streaming datasets
-        """
+        """Compute dataset statistics for W&B logging before training."""
         token_lengths: list[int] = []
         text_lengths: list[int] = []
         court_counts: collections.Counter[str] = collections.Counter()
@@ -159,8 +201,7 @@ class DatasetLoader:
         min_tokens: int,
         tokenizer: Any,
     ) -> Iterator[dict[str, Any]]:
-        """Yield rows whose text has at least min_tokens tokens (whitespace-split approximation
-        used when tokenizer is None; otherwise uses tokenizer.encode)."""
+        """Yield rows with at least min_tokens tokens."""
         for row in source:
             text = str(row.get("text", row.get("contents", "")))
             count = len(tokenizer.encode(text)) if tokenizer is not None else len(text.split())

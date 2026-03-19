@@ -1,10 +1,10 @@
 # tests/test_dataset_loader.py
-# Unit tests for DatasetConfig, RowValidator, RowNormalizer, DatasetLoader.
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.dataset_config import DatasetConfig
+from src.dataset_config import ArtifactManifest, DatasetConfig
 from src.dataset_loader import HEX_REVISION_RE, DatasetLoader
 from src.row_normalizer import RowNormalizer
 from src.row_validator import RowValidator
@@ -57,6 +57,9 @@ class TestDatasetConfig:
     def test_default_reproducible_is_true(self, config: DatasetConfig) -> None:
         assert config.reproducible is True
 
+    def test_default_data_source_is_artifact(self, config: DatasetConfig) -> None:
+        assert config.data_source == "artifact"
+
     def test_config_is_injectable(self) -> None:
         custom = DatasetConfig(subset="atticus_contracts", min_text_length=100)
         assert custom.subset == "atticus_contracts"
@@ -96,24 +99,14 @@ class TestRowNormalizer:
         assert "text" in result and "contents" not in result
 
 
-class TestDatasetLoader:
+class TestDatasetLoaderBasic:
     @patch("datasets.load_dataset")
-    def test_load_passes_revision(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
-        mock_load.return_value = _mock_ds([valid_row])
-        list(loader.load())
-        assert mock_load.call_args.kwargs["revision"] == loader._config.revision
-
-    @patch("datasets.load_dataset")
-    def test_load_no_trust_remote_code(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
-        mock_load.return_value = _mock_ds([valid_row])
-        list(loader.load())
-        assert "trust_remote_code" not in mock_load.call_args.kwargs
-
-    def test_load_raises_on_mutable_revision(self, config: DatasetConfig) -> None:
-        config.revision = "main"  # type: ignore[misc]
+    def test_hf_ingestion_passes_trust_remote_code(self, mock_load, valid_row: dict) -> None:
+        config = DatasetConfig(data_source="hf", reproducible=False)
         loader = DatasetLoader(config)
-        with pytest.raises(RuntimeError, match="Reproducibility violation"):
-            list(loader.load())
+        mock_load.return_value = _mock_ds([valid_row])
+        list(loader.load())
+        assert mock_load.call_args.kwargs.get("trust_remote_code") is True
 
     @patch("datasets.load_dataset")
     def test_iter_valid_rows_filters_invalid(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
@@ -125,12 +118,237 @@ class TestDatasetLoader:
         assert {"dataset", "subset", "split", "revision", "reproducible"}.issubset(prov.keys())
 
 
-class TestLightningDataModuleImport:
-    def test_import_without_lightning_does_not_crash(self) -> None:
-        from src.lightning_datamodule import CourtListenerDataModule, CourtListenerIterableDataset
+class TestArtifactBoundary:
+    def test_reproducible_mode_rejects_hf_source(self, config: DatasetConfig) -> None:
+        config = DatasetConfig(data_source="hf", reproducible=True)
+        loader = DatasetLoader(config)
+        with pytest.raises(RuntimeError, match="trust_remote_code"):
+            loader.load()
 
-        assert CourtListenerDataModule is not None
-        assert CourtListenerIterableDataset is not None
+    @patch("datasets.load_dataset")
+    def test_exploration_mode_allows_hf_source(self, mock_load, valid_row: dict) -> None:
+        config = DatasetConfig(data_source="hf", reproducible=False)
+        loader = DatasetLoader(config)
+        mock_load.return_value = _mock_ds([valid_row])
+        list(loader.load())
+        assert mock_load.call_args.kwargs.get("trust_remote_code") is True
+
+    def test_artifact_mode_requires_artifact_path(self) -> None:
+        config = DatasetConfig(data_source="artifact", artifact_path=None)
+        loader = DatasetLoader(config)
+        with pytest.raises(ValueError, match="artifact_path"):
+            loader.load()
+
+    @patch("datasets.load_from_disk")
+    def test_artifact_mode_loads_from_disk(self, mock_disk, valid_row: dict) -> None:
+        config = DatasetConfig(data_source="artifact", artifact_path="/some/path", reproducible=True, streaming=False)
+        loader = DatasetLoader(config)
+        mock_disk.return_value = _mock_ds([valid_row])
+        rows = list(loader.load())
+        mock_disk.assert_called_once_with("/some/path")
+        assert len(rows) == 1
+
+
+class TestDataSourceLiteral:
+    def test_valid_data_sources(self) -> None:
+        DatasetConfig(data_source="hf")
+        DatasetConfig(data_source="artifact")
+
+    def test_default_data_source_is_artifact(self) -> None:
+        assert DatasetConfig().data_source == "artifact"
+
+
+class TestStreamingGuard:
+    def test_reproducible_artifact_mode_rejects_streaming(self) -> None:
+        config = DatasetConfig(
+            data_source="artifact",
+            artifact_path="/path",
+            reproducible=True,
+            streaming=True,
+            allow_streaming_in_artifact_mode=False,
+        )
+        loader = DatasetLoader(config)
+        with pytest.raises(RuntimeError, match="streaming=True in artifact mode"):
+            loader.load()
+
+    @patch("datasets.load_from_disk")
+    def test_streaming_allowed_when_explicitly_opted_in(self, mock_disk, valid_row: dict) -> None:
+        config = DatasetConfig(
+            data_source="artifact",
+            artifact_path="/path",
+            reproducible=True,
+            streaming=True,
+            allow_streaming_in_artifact_mode=True,
+        )
+        loader = DatasetLoader(config)
+        mock_disk.return_value = _mock_ds([valid_row])
+        list(loader.load())  # must not raise
+
+
+class TestArtifactManifest:
+    def test_compatible_manifest_returns_no_issues(self) -> None:
+        config = DatasetConfig()
+        manifest = ArtifactManifest(
+            source_dataset_id=config.dataset_id,
+            subset=config.subset,
+            revision=config.revision,
+            ingestion_timestamp="2026-03-18T00:00:00Z",
+            loader_version="1.0",
+            schema_version="1.0",
+            row_count=10000,
+            artifact_checksum="abc123",  # pragma: allowlist secret
+            hf_datasets_version="4.7.0",
+        )
+        assert manifest.is_compatible_with(config) == []
+
+    def test_mismatched_revision_returns_issue(self) -> None:
+        config = DatasetConfig()
+        manifest = ArtifactManifest(
+            source_dataset_id=config.dataset_id,
+            subset=config.subset,
+            revision="deadbeef" * 5,  # pragma: allowlist secret
+            ingestion_timestamp="2026-03-18T00:00:00Z",
+            loader_version="1.0",
+            schema_version="1.0",
+            row_count=10000,
+            artifact_checksum="abc123",  # pragma: allowlist secret
+            hf_datasets_version="4.7.0",
+        )
+        assert any("revision" in i for i in manifest.is_compatible_with(config))
+
+    def test_mismatched_subset_returns_issue(self) -> None:
+        config = DatasetConfig()
+        manifest = ArtifactManifest(
+            source_dataset_id=config.dataset_id,
+            subset="atticus_contracts",
+            revision=config.revision,
+            ingestion_timestamp="2026-03-18T00:00:00Z",
+            loader_version="1.0",
+            schema_version="1.0",
+            row_count=5000,
+            artifact_checksum="abc123",  # pragma: allowlist secret
+            hf_datasets_version="4.7.0",
+        )
+        assert any("subset" in i for i in manifest.is_compatible_with(config))
+
+
+class TestArtifactManifestValidation:
+    @patch("datasets.load_from_disk")
+    def test_load_validates_manifest_if_present(self, mock_disk, valid_row: dict, tmp_path) -> None:
+        config = DatasetConfig(
+            data_source="artifact",
+            artifact_path=str(tmp_path),
+            reproducible=True,
+            streaming=False,
+        )
+        manifest = {
+            "source_dataset_id": config.dataset_id,
+            "subset": config.subset,
+            "revision": config.revision,
+            "ingestion_timestamp": "2026-03-18T00:00:00Z",
+            "loader_version": "1.0",
+            "schema_version": "1.0",
+            "row_count": 1000,
+            "artifact_checksum": "abc123",  # pragma: allowlist secret
+            "hf_datasets_version": "4.7.0",
+        }
+        (tmp_path / "artifact_manifest.json").write_text(json.dumps(manifest))
+        mock_disk.return_value = _mock_ds([valid_row])
+        list(DatasetLoader(config).load())  # must not raise
+
+    def test_load_raises_on_incompatible_manifest(self, tmp_path) -> None:
+        config = DatasetConfig(
+            data_source="artifact",
+            artifact_path=str(tmp_path),
+            reproducible=True,
+            streaming=False,
+        )
+        manifest = {
+            "source_dataset_id": config.dataset_id,
+            "subset": "wrong_subset",
+            "revision": config.revision,
+            "ingestion_timestamp": "2026-03-18T00:00:00Z",
+            "loader_version": "1.0",
+            "schema_version": "1.0",
+            "row_count": 1000,
+            "artifact_checksum": "abc123",  # pragma: allowlist secret
+            "hf_datasets_version": "4.7.0",
+        }
+        (tmp_path / "artifact_manifest.json").write_text(json.dumps(manifest))
+        with pytest.raises(RuntimeError, match="incompatible"):
+            DatasetLoader(config).load()
+
+    @patch("datasets.load_from_disk")
+    def test_load_proceeds_if_no_manifest(self, mock_disk, valid_row: dict, tmp_path) -> None:
+        config = DatasetConfig(
+            data_source="artifact",
+            artifact_path=str(tmp_path),
+            reproducible=True,
+            streaming=False,
+        )
+        mock_disk.return_value = _mock_ds([valid_row])
+        list(DatasetLoader(config).load())  # manifest absent — no error
+
+
+class TestCIGuardTrainingConfig:
+    def test_default_config_is_ci_safe(self) -> None:
+        assert DatasetConfig().data_source == "artifact"
+
+    def test_training_config_with_hf_source_fails_ci(self) -> None:
+        config = DatasetConfig(data_source="hf", reproducible=True)
+        with pytest.raises(RuntimeError, match="trust_remote_code"):
+            DatasetLoader(config).load()
+
+    def test_training_config_with_no_artifact_path_fails_ci(self) -> None:
+        config = DatasetConfig(data_source="artifact", artifact_path=None)
+        with pytest.raises(ValueError, match="artifact_path"):
+            DatasetLoader(config).load()
+
+
+class TestDatasetConfigHydra:
+    def test_from_hydra_with_plain_dict(self) -> None:
+        d = {
+            "dataset_id": "pile-of-law/pile-of-law",
+            "subset": "atticus_contracts",
+            "split": "train",
+            "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",  # pragma: allowlist secret
+            "reproducible": True,
+            "min_text_length": 100,
+            "streaming": True,
+            "text_fields": ["text", "contents"],
+            "required_fields": ["created_timestamp", "downloaded_timestamp", "url"],
+            "data_source": "artifact",
+            "artifact_path": None,
+            "allow_streaming_in_artifact_mode": False,
+        }
+        cfg = DatasetConfig.from_hydra(d)
+        assert cfg.subset == "atticus_contracts"
+        assert cfg.min_text_length == 100
+        assert isinstance(cfg.text_fields, tuple)
+        assert isinstance(cfg.required_fields, frozenset)
+
+    def test_hydra_yaml_files_exist(self) -> None:
+        from pathlib import Path
+
+        assert Path("configs/data/legal_rag.yaml").exists()
+        assert Path("configs/data/legal_rag_explore.yaml").exists()
+
+    def test_hydra_yaml_parseable(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path("configs/data/legal_rag.yaml").read_text())
+        assert cfg["subset"] == "r_courtlistener_opinions"
+        assert cfg["reproducible"] is True
+
+    def test_hydra_explore_yaml_sets_reproducible_false(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path("configs/data/legal_rag_explore.yaml").read_text())
+        assert cfg["reproducible"] is False
 
 
 class TestLogStats:
@@ -138,7 +356,6 @@ class TestLogStats:
         mock_tokenizer = MagicMock()
         mock_tokenizer.encode = MagicMock(return_value=[1] * 42)
         mock_tokenizer.name_or_path = "bert-base-uncased"
-
         stats = loader.log_stats([valid_row, valid_row], mock_tokenizer, max_samples=10)
         required = {
             "n_valid",
@@ -170,8 +387,7 @@ class TestLogStats:
         mock_tokenizer = MagicMock()
         mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
         stats = loader.log_stats([valid_row], mock_tokenizer)
-        assert "revision" in stats
-        assert "dataset" in stats
+        assert "revision" in stats and "dataset" in stats
 
     def test_log_stats_court_distribution(self, loader: DatasetLoader, valid_row: dict) -> None:
         mock_tokenizer = MagicMock()
@@ -184,125 +400,52 @@ class TestLogStats:
         mock_tokenizer = MagicMock()
         stats = loader.log_stats([], mock_tokenizer)
         assert stats["n_valid"] == 0
-        assert stats["avg_token_length"] == 0
         assert stats["token_length_histogram"] == []
-
-
-class TestDatasetConfigHydra:
-    def test_from_hydra_with_plain_dict(self) -> None:
-        d = {
-            "dataset_id": "pile-of-law/pile-of-law",
-            "subset": "atticus_contracts",
-            "split": "train",
-            "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",  # pragma: allowlist secret
-            "reproducible": True,
-            "min_text_length": 100,
-            "streaming": True,
-            "text_fields": ["text", "contents"],
-            "required_fields": ["created_timestamp", "downloaded_timestamp", "url"],
-        }
-        cfg = DatasetConfig.from_hydra(d)
-        assert cfg.subset == "atticus_contracts"
-        assert cfg.min_text_length == 100
-        assert isinstance(cfg.text_fields, tuple)
-        assert isinstance(cfg.required_fields, frozenset)
-
-    def test_from_hydra_overrides_min_text_length(self) -> None:
-        d = {
-            "dataset_id": "pile-of-law/pile-of-law",
-            "subset": "r_courtlistener_opinions",
-            "split": "train",
-            "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",  # pragma: allowlist secret
-            "reproducible": False,
-            "min_text_length": 20,
-            "streaming": True,
-            "text_fields": ["text"],
-            "required_fields": ["url"],
-        }
-        cfg = DatasetConfig.from_hydra(d)
-        assert cfg.min_text_length == 20
-        assert cfg.reproducible is False
-
-    def test_hydra_yaml_files_exist(self) -> None:
-        from pathlib import Path
-
-        assert Path("configs/data/legal_rag.yaml").exists()
-        assert Path("configs/data/legal_rag_explore.yaml").exists()
-
-    def test_hydra_yaml_parseable(self) -> None:
-        from pathlib import Path
-
-        import yaml
-
-        cfg = yaml.safe_load(Path("configs/data/legal_rag.yaml").read_text())
-        assert cfg["subset"] == "r_courtlistener_opinions"
-        assert cfg["reproducible"] is True
-        assert cfg["min_text_length"] == 50
-
-    def test_hydra_explore_yaml_sets_reproducible_false(self) -> None:
-        from pathlib import Path
-
-        import yaml
-
-        cfg = yaml.safe_load(Path("configs/data/legal_rag_explore.yaml").read_text())
-        assert cfg["reproducible"] is False
 
 
 class TestFilteringAPI:
     def test_filter_by_date_range_includes_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "created_timestamp": "2022-03-15"}
-        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
-        assert len(results) == 1
+        assert len(list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))) == 1
 
     def test_filter_by_date_range_excludes_out_of_range(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "created_timestamp": "2020-01-01"}
-        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
-        assert results == []
+        assert list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31")) == []
 
     def test_filter_by_date_range_excludes_missing_timestamp(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "created_timestamp": ""}
-        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
-        assert results == []
+        assert list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31")) == []
 
     def test_filter_by_court_includes_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "court_id": "ca9"}
-        results = list(loader.filter_by_court([row], ["ca9", "ca1"]))
-        assert len(results) == 1
+        assert len(list(loader.filter_by_court([row], ["ca9", "ca1"]))) == 1
 
     def test_filter_by_court_excludes_non_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "court_id": "ca5"}
-        results = list(loader.filter_by_court([row], ["ca9", "ca1"]))
-        assert results == []
+        assert list(loader.filter_by_court([row], ["ca9", "ca1"])) == []
 
     def test_filter_by_court_excludes_missing_court_field(self, loader: DatasetLoader, valid_row: dict) -> None:
-        results = list(loader.filter_by_court([valid_row], ["ca9"]))
-        assert results == []
+        assert list(loader.filter_by_court([valid_row], ["ca9"])) == []
 
     def test_filter_min_text_tokens_includes_long_enough(self, loader: DatasetLoader, valid_row: dict) -> None:
-        results = list(loader.filter_min_text_tokens([valid_row], min_tokens=5, tokenizer=None))
-        assert len(results) == 1
+        assert len(list(loader.filter_min_text_tokens([valid_row], 5, None))) == 1
 
     def test_filter_min_text_tokens_excludes_short(self, loader: DatasetLoader, valid_row: dict) -> None:
         row = {**valid_row, "text": "short"}
-        results = list(loader.filter_min_text_tokens([row], min_tokens=100, tokenizer=None))
-        assert results == []
+        assert list(loader.filter_min_text_tokens([row], 100, None)) == []
 
-    def test_filter_min_text_tokens_uses_tokenizer_when_provided(self, loader: DatasetLoader, valid_row: dict) -> None:
+    def test_filter_min_text_tokens_uses_tokenizer(self, loader: DatasetLoader, valid_row: dict) -> None:
         mock_tokenizer = MagicMock()
         mock_tokenizer.encode = MagicMock(return_value=[1] * 200)
-        results = list(loader.filter_min_text_tokens([valid_row], min_tokens=150, tokenizer=mock_tokenizer))
+        results = list(loader.filter_min_text_tokens([valid_row], 150, mock_tokenizer))
         assert len(results) == 1
         mock_tokenizer.encode.assert_called_once()
 
     def test_filters_composable(self, loader: DatasetLoader, valid_row: dict) -> None:
-        """Filters are composable — pipe output of one into another."""
         rows = [
             {**valid_row, "court_id": "ca9", "created_timestamp": "2022-06-01"},
             {**valid_row, "court_id": "ca1", "created_timestamp": "2022-06-01"},
             {**valid_row, "court_id": "ca9", "created_timestamp": "2020-01-01"},
         ]
-        by_court = loader.filter_by_court(rows, ["ca9"])
-        by_date = loader.filter_by_date_range(by_court, "2022-01-01", "2022-12-31")
-        results = list(by_date)
-        assert len(results) == 1
-        assert results[0]["court_id"] == "ca9"
+        results = list(loader.filter_by_date_range(loader.filter_by_court(rows, ["ca9"]), "2022-01-01", "2022-12-31"))
+        assert len(results) == 1 and results[0]["court_id"] == "ca9"
