@@ -157,6 +157,9 @@ class CourtListenerDatasetProbe:
         assert text_field is not None
         text = str(row[text_field]).strip()
 
+        # Record which field the text came from — downstream models may need this
+        # to distinguish scraping-variant schemas across pile-of-law subsets.
+        normalized["_source_text_field"] = text_field
         if text_field != "text":
             normalized.pop(text_field, None)
 

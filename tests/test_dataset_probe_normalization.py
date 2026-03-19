@@ -147,3 +147,37 @@ class TestNormalizeRowDeadCodeInvariant:
         row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
         assert probe.validate_row(row) == []
         assert probe.resolve_text_field(row) is not None
+
+
+class TestInformationPreservation:
+    """Document exactly what normalize_row preserves vs transforms.
+    Prevents silent collapse of distinctions needed for downstream science.
+    """
+
+    def test_source_text_field_recorded_for_text(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Downstream models can identify text provenance (text vs contents schema variant)."""
+        result = probe.normalize_row(pinned_row)
+        assert result["_source_text_field"] == "text"
+
+    def test_source_text_field_recorded_for_contents(self, probe: CourtListenerDatasetProbe) -> None:
+        row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        result = probe.normalize_row(row)
+        assert result["_source_text_field"] == "contents"
+
+    def test_timestamp_precision_preserved_when_available(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        row = {**pinned_row, "created_timestamp": "2022-01-15T10:30:00Z"}
+        result = probe.normalize_row(row)
+        assert "T" in result["created_timestamp"], "Time-of-day must not be silently dropped"
+
+    def test_whitespace_strip_is_only_transformation_to_text(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        """Text content must be preserved exactly except for leading/trailing whitespace."""
+        result = probe.normalize_row(pinned_row)
+        assert result["text"] == pinned_row["text"].strip()
+
+    def test_url_preserved_verbatim(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert result["url"] == pinned_row["url"]
