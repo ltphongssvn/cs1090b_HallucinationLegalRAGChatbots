@@ -121,3 +121,48 @@ class DatasetLoader:
             **self.get_provenance(),
         }
         return stats
+
+    def filter_by_date_range(
+        self,
+        source: Iterable[dict[str, Any]],
+        start: str,
+        end: str,
+        date_field: str = "created_timestamp",
+    ) -> Iterator[dict[str, Any]]:
+        """Yield rows whose date_field falls within [start, end] (YYYY-MM-DD inclusive)."""
+        from src.row_normalizer import _TS_EXTRACT_RE
+
+        for row in source:
+            ts = str(row.get(date_field, ""))
+            match = _TS_EXTRACT_RE.search(ts)
+            if not match:
+                continue
+            date_part = match.group(0)[:10]
+            if start <= date_part <= end:
+                yield row
+
+    def filter_by_court(
+        self,
+        source: Iterable[dict[str, Any]],
+        court_ids: list[str],
+        court_field: str = "court_id",
+    ) -> Iterator[dict[str, Any]]:
+        """Yield rows whose court_field is in court_ids."""
+        allowed = set(court_ids)
+        for row in source:
+            if str(row.get(court_field, "")) in allowed:
+                yield row
+
+    def filter_min_text_tokens(
+        self,
+        source: Iterable[dict[str, Any]],
+        min_tokens: int,
+        tokenizer: Any,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield rows whose text has at least min_tokens tokens (whitespace-split approximation
+        used when tokenizer is None; otherwise uses tokenizer.encode)."""
+        for row in source:
+            text = str(row.get("text", row.get("contents", "")))
+            count = len(tokenizer.encode(text)) if tokenizer is not None else len(text.split())
+            if count >= min_tokens:
+                yield row

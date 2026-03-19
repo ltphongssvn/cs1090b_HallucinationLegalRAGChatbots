@@ -246,3 +246,63 @@ class TestDatasetConfigHydra:
 
         cfg = yaml.safe_load(Path("configs/data/legal_rag_explore.yaml").read_text())
         assert cfg["reproducible"] is False
+
+
+class TestFilteringAPI:
+    def test_filter_by_date_range_includes_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "created_timestamp": "2022-03-15"}
+        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
+        assert len(results) == 1
+
+    def test_filter_by_date_range_excludes_out_of_range(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "created_timestamp": "2020-01-01"}
+        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
+        assert results == []
+
+    def test_filter_by_date_range_excludes_missing_timestamp(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "created_timestamp": ""}
+        results = list(loader.filter_by_date_range([row], "2022-01-01", "2022-12-31"))
+        assert results == []
+
+    def test_filter_by_court_includes_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "court_id": "ca9"}
+        results = list(loader.filter_by_court([row], ["ca9", "ca1"]))
+        assert len(results) == 1
+
+    def test_filter_by_court_excludes_non_matching(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "court_id": "ca5"}
+        results = list(loader.filter_by_court([row], ["ca9", "ca1"]))
+        assert results == []
+
+    def test_filter_by_court_excludes_missing_court_field(self, loader: DatasetLoader, valid_row: dict) -> None:
+        results = list(loader.filter_by_court([valid_row], ["ca9"]))
+        assert results == []
+
+    def test_filter_min_text_tokens_includes_long_enough(self, loader: DatasetLoader, valid_row: dict) -> None:
+        results = list(loader.filter_min_text_tokens([valid_row], min_tokens=5, tokenizer=None))
+        assert len(results) == 1
+
+    def test_filter_min_text_tokens_excludes_short(self, loader: DatasetLoader, valid_row: dict) -> None:
+        row = {**valid_row, "text": "short"}
+        results = list(loader.filter_min_text_tokens([row], min_tokens=100, tokenizer=None))
+        assert results == []
+
+    def test_filter_min_text_tokens_uses_tokenizer_when_provided(self, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 200)
+        results = list(loader.filter_min_text_tokens([valid_row], min_tokens=150, tokenizer=mock_tokenizer))
+        assert len(results) == 1
+        mock_tokenizer.encode.assert_called_once()
+
+    def test_filters_composable(self, loader: DatasetLoader, valid_row: dict) -> None:
+        """Filters are composable — pipe output of one into another."""
+        rows = [
+            {**valid_row, "court_id": "ca9", "created_timestamp": "2022-06-01"},
+            {**valid_row, "court_id": "ca1", "created_timestamp": "2022-06-01"},
+            {**valid_row, "court_id": "ca9", "created_timestamp": "2020-01-01"},
+        ]
+        by_court = loader.filter_by_court(rows, ["ca9"])
+        by_date = loader.filter_by_date_range(by_court, "2022-01-01", "2022-12-31")
+        results = list(by_date)
+        assert len(results) == 1
+        assert results[0]["court_id"] == "ca9"
