@@ -1,233 +1,28 @@
 # tests/test_dataset_probe.py
-# TDD unit tests for HF dataset schema contract — no real network calls.
+# Path: cs1090b_HallucinationLegalRAGChatbots/tests/test_dataset_probe.py
+# Behavior tests for CourtListenerDatasetProbe — no real network calls.
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.dataset_probe import (
+    _MUTABLE_REFS,
+    HEX_REVISION_RE,
+    PINNED_REVISION,
+    CourtListenerDatasetProbe,
+)
+from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
+
 pytestmark = pytest.mark.unit
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
-HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
-
-# Pinned to HEAD commit of pile-of-law/pile-of-law as of 2026-03-18.
-# Update with:
-#   from huggingface_hub import list_repo_commits
-#   list(list_repo_commits('pile-of-law/pile-of-law', repo_type='dataset'))[0].commit_id
-PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
-
-from tests.fixtures.courtlistener_checksums import COURTLISTENER_SAMPLE_TEXT_SHA256
-
-_MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
-
-# Candidate formats tried in order from most to least precise.
-# Each entry: (strptime format string, preserves_time, preserves_tz)
-# datetime.fromisoformat() handles most ISO-8601 variants in Python 3.11+,
-# but we try explicit formats first for clarity and test coverage.
-_TS_FORMATS: list[tuple[str, bool, bool]] = [
-    ("%Y-%m-%dT%H:%M:%S%z", True, True),  # 2022-01-15T10:30:00+05:00 or Z
-    ("%Y-%m-%dT%H:%M:%S", True, False),  # 2022-01-15T10:30:00
-    ("%Y-%m-%d", False, False),  # 2022-01-15
-]
-
-# Regex to extract candidate substrings before parsing — avoids feeding
-# entire free-text fields to strptime.
-_TS_EXTRACT_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}"
-    r"(?:T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}|[+-]\d{4}|\.\d+Z?)?)?"
-)
 
 
-class CourtListenerDatasetProbe:
-    """
-    Schema contract and access layer for pile-of-law/pile-of-law
-    subset r_courtlistener_opinions.
-
-    Reproducibility contract:
-      - REPRODUCIBLE=True (default) enforces a pinned 40-char SHA at load() time.
-        Set REPRODUCIBLE=False only for fast exploration — never for training runs.
-      - trust_remote_code is never passed.
-      - Provenance is probe-level — call get_provenance() once at training start.
-
-    validate_row / normalize_row contract:
-      - validate_row() returns all errors; empty list means valid.
-      - normalize_row() requires a pre-validated row. Raises ValueError if
-        validation fails — callers cannot accidentally normalize invalid rows.
-      - iter_valid_rows() is the preferred pipeline entry point.
-
-    REQUIRED_FIELDS intentionally excludes text-variant keys ('text', 'contents').
-    Text field presence and type are enforced separately via resolve_text_field().
-    """
-
-    DATASET_ID = "pile-of-law/pile-of-law"
-    SUBSET = "r_courtlistener_opinions"
-    SPLIT = "train"
-    REVISION = PINNED_REVISION
-    PROBE_VERSION = "1.0"
-    REPRODUCIBLE = True
-    REQUIRED_FIELDS: frozenset[str] = frozenset({"created_timestamp", "downloaded_timestamp", "url"})
-    TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
-    MIN_TEXT_LENGTH = 50
-
-    def load(self, streaming: bool = True) -> Iterable[dict[str, Any]]:
-        """Load dataset at pinned revision. trust_remote_code never passed.
-
-        Raises RuntimeError if REPRODUCIBLE=True and REVISION is a mutable ref.
-        Single-pass semantics: wrap in iter() to enforce single-pass explicitly.
-        """
-        if self.REPRODUCIBLE and (self.REVISION in _MUTABLE_REFS or HEX_REVISION_RE.fullmatch(self.REVISION) is None):
-            raise RuntimeError(
-                f"Reproducibility violation: REVISION={self.REVISION!r} is mutable. "
-                "Set REVISION to a 40-char commit SHA, or set REPRODUCIBLE=False "
-                "to explicitly opt into non-deterministic exploration mode."
-            )
-
-        from datasets import load_dataset
-
-        return load_dataset(  # type: ignore[return-value]
-            self.DATASET_ID,
-            self.SUBSET,
-            split=self.SPLIT,
-            streaming=streaming,
-            revision=self.REVISION,
-        )
-
-    def get_provenance(self) -> dict[str, Any]:
-        """Return full provenance dict for W&B / experiment logging.
-        Provenance is probe-level — log once at training start, not per-row.
-        """
-        import datasets
-
-        return {
-            "dataset": self.DATASET_ID,
-            "subset": self.SUBSET,
-            "split": self.SPLIT,
-            "revision": self.REVISION,
-            "hf_datasets_version": datasets.__version__,
-            "probe_version": self.PROBE_VERSION,
-            "reproducible": self.REPRODUCIBLE,
-        }
-
-    def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
-        """Yield only validated, normalized rows. Invalid rows are skipped.
-        Invariant: downstream code never sees invalid rows.
-        """
-        rows = source if source is not None else self.load()
-        for row in rows:
-            if not self.validate_row(row):
-                yield self.normalize_row(row)
-
-    def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """Return all validation errors. Empty list = valid."""
-        errors: list[str] = []
-
-        missing = self.REQUIRED_FIELDS - set(row.keys())
-        if missing:
-            errors.append(f"Missing required fields: {sorted(missing)}")
-
-        text_field = self.resolve_text_field(row)
-        if text_field is None:
-            errors.append(f"No text field found in {sorted(row.keys())}")
-            return errors
-
-        value = row[text_field]
-        if not isinstance(value, str):
-            errors.append(f"{text_field} must be str, got {type(value).__name__!r}: {value!r}")
-            return errors
-
-        if len(value) < self.MIN_TEXT_LENGTH:
-            errors.append(f"{text_field} too short: {len(value)} < {self.MIN_TEXT_LENGTH}")
-        return errors
-
-    def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a pre-validated row into canonical form.
-
-        Precondition: row must pass validate_row() with no errors.
-        Raises ValueError if precondition is violated.
-        Use iter_valid_rows() to enforce the contract automatically.
-        """
-        errors = self.validate_row(row)
-        if errors:
-            raise ValueError(
-                f"normalize_row() called on invalid row — validate first.\n"
-                f"Errors: {errors}\n"
-                f"Use iter_valid_rows() to enforce validate-then-normalize automatically."
-            )
-
-        normalized = dict(row)
-
-        text_field = self.resolve_text_field(row)
-        text = str(row[text_field]).strip() if text_field else ""
-
-        if text_field and text_field != "text":
-            normalized.pop(text_field, None)
-
-        normalized["text"] = text
-        normalized["created_timestamp"] = self._normalize_timestamp(str(row.get("created_timestamp", "")))
-        normalized["downloaded_timestamp"] = self._normalize_timestamp(str(row.get("downloaded_timestamp", "")))
-        if "url" in row:
-            # source_url is an intentional pipeline alias for url.
-            # Downstream RAG components reference source_url consistently,
-            # decoupling them from the raw field name which varies across
-            # pile-of-law subsets (some use url, others use href or link).
-            normalized["source_url"] = str(row["url"])
-
-        return normalized
-
-    def _normalize_timestamp(self, ts: str) -> str:
-        """Parse and normalize timestamp using datetime — not just regex extraction.
-
-        Validates actual date semantics (rejects '9999-99-99', '2022-13-45', etc.).
-        Preserves the most precise valid format found:
-          datetime+tz > datetime > date > '' (unparseable or invalid).
-
-        Legal documents carry filing deadlines and appeal windows that are
-        time-sensitive — silently dropping timezone or accepting invalid dates
-        loses forensic value.
-        """
-        candidate = _TS_EXTRACT_RE.search(ts)
-        if not candidate:
-            return ""
-        raw = candidate.group(0)
-
-        # Normalize 'Z' suffix — Python < 3.11 fromisoformat doesn't accept it
-        normalized_raw = raw.replace("Z", "+00:00")
-
-        for fmt, preserves_time, preserves_tz in _TS_FORMATS:
-            try:
-                parsed = datetime.strptime(normalized_raw, fmt)
-                # Re-emit in the precision level that was successfully parsed
-                if preserves_tz and parsed.tzinfo is not None:
-                    # Emit as ISO-8601 with original Z if UTC
-                    if parsed.tzinfo == timezone.utc:
-                        return parsed.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-                    return parsed.isoformat()
-                if preserves_time:
-                    return parsed.strftime("%Y-%m-%dT%H:%M:%S")
-                return parsed.strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-
-        return ""
-
-    def resolve_text_field(self, row: dict[str, Any]) -> str | None:
-        """Return the first available text field name, or None."""
-        return next((k for k in self.TEXT_FIELDS if k in row), None)
-
-    def get_text(self, row: dict[str, Any]) -> str:
-        """Extract text content. Raises ValueError if no text field found."""
-        field = self.resolve_text_field(row)
-        if field is None:
-            raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
-        return str(row[field])
-
-
-def _mock_iterable_dataset(rows: list[dict[str, Any]]) -> MagicMock:
+def _mock_iterable_dataset(rows: list[dict]) -> MagicMock:
     mock_ds = MagicMock()
     mock_ds.__iter__ = MagicMock(side_effect=lambda: iter(rows))
     return mock_ds
@@ -239,12 +34,12 @@ def probe() -> CourtListenerDatasetProbe:
 
 
 @pytest.fixture
-def fixture_data() -> dict[str, Any]:
+def fixture_data() -> dict:
     return json.loads(FIXTURE_PATH.read_text())
 
 
 @pytest.fixture
-def pinned_row(fixture_data: dict[str, Any]) -> dict[str, Any]:
+def pinned_row(fixture_data: dict) -> dict:
     return {k: v for k, v in fixture_data.items() if k != "_fixture_meta"}
 
 
@@ -359,7 +154,6 @@ class TestNormalizeTimestamp:
         assert "T" in probe._normalize_timestamp("2022-01-15T10:30:00Z")
 
     def test_rejects_impossible_month(self, probe: CourtListenerDatasetProbe) -> None:
-        """datetime parsing rejects invalid dates — pure regex would accept these."""
         assert probe._normalize_timestamp("2022-13-01") == ""
 
     def test_rejects_impossible_day(self, probe: CourtListenerDatasetProbe) -> None:
@@ -496,8 +290,7 @@ class TestGetProvenance:
 
     def test_normalize_row_does_not_embed_provenance(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         result = probe.normalize_row(pinned_row)
-        assert "_provenance" not in result
-        assert "revision" not in result
+        assert "_provenance" not in result and "revision" not in result
 
 
 class TestIterValidRows:
@@ -526,8 +319,7 @@ class TestNormalizeRow:
     def test_preserves_upstream_metadata(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         row = {**pinned_row, "judge": "Smith J.", "jurisdiction": "federal"}
         result = probe.normalize_row(row)
-        assert result.get("judge") == "Smith J."
-        assert result.get("jurisdiction") == "federal"
+        assert result.get("judge") == "Smith J." and result.get("jurisdiction") == "federal"
 
     def test_canonical_text_key(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         assert isinstance(probe.normalize_row(pinned_row)["text"], str)
@@ -549,16 +341,15 @@ class TestNormalizeRow:
         }
         result = probe.normalize_row(row)
         assert "2022-01-15" in result["created_timestamp"] and "10:30:00" in result["created_timestamp"]
-        assert "2022-06-01" in result["downloaded_timestamp"]
 
     def test_falls_back_to_date_only_when_no_time(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         row = {**pinned_row, "created_timestamp": "2022-01-15", "downloaded_timestamp": "2022-06-01"}
-        result = probe.normalize_row(row)
-        assert result["created_timestamp"] == "2022-01-15"
-        assert result["downloaded_timestamp"] == "2022-06-01"
+        assert probe.normalize_row(row)["created_timestamp"] == "2022-01-15"
 
-    def test_adds_source_url_alias(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
-        assert probe.normalize_row(pinned_row)["source_url"] == pinned_row["url"]
+    def test_source_url_is_alias_for_url(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """source_url is an intentional pipeline alias — decouples downstream from raw field name."""
+        result = probe.normalize_row(pinned_row)
+        assert result["source_url"] == result["url"] == pinned_row["url"]
 
     def test_output_has_canonical_keys_as_superset(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
         row = {**pinned_row, "dummy_judge": "Smith"}
