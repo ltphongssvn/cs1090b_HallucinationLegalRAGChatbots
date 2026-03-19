@@ -24,88 +24,6 @@ def valid_row() -> dict:
     }
 
 
-class TestLogRunStart:
-    @patch("wandb.init")
-    @patch("wandb.summary", new_callable=dict)
-    def test_initializes_wandb_run(self, mock_summary, mock_init, loader: DatasetLoader) -> None:
-        from src.wandb_logger import log_run_start
-
-        mock_run = MagicMock()
-        mock_init.return_value = mock_run
-        run = log_run_start(loader, run_name="test-run", project="test-project")
-        mock_init.assert_called_once()
-        assert run is mock_run
-
-    @patch("wandb.init")
-    @patch("wandb.summary", new_callable=dict)
-    def test_config_includes_provenance(self, mock_summary, mock_init, loader: DatasetLoader) -> None:
-        from src.wandb_logger import log_run_start
-
-        mock_init.return_value = MagicMock()
-        log_run_start(loader)
-        config = mock_init.call_args.kwargs["config"]
-        assert "revision" in config
-        assert "dataset" in config
-        assert "reproducible" in config
-
-    @patch("wandb.init")
-    @patch("wandb.summary", new_callable=dict)
-    def test_extra_config_merged(self, mock_summary, mock_init, loader: DatasetLoader) -> None:
-        from src.wandb_logger import log_run_start
-
-        mock_init.return_value = MagicMock()
-        log_run_start(loader, extra={"model": "bert-base", "lr": 2e-5})
-        config = mock_init.call_args.kwargs["config"]
-        assert config["model"] == "bert-base"
-        assert config["lr"] == 2e-5
-
-
-class TestLogDatasetStats:
-    @patch("wandb.log")
-    @patch("wandb.Table")
-    @patch("wandb.plot")
-    def test_logs_required_keys(self, mock_plot, mock_table, mock_log, loader: DatasetLoader, valid_row: dict) -> None:
-        from src.wandb_logger import log_dataset_stats
-
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.encode = MagicMock(return_value=[1] * 42)
-        mock_tokenizer.name_or_path = "bert-base"
-        stats = log_dataset_stats(loader, mock_tokenizer, [valid_row])
-        assert stats["n_valid"] == 1
-        assert mock_log.called
-
-    @patch("wandb.log")
-    @patch("wandb.Table")
-    @patch("wandb.plot")
-    def test_returns_stats_dict(self, mock_plot, mock_table, mock_log, loader: DatasetLoader, valid_row: dict) -> None:
-        from src.wandb_logger import log_dataset_stats
-
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
-        stats = log_dataset_stats(loader, mock_tokenizer, [valid_row])
-        assert "avg_token_length" in stats
-        assert "court_distribution" in stats
-
-
-class TestLogQualitySignals:
-    @patch("wandb.log")
-    def test_logs_signal_counts(self, mock_log, valid_row: dict) -> None:
-        from src.wandb_logger import log_quality_signals
-
-        row_with_html = {**valid_row, "text": "<p>Court held.</p> " * 5}
-        result = log_quality_signals([row_with_html])
-        assert isinstance(result, dict)
-        assert mock_log.called
-
-    @patch("wandb.log")
-    def test_clean_rows_no_signals(self, mock_log, valid_row: dict) -> None:
-        from src.wandb_logger import log_quality_signals
-
-        result = log_quality_signals([])
-        assert result == {}
-        assert not mock_log.called
-
-
 class TestSetupWandbAuth:
     @patch("wandb.login")
     def test_uses_api_key_from_env(self, mock_login, monkeypatch) -> None:
@@ -158,3 +76,78 @@ class TestLoadArtifact:
         mock_api.artifact.assert_called_once_with("entity/project/dataset:v1")
         mock_artifact.download.assert_called_once_with(root=str(tmp_path))
         assert result == str(tmp_path)
+
+
+class TestLogRunStart:
+    @patch("wandb.init")
+    @patch("wandb.summary", new_callable=dict)
+    def test_initializes_wandb_run(self, mock_summary, mock_init, loader) -> None:
+        from src.wandb_logger import log_run_start
+
+        mock_run = MagicMock()
+        mock_init.return_value = mock_run
+        run = log_run_start(loader, run_name="test-run", project="test-project")
+        mock_init.assert_called_once()
+        assert run is mock_run
+
+    @patch("wandb.init")
+    @patch("wandb.summary", new_callable=dict)
+    def test_config_includes_provenance(self, mock_summary, mock_init, loader) -> None:
+        from src.wandb_logger import log_run_start
+
+        mock_init.return_value = MagicMock()
+        log_run_start(loader)
+        config = mock_init.call_args.kwargs["config"]
+        assert "revision" in config and "dataset" in config and "reproducible" in config
+
+    @patch("wandb.init")
+    @patch("wandb.summary", new_callable=dict)
+    def test_extra_config_merged(self, mock_summary, mock_init, loader) -> None:
+        from src.wandb_logger import log_run_start
+
+        mock_init.return_value = MagicMock()
+        log_run_start(loader, extra={"model": "bert-base", "lr": 2e-5})
+        config = mock_init.call_args.kwargs["config"]
+        assert config["model"] == "bert-base" and config["lr"] == 2e-5
+
+
+class TestLogDatasetStats:
+    @patch("wandb.log")
+    @patch("wandb.Table")
+    @patch("wandb.plot")
+    def test_logs_required_keys(self, mock_plot, mock_table, mock_log, loader, valid_row) -> None:
+        from src.wandb_logger import log_dataset_stats
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 42)
+        mock_tokenizer.name_or_path = "bert-base"
+        stats = log_dataset_stats(loader, mock_tokenizer, [valid_row])
+        assert stats["n_valid"] == 1 and mock_log.called
+
+    @patch("wandb.log")
+    @patch("wandb.Table")
+    @patch("wandb.plot")
+    def test_returns_stats_dict(self, mock_plot, mock_table, mock_log, loader, valid_row) -> None:
+        from src.wandb_logger import log_dataset_stats
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode = MagicMock(return_value=[1] * 10)
+        stats = log_dataset_stats(loader, mock_tokenizer, [valid_row])
+        assert "avg_token_length" in stats and "court_distribution" in stats
+
+
+class TestLogQualitySignals:
+    @patch("wandb.log")
+    def test_logs_signal_counts(self, mock_log, valid_row) -> None:
+        from src.wandb_logger import log_quality_signals
+
+        row_with_html = {**valid_row, "text": "<p>Court held.</p> " * 5}
+        result = log_quality_signals([row_with_html])
+        assert isinstance(result, dict) and mock_log.called
+
+    @patch("wandb.log")
+    def test_clean_rows_no_signals(self, mock_log) -> None:
+        from src.wandb_logger import log_quality_signals
+
+        result = log_quality_signals([])
+        assert result == {} and not mock_log.called
