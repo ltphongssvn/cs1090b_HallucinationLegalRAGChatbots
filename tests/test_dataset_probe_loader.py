@@ -90,3 +90,32 @@ class TestIterValidRows:
         single_pass = iter([pinned_row, pinned_row])
         assert len(list(probe.iter_valid_rows(single_pass))) == 2
         assert list(probe.iter_valid_rows(single_pass)) == []
+
+
+class TestDataLoaderCompatibility:
+    """Verify normalize_row output is directly usable in a PyTorch DataLoader."""
+
+    def test_normalized_row_text_is_str(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        result = probe.normalize_row(pinned_row)
+        assert isinstance(result["text"], str)
+
+    def test_iter_valid_rows_produces_list_of_dicts(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        rows = list(probe.iter_valid_rows([pinned_row, pinned_row]))
+        assert all(isinstance(r, dict) for r in rows)
+
+    def test_normalized_batch_text_collatable(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Simulate collate_fn: batch of text strings must be a list of uniform type."""
+        batch = list(probe.iter_valid_rows([pinned_row] * 4))
+        texts = [r["text"] for r in batch]
+        assert len(texts) == 4
+        assert all(isinstance(t, str) for t in texts)
+        # All texts from identical rows must be identical — deterministic collation
+        assert len(set(texts)) == 1
+
+    def test_normalized_row_has_no_none_values_in_required_fields(
+        self, probe: CourtListenerDatasetProbe, pinned_row: dict
+    ) -> None:
+        """None values in required fields cause silent DataLoader collation failures."""
+        result = probe.normalize_row(pinned_row)
+        for field in ("text", "url", "source_url"):
+            assert result[field] is not None, f"{field} must not be None"
