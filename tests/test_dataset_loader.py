@@ -1,0 +1,133 @@
+# tests/test_dataset_loader.py
+# Unit tests for DatasetConfig, RowValidator, RowNormalizer, DatasetLoader.
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.dataset_config import DatasetConfig
+from src.dataset_loader import HEX_REVISION_RE, DatasetLoader
+from src.row_normalizer import RowNormalizer
+from src.row_validator import RowValidator
+
+pytestmark = pytest.mark.unit
+
+PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
+
+
+@pytest.fixture
+def config() -> DatasetConfig:
+    return DatasetConfig()
+
+
+@pytest.fixture
+def validator(config: DatasetConfig) -> RowValidator:
+    return RowValidator(config)
+
+
+@pytest.fixture
+def normalizer(config: DatasetConfig, validator: RowValidator) -> RowNormalizer:
+    return RowNormalizer(config, validator)
+
+
+@pytest.fixture
+def loader(config: DatasetConfig) -> DatasetLoader:
+    return DatasetLoader(config)
+
+
+@pytest.fixture
+def valid_row() -> dict:
+    return {
+        "text": "The court held that the defendant failed to establish a genuine issue. " * 2,
+        "created_timestamp": "2022-01-15",
+        "downloaded_timestamp": "2022-06-01",
+        "url": "https://courtlistener.com/opinion/123/",
+    }
+
+
+def _mock_ds(rows: list[dict]) -> MagicMock:
+    mock = MagicMock()
+    mock.__iter__ = MagicMock(side_effect=lambda: iter(rows))
+    return mock
+
+
+class TestDatasetConfig:
+    def test_default_revision_is_40char_sha(self, config: DatasetConfig) -> None:
+        assert HEX_REVISION_RE.fullmatch(config.revision) is not None
+
+    def test_default_reproducible_is_true(self, config: DatasetConfig) -> None:
+        assert config.reproducible is True
+
+    def test_config_is_injectable(self) -> None:
+        custom = DatasetConfig(subset="atticus_contracts", min_text_length=100)
+        assert custom.subset == "atticus_contracts"
+        assert custom.min_text_length == 100
+
+
+class TestRowValidator:
+    def test_valid_row_returns_no_errors(self, validator: RowValidator, valid_row: dict) -> None:
+        assert validator.validate(valid_row) == []
+
+    def test_missing_url_caught(self, validator: RowValidator) -> None:
+        row = {"text": "A" * 60, "created_timestamp": "", "downloaded_timestamp": ""}
+        assert any("Missing required fields" in e for e in validator.validate(row))
+
+    def test_resolve_text_field_prefers_text(self, validator: RowValidator) -> None:
+        assert validator.resolve_text_field({"text": "x", "contents": "y"}) == "text"
+
+    def test_resolve_text_field_falls_back_to_contents(self, validator: RowValidator) -> None:
+        assert validator.resolve_text_field({"contents": "y"}) == "contents"
+
+
+class TestRowNormalizer:
+    def test_normalize_valid_row(self, normalizer: RowNormalizer, valid_row: dict) -> None:
+        result = normalizer.normalize(valid_row)
+        assert "text" in result and "source_url" in result
+
+    def test_normalize_raises_on_invalid(self, normalizer: RowNormalizer) -> None:
+        with pytest.raises(ValueError, match="normalize\\(\\) called on invalid row"):
+            normalizer.normalize({"url": "x"})
+
+    def test_source_text_field_recorded(self, normalizer: RowNormalizer, valid_row: dict) -> None:
+        assert normalizer.normalize(valid_row)["_source_text_field"] == "text"
+
+    def test_contents_renamed_to_text(self, normalizer: RowNormalizer) -> None:
+        row = {"contents": "A" * 60, "created_timestamp": "", "downloaded_timestamp": "", "url": "x"}
+        result = normalizer.normalize(row)
+        assert "text" in result and "contents" not in result
+
+
+class TestDatasetLoader:
+    @patch("datasets.load_dataset")
+    def test_load_passes_revision(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_load.return_value = _mock_ds([valid_row])
+        list(loader.load())
+        assert mock_load.call_args.kwargs["revision"] == loader._config.revision
+
+    @patch("datasets.load_dataset")
+    def test_load_no_trust_remote_code(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
+        mock_load.return_value = _mock_ds([valid_row])
+        list(loader.load())
+        assert "trust_remote_code" not in mock_load.call_args.kwargs
+
+    def test_load_raises_on_mutable_revision(self, config: DatasetConfig) -> None:
+        config.revision = "main"  # type: ignore[misc]
+        loader = DatasetLoader(config)
+        with pytest.raises(RuntimeError, match="Reproducibility violation"):
+            list(loader.load())
+
+    @patch("datasets.load_dataset")
+    def test_iter_valid_rows_filters_invalid(self, mock_load, loader: DatasetLoader, valid_row: dict) -> None:
+        rows = list(loader.iter_valid_rows([valid_row, {"url": "x"}, valid_row]))
+        assert len(rows) == 2
+
+    def test_get_provenance_has_required_keys(self, loader: DatasetLoader) -> None:
+        prov = loader.get_provenance()
+        assert {"dataset", "subset", "split", "revision", "reproducible"}.issubset(prov.keys())
+
+
+class TestLightningDataModuleImport:
+    def test_import_without_lightning_does_not_crash(self) -> None:
+        from src.lightning_datamodule import CourtListenerDataModule, CourtListenerIterableDataset
+
+        assert CourtListenerDataModule is not None
+        assert CourtListenerIterableDataset is not None
