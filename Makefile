@@ -200,3 +200,18 @@ sbom:
 	$(VENV_BIN)/python -m cyclonedx_py environment --of JSON --output-file logs/sbom.json
 	$(VENV_BIN)/python -m cyclonedx_py environment --of XML  --output-file logs/sbom.xml
 	@echo "SBOM written: logs/sbom.json + logs/sbom.xml"
+
+# Dataset probe targets
+add-probe: ## Stage and commit all dataset probe files with standard message
+	git add src/dataset_probe.py src/dataset_config.py src/dataset_loader.py \
+		src/row_validator.py src/row_normalizer.py src/lightning_datamodule.py \
+		tests/test_dataset_probe_contract.py tests/test_dataset_probe_normalization.py \
+		tests/test_dataset_probe_reproducibility.py tests/test_dataset_probe_loader.py \
+		tests/test_dataset_probe_edge_cases.py tests/test_dataset_probe_fixtures.py \
+		tests/test_dataset_probe_quality_signals.py tests/test_dataset_loader.py \
+		tests/fixtures/ configs/data/
+	git commit -m "chore: update dataset probe and associated tests"
+
+check-secrets: ## Run detect-secrets scan and update baseline
+	.venv/bin/detect-secrets scan --exclude-files '.*\.lock$$|.*\.log$$' > .secrets.baseline
+	git add .secrets.baseline
