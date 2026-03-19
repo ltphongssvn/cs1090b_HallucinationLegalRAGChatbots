@@ -23,6 +23,11 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "courtlistener_sample.json"
 
 
 def _mock_iterable_dataset(rows: list[dict]) -> MagicMock:
+    """Return a MagicMock simulating HF IterableDataset.
+    __iter__ returns a fresh iterator each call — this is test infrastructure
+    for verifying call arguments. The probe's single-pass contract is tested
+    separately via test_pipeline_consumes_source_once.
+    """
     mock_ds = MagicMock()
     mock_ds.__iter__ = MagicMock(side_effect=lambda: iter(rows))
     return mock_ds
@@ -314,6 +319,17 @@ class TestIterValidRows:
         for row in probe.iter_valid_rows([pinned_row, {"url": "bad"}, pinned_row]):
             assert probe.validate_row(row) == []
 
+    def test_pipeline_consumes_source_once(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
+        """Single-pass contract: iter_valid_rows() exhausts the source iterator once.
+        Callers must not assume the source is re-iterable — use load() again for
+        a second pass. A bare iterator is exhausted after one consumption.
+        """
+        single_pass_source = iter([pinned_row, pinned_row])  # bare iterator — not re-iterable
+        results = list(probe.iter_valid_rows(single_pass_source))
+        assert len(results) == 2
+        # Consuming again yields nothing — source is exhausted
+        assert list(probe.iter_valid_rows(single_pass_source)) == []
+
 
 class TestNormalizeRow:
     def test_preserves_upstream_metadata(self, probe: CourtListenerDatasetProbe, pinned_row: dict) -> None:
@@ -385,9 +401,15 @@ class TestCourtListenerDatasetProbeLoad:
         assert probe.validate_row(next(iter(probe.load()))) == []
 
     @patch("datasets.load_dataset")
-    def test_mock_supports_multiple_iter_calls(
+    def test_mock_is_re_iterable_for_test_infrastructure(
         self, mock_load, probe: CourtListenerDatasetProbe, pinned_row: dict
     ) -> None:
+        """The mock is re-iterable by design for argument inspection in tests.
+        This is test infrastructure — not a claim about HF IterableDataset behavior.
+        Production use should treat load() as single-pass per the docstring contract.
+        """
         mock_load.return_value = _mock_iterable_dataset([pinned_row])
         ds = probe.load()
-        assert list(ds) == list(ds) == [pinned_row]
+        first = list(ds)
+        second = list(ds)
+        assert first == second == [pinned_row]
