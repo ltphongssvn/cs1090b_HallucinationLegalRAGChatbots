@@ -3,6 +3,10 @@
 # Path: cs1090b_HallucinationLegalRAGChatbots/setup.sh
 # Thin orchestrator — sources modular scripts, then runs each step.
 set -euo pipefail
+
+# Unset CUDA_VISIBLE_DEVICES so setup.sh detects all physical GPUs.
+# Individual training jobs should set this via their scheduler (SLURM/PBS).
+unset CUDA_VISIBLE_DEVICES 2>/dev/null || true
 [ "${DEBUG:-0}" = "1" ] && set -x
 export PYTHONHASHSEED=0
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
