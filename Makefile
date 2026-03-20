@@ -222,3 +222,13 @@ ingest-dataset: ## Run ingestion pipeline — materializes HF dataset as local a
 		--max-samples $(MAX_SAMPLES) \
 		--project $(WANDB_PROJECT) \
 		--wandb-mode $(WANDB_MODE)
+
+test: ## Run full test suite (unit + artifact + shell)
+	$(UV) run pytest tests/ -m unit -q --tb=short
+	cd $(PROJECT_ROOT) && bash scripts/validate_tests.sh || true
+
+test-unit: ## Run unit tests only (fast gate)
+	$(UV) run pytest tests/ -m unit -q --tb=short
+
+test-artifact: ## Run artifact verification tests (requires setup.sh to have run)
+	$(UV) run pytest tests/test_environment_artifacts.py -m artifact -v
