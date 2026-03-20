@@ -14,11 +14,13 @@
 #          VERBOSE=1   bash setup.sh   (alias for LOG_LEVEL=2)
 # ===========================================================================
 # Hardware target constants
+# Updated 2026-03-20: cluster allocated NVIDIA A10G (was L4)
+# A10G: compute cap [8,6], 23GB VRAM, 4x GPUs — same count and VRAM as L4
 # ===========================================================================
-TARGET_GPU_NAME="L4"
+TARGET_GPU_NAME="A10G"
 TARGET_GPU_COUNT=4
 TARGET_COMPUTE_CAP_MAJOR=8
-TARGET_COMPUTE_CAP_MINOR=9
+TARGET_COMPUTE_CAP_MINOR=6
 TARGET_VRAM_GB_MIN=22.0
 TARGET_TORCH_CUDA_RUNTIME="11.7"
 TARGET_DRIVER_CUDA="12.8"
@@ -89,7 +91,6 @@ step_end() {
         DRY)  SUMMARY_STATUS+=("${C_MAGENTA}DRY${C_RESET}") ;;
         *)    SUMMARY_STATUS+=("${C_RED}FAIL${C_RESET}") ;;
     esac
-    # Use if/fi — avoids set -e killing script when LOG_LEVEL < 2
     if [ "${LOG_LEVEL}" -ge 2 ]; then
         echo -e "  ${C_DIM}(${duration}s)${C_RESET}"
     fi
@@ -121,9 +122,7 @@ run_step() {
     step_begin "$fn"; "$fn" "$@"; step_end "$fn" "PASS"
 }
 # ===========================================================================
-# Messaging helpers — use if/fi throughout to avoid set -e footguns.
-# The pattern '[ condition ] && cmd' exits 1 when condition is false,
-# which kills the script under set -e. Always use if/fi instead.
+# Messaging helpers
 # ===========================================================================
 _msg_error() {
     local topic="$1" what="$2" why="$3" fix="$4"
@@ -164,7 +163,7 @@ _msg_dry_run() {
 }
 _is_dry_run() { [ "${DRY_RUN:-0}" = "1" ]; }
 # ===========================================================================
-# Strict failure handling — ERR trap + signal handlers
+# Strict failure handling
 # ===========================================================================
 _on_error() {
     local line="$1" cmd="$2"
