@@ -35,7 +35,6 @@ dependencies = [
   "python-dotenv>=1.0",
   "tqdm>=4.66",
 ]
-
 [dependency-groups]
 dev = [
     "hypothesis>=6.151.9",
@@ -51,34 +50,29 @@ dev = [
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]
-
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",
 ]
 markers = [
     "unit: Pure function tests, no I/O",
+    "artifact: Requires setup.sh artifacts (manifest, kernelspec, venv)",
     "integration: Pipeline on frozen fixtures",
     "contract: Schema, provenance, quality thresholds",
     "regression: Guard against schema drift",
     "gpu: Requires CUDA GPU",
 ]
-
 [tool.ruff]
 line-length = 120
-
 [tool.ruff.lint]
 per-file-ignores = {"tests/*.py" = ["E402"]}
 select = ["E", "F", "I"]
 ignore = ["E501"]
-
 [tool.mypy]
 ignore_missing_imports = false
-
 [[tool.mypy.overrides]]
 module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm"]
 ignore_missing_imports = true
-
 [tool.coverage.run]
 source = ["src"]
 branch = true
@@ -87,7 +81,6 @@ omit = [
     "src/manifest_collector.py",
     "src/drift_check.py",
 ]
-
 [tool.coverage.report]
 fail_under = 80
 show_missing = true
