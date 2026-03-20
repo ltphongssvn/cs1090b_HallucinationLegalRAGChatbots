@@ -1,12 +1,8 @@
 #!/usr/bin/env bats
 # tests/shell/test_failure_paths.bats
-# Failure-path tests — the cases where setup scripts commonly break.
 
 load helpers
 
-# ===========================================================================
-# 1. Missing uv
-# ===========================================================================
 @test "check_uv exits 1 when uv not on PATH" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/bootstrap_env.sh"
@@ -44,11 +40,6 @@ load helpers
     rm -f "$fake_uv"
 }
 
-# ===========================================================================
-# 2. Missing pyproject.toml
-# check_lockfile calls _require_project_root first, which emits "Wrong directory"
-# when pyproject.toml is absent. Assert on the actual output.
-# ===========================================================================
 @test "check_lockfile exits 1 with error when pyproject.toml absent" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/bootstrap_env.sh"
@@ -56,7 +47,6 @@ load helpers
     PROJECT_ROOT="$tmpdir"
     run check_lockfile
     [ "$status" -eq 1 ]
-    # _require_project_root fires before the lockfile check
     assert_contains "$output" "ERROR"
     rm -rf "$tmpdir"
 }
@@ -77,7 +67,6 @@ load helpers
     source "$PROJECT_ROOT/scripts/bootstrap_env.sh"
     local tmpdir; tmpdir=$(mktemp -d)
     PROJECT_ROOT="$tmpdir"
-    # Satisfy _require_project_root so lockfile check runs
     touch "$tmpdir/pyproject.toml"
     run check_lockfile
     [ "$status" -eq 1 ]
@@ -88,8 +77,6 @@ load helpers
 }
 
 @test "_require_project_root is the first gate in preflight_fast_checks" {
-    # Directly test _require_project_root with missing pyproject.toml — simpler
-    # and more deterministic than running the full preflight_fast_checks in a subshell.
     source "$PROJECT_ROOT/scripts/lib.sh"
     local tmpdir; tmpdir=$(mktemp -d)
     PROJECT_ROOT="$tmpdir"
@@ -99,9 +86,6 @@ load helpers
     rm -rf "$tmpdir"
 }
 
-# ===========================================================================
-# 3. Incompatible Python version
-# ===========================================================================
 @test "_require_python exits 1 when PYTHON binary is missing" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     PYTHON="/nonexistent/.venv/bin/python_$$"
@@ -142,16 +126,16 @@ load helpers
     rm -rf "$tmpdir"
 }
 
-# ===========================================================================
-# 4. Missing NVIDIA tools
-# ===========================================================================
 @test "_check_nvidia_smi_present fails when nvidia-smi absent from PATH" {
+    # Use an isolated tmpdir as PATH to guarantee nvidia-smi is absent
+    local empty_dir; empty_dir=$(mktemp -d)
     run bash -c "
         source '$PROJECT_ROOT/scripts/lib.sh'
         source '$PROJECT_ROOT/scripts/validate_gpu.sh'
-        PATH='/usr/bin:/bin'
+        PATH='$empty_dir'
         _check_nvidia_smi_present
     "
+    rm -rf "$empty_dir"
     [ "$status" -eq 1 ]
     assert_contains "$output" "nvidia-smi not found"
 }
@@ -182,9 +166,6 @@ load helpers
     SKIP_GPU=0
 }
 
-# ===========================================================================
-# 5. CPU-only mode (SKIP_GPU=1)
-# ===========================================================================
 @test "run_gpu_smoke_tests in SKIP_GPU=1 records SKIP in summary" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/validate_gpu.sh"
@@ -210,9 +191,6 @@ load helpers
     SKIP_GPU=0
 }
 
-# ===========================================================================
-# 6. Bad torch build
-# ===========================================================================
 @test "run_env_smoke_tests fails with fix hint for CPU-only torch wheel" {
     PYTHON="$PROJECT_ROOT/.venv/bin/python"
     if [ ! -x "$PYTHON" ]; then skip "venv not yet built"; fi
@@ -233,17 +211,11 @@ if not (ver.startswith('2.') and 'cu' in ver):
     assert_contains "$output" "rm -rf .venv"
 }
 
-# ===========================================================================
-# 7. Jupyter absent — DRY_RUN=1 must NOT call _require_python
-# register_kernel now checks DRY_RUN before _require_python,
-# so any python binary works in dry-run mode.
-# ===========================================================================
 @test "register_kernel in DRY_RUN=1 does not require venv Python" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/setup_notebook.sh"
     DRY_RUN=1
     TARGET_PYTHON_VERSION="3.11.9"
-    # Point PYTHON to a non-existent path — DRY_RUN must not invoke it
     PYTHON="/nonexistent/.venv/bin/python_$$"
     SUMMARY_STEPS=(); SUMMARY_STATUS=(); SUMMARY_DURATION=()
     SETUP_START_TIME=$(date +%s); _step_start_time=$(date +%s)
@@ -269,9 +241,6 @@ if not (ver.startswith('2.') and 'cu' in ver):
     NO_JUPYTER=0
 }
 
-# ===========================================================================
-# 8. _require_hardware_detected triggers when UNDETECTED
-# ===========================================================================
 @test "_require_hardware_detected warns when DETECTED_GPU_COUNT is UNDETECTED" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/validate_gpu.sh"
@@ -284,9 +253,6 @@ if not (ver.startswith('2.') and 'cu' in ver):
     assert_contains "$output" "UNDETECTED"
 }
 
-# ===========================================================================
-# 9. .env missing for write_repro_module
-# ===========================================================================
 @test "write_repro_module exits 1 with structured error when .env absent" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/setup_notebook.sh"
@@ -300,9 +266,6 @@ if not (ver.startswith('2.') and 'cu' in ver):
     rm -rf "$tmpdir"
 }
 
-# ===========================================================================
-# 10. uv.lock missing for write_manifest
-# ===========================================================================
 @test "write_manifest exits 1 with structured error when uv.lock absent" {
     source "$PROJECT_ROOT/scripts/lib.sh"
     source "$PROJECT_ROOT/scripts/manifest.sh"
