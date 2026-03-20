@@ -108,9 +108,10 @@ run_step run_env_smoke_tests
 run_step run_gpu_smoke_tests
 run_step write_manifest
 run_step register_kernel
+run_step verify_tests
 print_summary
 echo -e "${C_BOLD}============================================================${C_RESET}"
-echo -e "${C_GREEN}${C_BOLD} Environment ready.${C_RESET}"
+echo -e "${C_GREEN}${C_BOLD} Environment ready — full certification passed.${C_RESET}"
 echo -e ""
 echo -e " ${C_BOLD}Quick reference:${C_RESET}"
 echo -e "   Activate venv:  source .venv/bin/activate"
