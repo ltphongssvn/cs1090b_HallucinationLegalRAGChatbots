@@ -76,7 +76,7 @@ class CourtListenerDataModule:
         self._num_workers = num_workers
         self._max_length = max_length
 
-    def setup(self, stage: str | None = None) -> None:
+    def setup(self, _stage: str | None = None) -> None:
         loader = DatasetLoader(self._config)
         self._dataset = CourtListenerIterableDataset(loader, self._tokenizer, self._max_length)
 
