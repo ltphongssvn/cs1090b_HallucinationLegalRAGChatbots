@@ -14,7 +14,8 @@ assert torch.allclose(t.mean(),torch.tensor(2.0))
 print(f'  \033[0;32m✓\033[0m torch {ver} — tensor op ok')
 "
     $PYTHON -c "
-import transformers, sys
+import warnings, transformers, sys
+warnings.filterwarnings('ignore', category=FutureWarning, module='huggingface_hub')
 from transformers import AutoTokenizer
 tok=AutoTokenizer.from_pretrained('bert-base-uncased',local_files_only=False)
 ids=tok('hello world',return_tensors='pt')
@@ -101,7 +102,8 @@ run_shell_tests() {
 _run_cpu_inference_smoke_test() {
     _msg_info "Running CPU inference smoke test (real forward pass)..."
     $PYTHON -c "
-import sys, torch, torch.nn as nn
+import warnings, sys, torch, torch.nn as nn
+warnings.filterwarnings('ignore', category=FutureWarning, module='huggingface_hub')
 from transformers import AutoTokenizer
 
 try:
@@ -196,7 +198,8 @@ _run_bert_gpu_inference() {
     _require_python
     _msg_info "Running BERT GPU inference check (bert-base-uncased encoder on cuda:0)..."
     $PYTHON -c "
-import sys, torch
+import warnings, sys, torch
+warnings.filterwarnings('ignore', category=FutureWarning, module='huggingface_hub')
 from transformers import AutoTokenizer, AutoModel
 
 if not torch.cuda.is_available():
