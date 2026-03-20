@@ -112,3 +112,63 @@ class TestRunIngestion:
         mock_load.return_value = _mock_hf_source([])
         run_ingestion(str(tmp_path), dry_run=True, wandb_mode="disabled")
         assert mock_init.call_args.kwargs["job_type"] == "ingestion"
+
+
+class TestSha256Dir:
+    def test_sha256_dir_hashes_files(self, tmp_path) -> None:
+        from src.ingest import _sha256_dir
+
+        (tmp_path / "a.txt").write_bytes(b"hello")
+        (tmp_path / "b.txt").write_bytes(b"world")
+        result = _sha256_dir(tmp_path)
+        assert isinstance(result, str)
+        assert len(result) == 64
+
+    def test_sha256_dir_ignores_manifest(self, tmp_path) -> None:
+        from src.ingest import _sha256_dir
+
+        (tmp_path / "a.txt").write_bytes(b"hello")
+        (tmp_path / "artifact_manifest.json").write_bytes(b"should be ignored")
+        h1 = _sha256_dir(tmp_path)
+        (tmp_path / "artifact_manifest.json").write_bytes(b"different content")
+        h2 = _sha256_dir(tmp_path)
+        assert h1 == h2
+
+
+class TestRunIngestionCoverage:
+    @patch("wandb.finish")
+    @patch("wandb.Artifact")
+    @patch("wandb.log")
+    @patch("wandb.summary", new_callable=dict)
+    @patch("wandb.Table")
+    @patch("wandb.init")
+    @patch("datasets.load_dataset")
+    @patch("datasets.Dataset")
+    def test_rejected_rows_logged_in_full_run(
+        self,
+        mock_ds_cls,
+        mock_load,
+        mock_init,
+        mock_table,
+        mock_summary,
+        mock_log,
+        mock_artifact,
+        mock_finish,
+        tmp_path,
+    ) -> None:
+        from src.ingest import run_ingestion
+
+        valid_row = {
+            "text": "The court held that the defendant failed to establish. " * 3,
+            "created_timestamp": "2022-01-15",
+            "downloaded_timestamp": "2022-06-01",
+            "url": "https://courtlistener.com/opinion/1/",
+        }
+        bad_row = {"url": "x"}
+        mock_run = MagicMock()
+        mock_init.return_value = mock_run
+        mock_load.return_value = _mock_hf_source([valid_row, bad_row])
+        mock_ds_cls.from_list.return_value = MagicMock()
+        result = run_ingestion(str(tmp_path), max_samples=10, wandb_mode="disabled")
+        assert result["n_rejected"] == 1
+        assert result["n_valid"] == 1
