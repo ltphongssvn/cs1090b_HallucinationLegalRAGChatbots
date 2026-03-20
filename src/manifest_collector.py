@@ -136,6 +136,14 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
+    # Apply reproducibility settings before collecting stability flags
+    try:
+        from src.repro import configure  # type: ignore[import]
+
+        configure()
+    except Exception:
+        pass  # repro.py may not exist on first run before write_repro_module
+
     freeze_parsed = parse_freeze(args.freeze) if args.freeze not in ("unavailable", "") else {}
     gpus = get_gpu_list()
     nlp = spacy.load(args.spacy_model)
