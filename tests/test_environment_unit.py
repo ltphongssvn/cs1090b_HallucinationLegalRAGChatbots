@@ -1,5 +1,6 @@
 # tests/test_environment_unit.py
 # Unit tests for src/environment.py — mock-based, no GPU required.
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -161,3 +162,81 @@ class TestCompatRuleDataclass:
         rule = CompatRule(name="r", check=lambda: False, message="m", severity="warn")
         assert rule.severity == "warn"
         assert rule.check() is False
+
+
+class TestRunPreflightChecks:
+    def _good_repro_cfg(self) -> dict:
+        return {
+            "PYTHONHASHSEED": "0",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            "TOKENIZERS_PARALLELISM": "false",
+            "deterministic_algorithms": True,
+            "cudnn_benchmark": False,
+            "cudnn_deterministic": True,
+        }
+
+    def test_raises_preflight_error_when_no_repro_cfg(self) -> None:
+        from src.environment import PreflightError, run_preflight_checks
+
+        with pytest.raises(PreflightError, match="repro_cfg not provided"):
+            run_preflight_checks(repro_cfg=None)
+
+    def test_raises_preflight_error_on_wrong_repro_cfg_value(self) -> None:
+        from src.environment import PreflightError, run_preflight_checks
+
+        cfg = self._good_repro_cfg()
+        cfg["PYTHONHASHSEED"] = "99"
+        with pytest.raises(PreflightError):
+            run_preflight_checks(repro_cfg=cfg)
+
+    def test_passes_with_fully_mocked_gpu_environment(self) -> None:
+        import src.environment as env_mod
+        from src.environment import run_preflight_checks
+
+        cfg = self._good_repro_cfg()
+        mock_props = MagicMock()
+        mock_props.total_memory = 24 * 1_000_000_000
+
+        mock_cuda = MagicMock()
+        mock_cuda.is_available.return_value = True
+        mock_cuda.device_count.return_value = 1
+        mock_cuda.get_device_name.return_value = "NVIDIA A10G"
+        mock_cuda.get_device_capability.return_value = (8, 6)
+        mock_cuda.get_device_properties.return_value = mock_props
+
+        mock_version = MagicMock()
+        mock_version.cuda = "11.7"
+
+        mock_cudnn = MagicMock()
+        mock_cudnn.benchmark = False
+        mock_cudnn.deterministic = True
+
+        mock_backends = MagicMock()
+        mock_backends.cudnn = mock_cudnn
+
+        mock_torch = MagicMock()
+        mock_torch.cuda = mock_cuda
+        mock_torch.version = mock_version
+        mock_torch.backends = mock_backends
+        mock_torch.are_deterministic_algorithms_enabled.return_value = True
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PYTHONHASHSEED": "0",
+                    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                    "TOKENIZERS_PARALLELISM": "false",
+                },
+                clear=False,
+            ),
+            patch.object(env_mod, "PREFLIGHT_GPU_NAME", "A10G"),
+            patch.object(env_mod, "PREFLIGHT_GPU_COUNT", 1),
+            patch.object(env_mod, "PREFLIGHT_VRAM_GB_MIN", 22.0),
+            patch.object(env_mod, "PREFLIGHT_COMPUTE_CAP_MIN", (8, 6)),
+            patch.object(env_mod, "PREFLIGHT_TORCH_CUDA", "11.7"),
+            patch.object(env_mod, "PREFLIGHT_MIN_DISK_GB", 0.1),
+            patch.dict("sys.modules", {"torch": mock_torch}),
+            patch("src.environment.importlib.import_module"),
+        ):
+            run_preflight_checks(repro_cfg=cfg)
