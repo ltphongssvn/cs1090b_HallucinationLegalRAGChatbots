@@ -114,7 +114,7 @@ write_manifest() {
     echo "$freeze_output" > "$freeze_tmp"
 
     local manifest_json
-    manifest_json=$($PYTHON "${PROJECT_ROOT}/src/manifest_collector.py" \
+    manifest_json=$(PYTHONPATH="${PROJECT_ROOT}" $PYTHON "${PROJECT_ROOT}/src/manifest_collector.py" \
         --git-sha            "$git_sha" \
         --git-branch         "$git_branch" \
         --git-dirty          "$git_dirty" \
