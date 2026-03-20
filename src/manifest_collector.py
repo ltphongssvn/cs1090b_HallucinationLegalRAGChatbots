@@ -1,6 +1,6 @@
 # src/manifest_collector.py
-# Path: cs1090b_HallucinationLegalRAGChatbots/src/manifest_collector.py
 import argparse
+import contextlib
 import importlib.metadata as meta
 import json
 import multiprocessing
@@ -136,18 +136,20 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
-    # Apply reproducibility settings before collecting stability flags
+    # Apply reproducibility settings before collecting stability flags.
+    # Redirect stdout to stderr — manifest_collector prints pure JSON to stdout;
+    # configure() prints human-readable status which must not pollute that stream.
     try:
         from src.repro import configure  # type: ignore[import]
 
-        configure()
+        with contextlib.redirect_stdout(sys.stderr):
+            configure()
     except Exception:
         pass  # repro.py may not exist on first run before write_repro_module
 
     freeze_parsed = parse_freeze(args.freeze) if args.freeze not in ("unavailable", "") else {}
     gpus = get_gpu_list()
     nlp = spacy.load(args.spacy_model)
-
     return {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "git_sha": args.git_sha,
@@ -273,7 +275,6 @@ def main() -> None:
     parser.add_argument("--spacy-model", required=True)
     parser.add_argument("--spacy-model-sha256", required=True)
     parser.add_argument("--freeze", default="unavailable")
-
     args = parser.parse_args()
     data = collect(args)
     print(json.dumps(data))
