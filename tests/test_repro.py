@@ -94,3 +94,115 @@ class TestSeedAll:
         _seed_all(2)
         v2 = random.random()
         assert v1 != v2
+
+
+class TestApplyTorchFlags:
+    def test_sets_cublas_env_var(self) -> None:
+        from src.repro import _apply_torch_flags
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+            _apply_torch_flags()
+            assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") == ":4096:8"
+
+    def test_deterministic_algorithms_enabled(self) -> None:
+        import torch
+
+        from src.repro import _apply_torch_flags
+
+        _apply_torch_flags()
+        assert torch.are_deterministic_algorithms_enabled()
+
+    def test_cudnn_benchmark_disabled(self) -> None:
+        import torch
+
+        from src.repro import _apply_torch_flags
+
+        _apply_torch_flags()
+        assert torch.backends.cudnn.benchmark is False
+
+    def test_cudnn_deterministic_enabled(self) -> None:
+        import torch
+
+        from src.repro import _apply_torch_flags
+
+        _apply_torch_flags()
+        assert torch.backends.cudnn.deterministic is True
+
+
+class TestSeedAllTorch:
+    def test_seeds_torch(self) -> None:
+        import torch
+
+        from src.repro import _seed_all
+
+        _seed_all(42)
+        v1 = torch.rand(1).item()
+        _seed_all(42)
+        v2 = torch.rand(1).item()
+        assert v1 == v2
+
+
+class TestVerify:
+    def test_verify_passes_with_correct_env(self) -> None:
+        from src.repro import _apply_torch_flags, _verify
+
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONHASHSEED": "0",
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "TOKENIZERS_PARALLELISM": "false",
+            },
+            clear=False,
+        ):
+            _apply_torch_flags()
+            result = _verify()
+            assert result["deterministic_algorithms"] is True
+            assert result["cudnn_benchmark"] is False
+            assert result["cudnn_deterministic"] is True
+
+    def test_verify_raises_on_wrong_pythonhashseed(self) -> None:
+        from src.repro import _verify
+
+        with patch.dict(os.environ, {"PYTHONHASHSEED": "99"}, clear=False):
+            with pytest.raises(AssertionError, match="PYTHONHASHSEED"):
+                _verify()
+
+
+class TestConfigure:
+    def test_configure_verbose_prints(self, tmp_path: Path, capsys) -> None:
+        from src.repro import configure
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("PYTHONHASHSEED=0\nCUBLAS_WORKSPACE_CONFIG=:4096:8\nTOKENIZERS_PARALLELISM=false\n")
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONHASHSEED": "0",
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "TOKENIZERS_PARALLELISM": "false",
+            },
+            clear=False,
+        ):
+            configure(project_root=tmp_path, verbose=True)
+        captured = capsys.readouterr()
+        assert "Reproducibility configured" in captured.out
+
+    def test_configure_returns_dict(self, tmp_path: Path) -> None:
+        from src.repro import configure
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("PYTHONHASHSEED=0\nCUBLAS_WORKSPACE_CONFIG=:4096:8\nTOKENIZERS_PARALLELISM=false\n")
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONHASHSEED": "0",
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "TOKENIZERS_PARALLELISM": "false",
+            },
+            clear=False,
+        ):
+            result = configure(project_root=tmp_path, verbose=False)
+        assert isinstance(result, dict)
+        assert "deterministic_algorithms" in result
