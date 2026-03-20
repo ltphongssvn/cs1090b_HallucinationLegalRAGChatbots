@@ -28,3 +28,4 @@ Thumbs.db
 .python-version
 src/repro.py
 .hypothesis/
+tests/shell/bats-core/
