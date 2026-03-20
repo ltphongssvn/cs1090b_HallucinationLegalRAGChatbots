@@ -2,30 +2,47 @@
 # scripts/lib.sh
 # Path: cs1090b_HallucinationLegalRAGChatbots/scripts/lib.sh
 # Shared constants, color helpers, step framework, messaging, and defensive guards.
-# Sourced by setup.sh and all scripts/*.sh — defines functions only, no execution.
 #
-# Log levels (set via LOG_LEVEL env var):
-#   LOG_LEVEL=0 — quiet:   ERROR only
-#   LOG_LEVEL=1 — normal:  ERROR + WARN + OK  (default)
-#   LOG_LEVEL=2 — verbose: all messages including INFO
-#
-# Example: LOG_LEVEL=0 bash setup.sh   (CI — errors only)
-#          LOG_LEVEL=2 bash setup.sh   (debugging — all output)
-#          VERBOSE=1   bash setup.sh   (alias for LOG_LEVEL=2)
+# GPU constants are auto-detected at runtime — supports both cluster nodes:
+#   gpu-dy-gpu-cr-12: 4x NVIDIA L4    (compute cap 8.9, 23GB)
+#   gpu-dy-gpu-cr-15: 4x NVIDIA A10G  (compute cap 8.6, 23GB)
 # ===========================================================================
-# Hardware target constants
-# Updated 2026-03-20: cluster allocated NVIDIA A10G (was L4)
-# A10G: compute cap [8,6], 23GB VRAM, 4x GPUs — same count and VRAM as L4
+# Hardware target constants — GPU auto-detected below
 # ===========================================================================
-TARGET_GPU_NAME="A10G"
 TARGET_GPU_COUNT=4
-TARGET_COMPUTE_CAP_MAJOR=8
-TARGET_COMPUTE_CAP_MINOR=6
 TARGET_VRAM_GB_MIN=22.0
 TARGET_TORCH_CUDA_RUNTIME="11.7"
 TARGET_DRIVER_CUDA="12.8"
 TARGET_PYTHON_VERSION="3.11.9"
 TARGET_MIN_DISK_GB=50
+
+# Auto-detect GPU type from nvidia-smi and set GPU-specific constants
+_detect_target_gpu() {
+    local gpu_name=""
+    if command -v nvidia-smi &>/dev/null; then
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "")
+    fi
+    case "$gpu_name" in
+        *A10G*)
+            TARGET_GPU_NAME="A10G"
+            TARGET_COMPUTE_CAP_MAJOR=8
+            TARGET_COMPUTE_CAP_MINOR=6
+            ;;
+        *L4*)
+            TARGET_GPU_NAME="L4"
+            TARGET_COMPUTE_CAP_MAJOR=8
+            TARGET_COMPUTE_CAP_MINOR=9
+            ;;
+        *)
+            # Fallback — unknown GPU, use permissive defaults
+            TARGET_GPU_NAME="${gpu_name:-UNKNOWN}"
+            TARGET_COMPUTE_CAP_MAJOR=8
+            TARGET_COMPUTE_CAP_MINOR=0
+            ;;
+    esac
+}
+_detect_target_gpu
+
 # ===========================================================================
 # Reproducibility constants
 # ===========================================================================
