@@ -263,3 +263,52 @@ class TestKernelspec:
     @skip_no_kernelspec
     def test_language_is_python(self) -> None:
         assert self._load().get("language") == "python"
+
+
+@pytest.mark.unit
+class TestFailurePaths:
+    """Python-level failure path tests migrated from test_failure_paths.bats."""
+
+    @skip_no_venv
+    def test_torch_is_cuda_build_not_cpu(self) -> None:
+        r = _venv_run("import torch; v=torch.__version__; assert 'cu' in v, f'CPU wheel: {v}'; print('ok')")
+        assert r.returncode == 0
+
+    @skip_no_venv
+    def test_faiss_index_search_shape(self) -> None:
+        r = _venv_run("""
+import faiss, numpy as np
+idx = faiss.IndexFlatL2(8)
+vecs = np.random.rand(5, 8).astype('float32')
+idx.add(vecs)
+D, I = idx.search(vecs[:1], 2)
+assert I.shape == (1, 2), f'bad shape: {I.shape}'
+print('ok')
+""")
+        assert r.returncode == 0
+
+    @skip_no_venv
+    def test_spacy_model_wrong_version_fails(self) -> None:
+        r = _venv_run("""
+import spacy, sys
+nlp = spacy.load('en_core_web_sm')
+v = nlp.meta.get('version')
+if v != '3.8.0':
+    print(f'wrong version: {v}')
+    sys.exit(1)
+print('ok')
+""")
+        assert r.returncode == 0
+
+    @skip_no_venv
+    def test_repro_configure_sets_deterministic(self) -> None:
+        r = _venv_run("""
+import sys
+sys.path.insert(0, '.')
+from src.repro import configure
+configure()
+import torch
+assert torch.are_deterministic_algorithms_enabled(), 'deterministic not enabled'
+print('ok')
+""")
+        assert r.returncode == 0
