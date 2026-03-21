@@ -1,0 +1,26 @@
+# configs/data/legal_rag.yaml
+# Hydra override config for CourtListenerDatasetProbe pipeline.
+# Override any field without touching src/dataset_config.py.
+#
+# Usage:
+#   python train.py data=legal_rag
+#   python train.py data=legal_rag data.min_text_length=100
+#   python train.py data=legal_rag data.reproducible=false
+
+defaults:
+  - _self_
+
+dataset_id: "pile-of-law/pile-of-law"
+subset: "r_courtlistener_opinions"
+split: "train"
+revision: "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
+reproducible: true
+min_text_length: 50
+streaming: true
+text_fields:
+  - "text"
+  - "contents"
+required_fields:
+  - "created_timestamp"
+  - "downloaded_timestamp"
+  - "url"

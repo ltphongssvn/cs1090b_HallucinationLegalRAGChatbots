@@ -1,0 +1,16 @@
+{
+  "text": "The court held that the defendant failed to establish a genuine issue of material fact sufficient to defeat summary judgment under Federal Rule of Civil Procedure 56.",
+  "created_timestamp": "2022-01-15",
+  "downloaded_timestamp": "2022-06-01",
+  "url": "https://courtlistener.com/opinion/123456/smith-v-jones/",
+  "_fixture_meta": {
+    "sampled_at": "2026-03-18",
+    "dataset": "pile-of-law/pile-of-law",
+    "subset": "r_courtlistener_opinions",
+    "split": "train",
+    "revision": "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b",
+    "text_sha256": "5067f1d9eb0cf6c7781999be93652779718d8f0e21b6c4fae67580f4f2b6fb1a",
+    "hf_datasets_version": "4.7.0",
+    "probe_version": "1.0"
+  }
+}
