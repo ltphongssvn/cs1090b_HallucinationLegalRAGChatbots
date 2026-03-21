@@ -34,6 +34,7 @@ dependencies = [
   "ipywidgets>=8.1.8",
   "python-dotenv>=1.0",
   "tqdm>=4.66",
+  "rank-bm25>=0.2.2",
 ]
 [dependency-groups]
 dev = [
