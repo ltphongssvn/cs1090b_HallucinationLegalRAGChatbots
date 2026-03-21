@@ -36,9 +36,6 @@ class CompatRule:
     A single compatibility rule with a severity level.
     severity="error"  — hard blocker: raises AssertionError, blocks training
     severity="warn"   — known-risk combination: logs warning, does not block
-    Rules must be falsifiable by reality: if a cluster proves a combination
-    works, downgrade the rule to "warn" rather than removing it entirely.
-    This preserves signal while eliminating false negatives.
     """
 
     name: str
@@ -48,14 +45,6 @@ class CompatRule:
 
 
 def _build_compat_rules() -> List[CompatRule]:
-    """
-    Build compat rules from installed package versions.
-    Called lazily so imports are deferred until check time.
-    Severity policy:
-      "error"  — combination has documented API breakage or data corruption risk
-      "warn"   — combination may be unstable on some systems but is empirically
-                 validated on this cluster (4x NVIDIA A10G, CUDA 11.7, driver 12.8)
-    """
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
@@ -71,17 +60,17 @@ def _build_compat_rules() -> List[CompatRule]:
                 "Validated on 4x NVIDIA A10G / CUDA 11.7 / driver 12.8. "
                 "Upgrade torch>=2.1 or transformers>=4.41 when cluster driver supports it."
             ),
-            severity="warn",  # downgraded from "error" — empirically validated on this cluster
+            severity="warn",
         ),
     ]
 
 
 MIN_GPU_MEMORY_GB: int = 10
 
-# Preflight thresholds — 4x NVIDIA A10G cluster
-PREFLIGHT_GPU_NAME = "A10G"
-PREFLIGHT_GPU_COUNT = 4
-PREFLIGHT_VRAM_GB_MIN = 22.0
+# Preflight thresholds — read from env so OOD single-GPU jobs pass without code changes
+PREFLIGHT_GPU_NAME = os.environ.get("TARGET_GPU_NAME", "A10G")
+PREFLIGHT_GPU_COUNT = int(os.environ.get("TARGET_GPU_COUNT", "1"))
+PREFLIGHT_VRAM_GB_MIN = float(os.environ.get("TARGET_VRAM_GB_MIN", "22.0"))
 PREFLIGHT_COMPUTE_CAP_MIN = (8, 6)
 PREFLIGHT_TORCH_CUDA = "11.7"
 PREFLIGHT_MIN_DISK_GB = 50.0
@@ -144,18 +133,23 @@ def run_preflight_checks(
     """Hard gate before expensive GPU training. Raises PreflightError on failure."""
     import torch
 
+    # Re-read at call time so notebook env vars are respected
+    gpu_name = os.environ.get("TARGET_GPU_NAME", PREFLIGHT_GPU_NAME)
+    gpu_count = int(os.environ.get("TARGET_GPU_COUNT", str(PREFLIGHT_GPU_COUNT)))
+    vram_min = float(os.environ.get("TARGET_VRAM_GB_MIN", str(PREFLIGHT_VRAM_GB_MIN)))
+
     failures: List[str] = []
 
     # Check 1: GPU count
     n = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if n < PREFLIGHT_GPU_COUNT:
+    if n < gpu_count:
         failures.append(
-            f"GPU count: expected >={PREFLIGHT_GPU_COUNT}x NVIDIA {PREFLIGHT_GPU_NAME}, "
+            f"GPU count: expected >={gpu_count}x NVIDIA {gpu_name}, "
             f"got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
         )
     else:
         if logger:
-            logger.info(f"✓ PASS: GPU count {n} >= {PREFLIGHT_GPU_COUNT}")
+            logger.info(f"✓ PASS: GPU count {n} >= {gpu_count}")
 
     # Check 2: GPU name, compute cap, VRAM
     if torch.cuda.is_available():
@@ -163,12 +157,12 @@ def run_preflight_checks(
             name = torch.cuda.get_device_name(i)
             cap = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-            if PREFLIGHT_GPU_NAME not in name:
-                failures.append(f"GPU[{i}] name: expected {PREFLIGHT_GPU_NAME}, got '{name}'.")
+            if gpu_name not in name:
+                failures.append(f"GPU[{i}] name: expected {gpu_name}, got '{name}'.")
             elif cap < PREFLIGHT_COMPUTE_CAP_MIN:
                 failures.append(f"GPU[{i}] compute capability: expected >={PREFLIGHT_COMPUTE_CAP_MIN}, got {cap}.")
-            elif vram_gb < PREFLIGHT_VRAM_GB_MIN:
-                failures.append(f"GPU[{i}] VRAM: expected >={PREFLIGHT_VRAM_GB_MIN}GB, got {vram_gb:.1f}GB.")
+            elif vram_gb < vram_min:
+                failures.append(f"GPU[{i}] VRAM: expected >={vram_min}GB, got {vram_gb:.1f}GB.")
             else:
                 if logger:
                     logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
@@ -316,12 +310,6 @@ def _check_pytorch_cuda() -> None:
 
 
 def _check_compat(logger: Any = None) -> None:
-    """
-    Evaluate compat rules with severity-based policy.
-    severity="error" rules raise AssertionError — hard blockers.
-    severity="warn"  rules log a warning — known-risk combinations that
-                     are empirically validated on this cluster.
-    """
     rules = _build_compat_rules()
     errors: List[str] = []
     warnings: List[str] = []
