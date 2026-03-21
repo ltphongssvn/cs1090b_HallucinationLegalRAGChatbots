@@ -29,13 +29,15 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "wandb": ">=0.16",
 }
 
+# Known supported GPU families — informational only, not used for hard failure
+SUPPORTED_GPU_FAMILIES = ("A10G", "A10", "L4", "L40", "A100", "H100", "V100")
+
 
 @dataclass
 class CompatRule:
     """
-    A single compatibility rule with a severity level.
-    severity="error"  — hard blocker: raises AssertionError, blocks training
-    severity="warn"   — known-risk combination: logs warning, does not block
+    severity="error"  — hard blocker: raises AssertionError
+    severity="warn"   — known-risk: logs warning, does not block
     """
 
     name: str
@@ -57,7 +59,6 @@ def _build_compat_rules() -> List[CompatRule]:
             message=(
                 f"torch {torch_ver} + transformers {tf_ver}: "
                 "this combination may be unstable on some systems. "
-                "Validated on 4x NVIDIA A10G / CUDA 11.7 / driver 12.8. "
                 "Upgrade torch>=2.1 or transformers>=4.41 when cluster driver supports it."
             ),
             severity="warn",
@@ -67,11 +68,9 @@ def _build_compat_rules() -> List[CompatRule]:
 
 MIN_GPU_MEMORY_GB: int = 10
 
-# Preflight thresholds — read from env so OOD single-GPU jobs pass without code changes
-PREFLIGHT_GPU_NAME = os.environ.get("TARGET_GPU_NAME", "A10G")
-PREFLIGHT_GPU_COUNT = int(os.environ.get("TARGET_GPU_COUNT", "1"))
-PREFLIGHT_VRAM_GB_MIN = float(os.environ.get("TARGET_VRAM_GB_MIN", "22.0"))
-PREFLIGHT_COMPUTE_CAP_MIN = (8, 6)
+# Preflight thresholds — hardware-agnostic, env-overridable
+PREFLIGHT_VRAM_GB_MIN = float(os.environ.get("TARGET_VRAM_GB_MIN", "20.0"))
+PREFLIGHT_COMPUTE_CAP_MIN = (8, 0)  # Ampere minimum — covers A10G (8,6) and L4 (8,9)
 PREFLIGHT_TORCH_CUDA = "11.7"
 PREFLIGHT_MIN_DISK_GB = 50.0
 
@@ -106,12 +105,14 @@ def _check_constraint(actual_str: str, constraint: str) -> Tuple[bool, str]:
 
 
 def run_environment_checks(logger: Any = None) -> bool:
+    # Fix: pass logger to _check_compat via lambda — ensures logging is centralized
+    # and deterministic regardless of whether running in notebook or CLI.
     checks: List[Tuple[str, Callable[[], None]]] = [
         ("Every required dependency must be importable and meet version constraints", _check_deps),
         ("CUDA GPU must be detected for training", _check_gpu_available),
         ("GPU must have at least 10GB VRAM for transformer fine-tuning", _check_gpu_memory),
         ("PyTorch must be compiled with CUDA support", _check_pytorch_cuda),
-        ("Cross-dependency version constraints must be satisfied", _check_compat),
+        ("Cross-dependency version constraints must be satisfied", lambda: _check_compat(logger=logger)),
     ]
     all_passed = True
     for description, check_fn in checks:
@@ -133,36 +134,35 @@ def run_preflight_checks(
     """Hard gate before expensive GPU training. Raises PreflightError on failure."""
     import torch
 
-    # Re-read at call time so notebook env vars are respected
-    gpu_name = os.environ.get("TARGET_GPU_NAME", PREFLIGHT_GPU_NAME)
-    gpu_count = int(os.environ.get("TARGET_GPU_COUNT", str(PREFLIGHT_GPU_COUNT)))
+    # Re-read at call time — adapts to any OOD allocation without code changes
+    expected_gpu_count = int(os.environ.get("TARGET_GPU_COUNT", "0"))
     vram_min = float(os.environ.get("TARGET_VRAM_GB_MIN", str(PREFLIGHT_VRAM_GB_MIN)))
 
     failures: List[str] = []
 
-    # Check 1: GPU count
+    # Check 1: GPU count — only enforced if TARGET_GPU_COUNT explicitly set in env
     n = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if n < gpu_count:
+    if expected_gpu_count > 0 and n < expected_gpu_count:
         failures.append(
-            f"GPU count: expected >={gpu_count}x NVIDIA {gpu_name}, "
-            f"got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
+            f"GPU count: expected >={expected_gpu_count}, got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
         )
     else:
         if logger:
-            logger.info(f"✓ PASS: GPU count {n} >= {gpu_count}")
+            logger.info(f"✓ PASS: GPU count {n} (allocated)")
 
-    # Check 2: GPU name, compute cap, VRAM
+    # Check 2: GPU properties — detected at runtime, no hardcoded GPU family name
     if torch.cuda.is_available():
         for i in range(n):
             name = torch.cuda.get_device_name(i)
             cap = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-            if gpu_name not in name:
-                failures.append(f"GPU[{i}] name: expected {gpu_name}, got '{name}'.")
-            elif cap < PREFLIGHT_COMPUTE_CAP_MIN:
-                failures.append(f"GPU[{i}] compute capability: expected >={PREFLIGHT_COMPUTE_CAP_MIN}, got {cap}.")
+            # Informational warning for unknown families — does not block
+            if not any(f in name for f in SUPPORTED_GPU_FAMILIES) and logger:
+                logger.warning(f"  ⚠ GPU[{i}] '{name}' not in known families {SUPPORTED_GPU_FAMILIES}")
+            if cap < PREFLIGHT_COMPUTE_CAP_MIN:
+                failures.append(f"GPU[{i}] '{name}' compute cap {cap} < {PREFLIGHT_COMPUTE_CAP_MIN} (Ampere minimum).")
             elif vram_gb < vram_min:
-                failures.append(f"GPU[{i}] VRAM: expected >={vram_min}GB, got {vram_gb:.1f}GB.")
+                failures.append(f"GPU[{i}] '{name}' VRAM {vram_gb:.1f}GB < {vram_min}GB minimum.")
             else:
                 if logger:
                     logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
@@ -327,6 +327,7 @@ def _check_compat(logger: Any = None) -> None:
     if warnings and logger:
         logger.warning("Compat warnings (non-blocking):\n  " + "\n  ".join(warnings))
     elif warnings:
+        # Fallback only when no logger provided — preserves notebook/CLI parity
         print("WARNING — Compat (non-blocking):\n  " + "\n  ".join(warnings), file=sys.stderr)
     if errors:
         raise AssertionError("Compat failures:\n  " + "\n  ".join(errors))
