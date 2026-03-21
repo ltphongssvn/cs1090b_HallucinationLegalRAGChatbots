@@ -16,7 +16,8 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "torch": ">=2.0",
     "transformers": ">=4.35,<4.41",
     "datasets": ">=2.16",
-    "gensim": ">=4.3",
+    "sentence_transformers": None,  # v3.1.1 installed; __version__ unreliable via importlib
+    "rank_bm25": None,
     "spacy": ">=3.7",
     "faiss": None,
     "langchain": ">=0.1",
@@ -105,8 +106,6 @@ def _check_constraint(actual_str: str, constraint: str) -> Tuple[bool, str]:
 
 
 def run_environment_checks(logger: Any = None) -> bool:
-    # Fix: pass logger to _check_compat via lambda — ensures logging is centralized
-    # and deterministic regardless of whether running in notebook or CLI.
     checks: List[Tuple[str, Callable[[], None]]] = [
         ("Every required dependency must be importable and meet version constraints", _check_deps),
         ("CUDA GPU must be detected for training", _check_gpu_available),
@@ -134,13 +133,12 @@ def run_preflight_checks(
     """Hard gate before expensive GPU training. Raises PreflightError on failure."""
     import torch
 
-    # Re-read at call time — adapts to any OOD allocation without code changes
     expected_gpu_count = int(os.environ.get("TARGET_GPU_COUNT", "0"))
     vram_min = float(os.environ.get("TARGET_VRAM_GB_MIN", str(PREFLIGHT_VRAM_GB_MIN)))
 
     failures: List[str] = []
 
-    # Check 1: GPU count — only enforced if TARGET_GPU_COUNT explicitly set in env
+    # Check 1: GPU count
     n = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if expected_gpu_count > 0 and n < expected_gpu_count:
         failures.append(
@@ -156,7 +154,6 @@ def run_preflight_checks(
             name = torch.cuda.get_device_name(i)
             cap = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-            # Informational warning for unknown families — does not block
             if not any(f in name for f in SUPPORTED_GPU_FAMILIES) and logger:
                 logger.warning(f"  ⚠ GPU[{i}] '{name}' not in known families {SUPPORTED_GPU_FAMILIES}")
             if cap < PREFLIGHT_COMPUTE_CAP_MIN:
@@ -327,7 +324,6 @@ def _check_compat(logger: Any = None) -> None:
     if warnings and logger:
         logger.warning("Compat warnings (non-blocking):\n  " + "\n  ".join(warnings))
     elif warnings:
-        # Fallback only when no logger provided — preserves notebook/CLI parity
         print("WARNING — Compat (non-blocking):\n  " + "\n  ".join(warnings), file=sys.stderr)
     if errors:
         raise AssertionError("Compat failures:\n  " + "\n  ".join(errors))
