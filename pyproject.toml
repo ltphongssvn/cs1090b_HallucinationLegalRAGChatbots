@@ -2,7 +2,7 @@
 name = "hallucination-legal-rag-chatbots-gpu"
 version = "0.1.0"
 description = "GPU pipeline: data processing, embedding generation, model training, evaluation"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "ipykernel",
   "jupyterlab",
@@ -51,6 +51,7 @@ dev = [
     "detect-secrets>=1.5",
     "vulture>=2.15",
     "dvc>=3.67.0",
+    "dvc-s3>=3.3.0",
 ]
 [tool.pytest.ini_options]
 filterwarnings = [
