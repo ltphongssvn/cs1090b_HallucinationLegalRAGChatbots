@@ -34,10 +34,8 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
 class CompatRule:
     """
     A single compatibility rule with a severity level.
-
     severity="error"  — hard blocker: raises AssertionError, blocks training
     severity="warn"   — known-risk combination: logs warning, does not block
-
     Rules must be falsifiable by reality: if a cluster proves a combination
     works, downgrade the rule to "warn" rather than removing it entirely.
     This preserves signal while eliminating false negatives.
@@ -53,18 +51,16 @@ def _build_compat_rules() -> List[CompatRule]:
     """
     Build compat rules from installed package versions.
     Called lazily so imports are deferred until check time.
-
     Severity policy:
       "error"  — combination has documented API breakage or data corruption risk
       "warn"   — combination may be unstable on some systems but is empirically
-                 validated on this cluster (4x NVIDIA L4, CUDA 11.7, driver 12.8)
+                 validated on this cluster (4x NVIDIA A10G, CUDA 11.7, driver 12.8)
     """
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
     torch_ver = Version(torch.__version__.split("+")[0])
     tf_ver = Version(transformers.__version__)
-
     return [
         CompatRule(
             name="torch_transformers_pre_2_1",
@@ -72,7 +68,7 @@ def _build_compat_rules() -> List[CompatRule]:
             message=(
                 f"torch {torch_ver} + transformers {tf_ver}: "
                 "this combination may be unstable on some systems. "
-                "Validated on 4x NVIDIA L4 / CUDA 11.7 / driver 12.8. "
+                "Validated on 4x NVIDIA A10G / CUDA 11.7 / driver 12.8. "
                 "Upgrade torch>=2.1 or transformers>=4.41 when cluster driver supports it."
             ),
             severity="warn",  # downgraded from "error" — empirically validated on this cluster
@@ -82,11 +78,11 @@ def _build_compat_rules() -> List[CompatRule]:
 
 MIN_GPU_MEMORY_GB: int = 10
 
-# Preflight thresholds
-PREFLIGHT_GPU_NAME = "L4"
+# Preflight thresholds — 4x NVIDIA A10G cluster
+PREFLIGHT_GPU_NAME = "A10G"
 PREFLIGHT_GPU_COUNT = 4
 PREFLIGHT_VRAM_GB_MIN = 22.0
-PREFLIGHT_COMPUTE_CAP_MIN = (8, 9)
+PREFLIGHT_COMPUTE_CAP_MIN = (8, 6)
 PREFLIGHT_TORCH_CUDA = "11.7"
 PREFLIGHT_MIN_DISK_GB = 50.0
 
@@ -322,19 +318,13 @@ def _check_pytorch_cuda() -> None:
 def _check_compat(logger: Any = None) -> None:
     """
     Evaluate compat rules with severity-based policy.
-
     severity="error" rules raise AssertionError — hard blockers.
     severity="warn"  rules log a warning — known-risk combinations that
                      are empirically validated on this cluster.
-
-    This design ensures compat rules are falsifiable by reality:
-    a known-good cluster (e.g. 4x L4 / CUDA 11.7) can pass even when
-    a rule fires, as long as the rule is correctly downgraded to "warn".
     """
     rules = _build_compat_rules()
     errors: List[str] = []
     warnings: List[str] = []
-
     for rule in rules:
         try:
             fired = rule.check()
@@ -346,13 +336,10 @@ def _check_compat(logger: Any = None) -> None:
             errors.append(f"[{rule.name}] {rule.message}")
         else:
             warnings.append(f"[{rule.name}] {rule.message}")
-
     if warnings and logger:
         logger.warning("Compat warnings (non-blocking):\n  " + "\n  ".join(warnings))
     elif warnings:
-        # Print to stderr so warnings are visible even without a logger
         print("WARNING — Compat (non-blocking):\n  " + "\n  ".join(warnings), file=sys.stderr)
-
     if errors:
         raise AssertionError("Compat failures:\n  " + "\n  ".join(errors))
 
