@@ -1,0 +1,11 @@
+# configs/data/legal_rag_explore.yaml
+# Exploration mode — mutable revision allowed, relaxed length floor.
+# NEVER use for training runs whose results will be published.
+
+defaults:
+  - legal_rag
+  - _self_
+
+revision: "main"
+reproducible: false
+min_text_length: 20

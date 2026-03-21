@@ -1,0 +1,114 @@
+# .pre-commit-config.yaml
+# Path: cs1090b_HallucinationLegalRAGChatbots/.pre-commit-config.yaml
+# Adapted for OOD GPU Cluster — Python/uv/torch stack, no frontend/Docker.
+# Install: uv run pre-commit install && uv run pre-commit install --hook-type pre-push
+# Run all: uv run pre-commit run --all-files
+
+repos:
+  # ---- Secret Detection ----
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: .*\.lock$|.*\.log$|logs/.*
+
+  # ---- Local Security Hooks ----
+  - repo: local
+    hooks:
+      - id: block-large-files
+        name: Block Large Model/Binary Files
+        entry: bash scripts/hooks/block_large_files.sh
+        language: system
+        pass_filenames: false
+
+      - id: check-env-files
+        name: Block .env Files
+        entry: bash scripts/hooks/block_env_files.sh
+        language: system
+        pass_filenames: false
+
+      - id: block-cluster-credentials
+        name: Block Cluster Credential Files
+        entry: bash scripts/hooks/block_credentials.sh
+        language: system
+        pass_filenames: false
+
+      - id: verify-selective-staging
+        name: Verify Selective Staging
+        entry: bash scripts/hooks/verify_staging.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ---- Standard File Hygiene ----
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+        name: Fix Line Endings to LF
+      - id: end-of-file-fixer
+        name: Fix End of Files
+        exclude: .*\.lock$|logs/.*
+      - id: trailing-whitespace
+        name: Trim Trailing Whitespace
+        exclude: .*\.lock$|logs/.*
+      - id: check-json
+        name: Validate JSON Files
+      - id: check-yaml
+        name: Validate YAML Files
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+        name: Check for Large Files (500KB max)
+      - id: check-merge-conflict
+        name: Check for Merge Conflict Markers
+      - id: check-symlinks
+        name: Check for Broken Symlinks
+
+  # ---- Python Quality ----
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff Lint
+        entry: uv run ruff check src/ tests/ --fix
+        language: system
+        pass_filenames: false
+
+      - id: ruff-format
+        name: Ruff Format
+        entry: uv run ruff format src/ tests/
+        language: system
+        pass_filenames: false
+
+      - id: mypy
+        name: Mypy Type Check
+        entry: uv run mypy src/
+        language: system
+        pass_filenames: false
+
+  # ---- Pre-commit: Quick Unit Tests ----
+  - repo: local
+    hooks:
+      - id: pytest-quick
+        name: Pytest Unit Tests (fast gate)
+        entry: uv run pytest tests/ -m unit -q --tb=short --no-header
+        language: system
+        pass_filenames: false
+
+  # ---- Pre-push: Coverage + Security ----
+  - repo: local
+    hooks:
+      - id: pytest-coverage-push
+        name: Pytest Coverage (unit + contract 80% min)
+        entry: bash scripts/hooks/pre_push_coverage.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: security-audit-push
+        name: Security Audit (pip-audit non-blocking)
+        entry: bash scripts/hooks/pre_push_security.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
