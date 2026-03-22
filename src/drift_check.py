@@ -21,7 +21,6 @@ REQUIRED: list[tuple[str, str, str, str | None]] = [
     ("accelerate", "accelerate", "0.20.0", None),
     ("peft", "peft", "0.7.0", None),
     ("evaluate", "evaluate", "0.4.0", None),
-    ("ragas", "ragas", "0.1.0", None),
     ("wandb", "wandb", "0.16.0", None),
 ]
 
@@ -34,7 +33,6 @@ def _check_torch(mod: object) -> str:
     t = torch.tensor([1.0, 2.0, 3.0])
     assert torch.allclose(t.mean(), torch.tensor(2.0))
     ver = torch.__version__
-    # Verify cu117 local suffix directly — importlib.metadata strips it
     if "+cu" not in ver:
         raise AssertionError(f"CPU-only torch wheel detected: {ver!r} — expected +cu117")
     return f"tensor mean=2.0 ok, version={ver}"
@@ -121,12 +119,6 @@ def _check_evaluate(mod: object) -> str:
     return f"version={evaluate.__version__}, module ok"
 
 
-def _check_ragas(mod: object) -> str:
-    import ragas  # type: ignore[import]
-
-    return f"version={ragas.__version__}, module ok"
-
-
 def _check_wandb(mod: object) -> str:
     import wandb  # type: ignore[import]
 
@@ -147,7 +139,6 @@ FUNCTIONAL_CHECKS: list[tuple[str, Callable[[object], str]]] = [
     ("accelerate", _check_accelerate),
     ("peft", _check_peft),
     ("evaluate", _check_evaluate),
-    ("ragas", _check_ragas),
     ("wandb", _check_wandb),
 ]
 
@@ -173,7 +164,6 @@ def tier5_import_functional_check() -> list[str]:
     """Tier 5: actual import + functional call. Catches broken .so / ABI mismatch."""
     failed: list[str] = []
     func_map = {name: fn for name, fn in FUNCTIONAL_CHECKS}
-
     for dist_name, import_name, _min_ver, _exact_ver in REQUIRED:
         try:
             mod = importlib.import_module(import_name)
@@ -188,12 +178,10 @@ def tier5_import_functional_check() -> list[str]:
             print(f"    Fix: {FIX_HINT}")
             failed.append(dist_name)
             continue
-
         check_fn = func_map.get(import_name)
         if check_fn is None:
             print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok (no functional check)")
             continue
-
         try:
             result = check_fn(mod)
             print(f"  \033[0;32m✓\033[0m {dist_name:<20} import ok | {result}")
@@ -202,7 +190,6 @@ def tier5_import_functional_check() -> list[str]:
             print("    Why: C extension loaded but core op is broken")
             print(f"    Fix: {FIX_HINT}")
             failed.append(dist_name)
-
     return failed
 
 
@@ -216,14 +203,12 @@ def main() -> None:
         print("  \033[0;36m  Fix: bash setup.sh\033[0m")
         sys.exit(1)
     print("  Metadata versions ok — proceeding to import verification")
-
     print("\n  Tier 5: actual import + functional call...")
     failed = tier5_import_functional_check()
     if failed:
         print(f"\n\033[0;31m  {len(failed)} package(s) failed: {failed}\033[0m")
         print(f"\033[0;36m  Fix: {FIX_HINT}\033[0m")
         sys.exit(1)
-
     print("  All packages verified: metadata + import + functional call")
 
 

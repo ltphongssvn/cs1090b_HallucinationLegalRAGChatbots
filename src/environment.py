@@ -17,7 +17,7 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "transformers": ">=4.35,<4.41",
     "datasets": ">=2.16",
     "sentence_transformers": None,  # v3.1.1 installed; __version__ unreliable via importlib
-    "rank_bm25": None,
+    "bm25s": None,  # replaces rank_bm25 — memory-mapped sparse retrieval
     "spacy": ">=3.7",
     "faiss": None,
     "langchain": ">=0.1",
@@ -26,7 +26,6 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "pandas": ">=2.1",
     "accelerate": ">=0.20",
     "evaluate": ">=0.4",
-    "ragas": ">=0.1",
     "wandb": ">=0.16",
 }
 
@@ -135,7 +134,6 @@ def run_preflight_checks(
 
     expected_gpu_count = int(os.environ.get("TARGET_GPU_COUNT", "0"))
     vram_min = float(os.environ.get("TARGET_VRAM_GB_MIN", str(PREFLIGHT_VRAM_GB_MIN)))
-
     failures: List[str] = []
 
     # Check 1: GPU count
