@@ -1433,7 +1433,7 @@ requires-dist = [
     { name = "rouge-score", specifier = ">=0.1" },
     { name = "scikit-learn", specifier = ">=1.5.0" },
     { name = "seaborn", specifier = ">=0.13.0" },
-    { name = "sentence-transformers", specifier = ">=2.2" },
+    { name = "sentence-transformers", specifier = "==3.1.1" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
     { name = "spacy", specifier = ">=3.7" },
     { name = "tensorboard", specifier = ">=2.14" },
