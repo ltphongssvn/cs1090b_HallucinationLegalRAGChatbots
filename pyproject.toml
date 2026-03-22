@@ -21,7 +21,6 @@ dependencies = [
   "networkx>=3.4.0",
   "evaluate>=0.4",
   "ragas>=0.1",
-  "trulens-eval>=0.28",
   "rouge-score>=0.1",
   "wandb>=0.16",
   "tensorboard>=2.14",
