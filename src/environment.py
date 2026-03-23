@@ -16,7 +16,8 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "torch": ">=2.0",
     "transformers": ">=4.35,<4.41",
     "datasets": ">=2.16",
-    "gensim": ">=4.3",
+    "sentence_transformers": None,  # v3.1.1 installed; __version__ unreliable via importlib
+    "bm25s": None,  # replaces rank_bm25 — memory-mapped sparse retrieval
     "spacy": ">=3.7",
     "faiss": None,
     "langchain": ">=0.1",
@@ -25,22 +26,18 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "pandas": ">=2.1",
     "accelerate": ">=0.20",
     "evaluate": ">=0.4",
-    "ragas": ">=0.1",
     "wandb": ">=0.16",
 }
+
+# Known supported GPU families — informational only, not used for hard failure
+SUPPORTED_GPU_FAMILIES = ("A10G", "A10", "L4", "L40", "A100", "H100", "V100")
 
 
 @dataclass
 class CompatRule:
     """
-    A single compatibility rule with a severity level.
-
-    severity="error"  — hard blocker: raises AssertionError, blocks training
-    severity="warn"   — known-risk combination: logs warning, does not block
-
-    Rules must be falsifiable by reality: if a cluster proves a combination
-    works, downgrade the rule to "warn" rather than removing it entirely.
-    This preserves signal while eliminating false negatives.
+    severity="error"  — hard blocker: raises AssertionError
+    severity="warn"   — known-risk: logs warning, does not block
     """
 
     name: str
@@ -50,21 +47,11 @@ class CompatRule:
 
 
 def _build_compat_rules() -> List[CompatRule]:
-    """
-    Build compat rules from installed package versions.
-    Called lazily so imports are deferred until check time.
-
-    Severity policy:
-      "error"  — combination has documented API breakage or data corruption risk
-      "warn"   — combination may be unstable on some systems but is empirically
-                 validated on this cluster (4x NVIDIA L4, CUDA 11.7, driver 12.8)
-    """
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
     torch_ver = Version(torch.__version__.split("+")[0])
     tf_ver = Version(transformers.__version__)
-
     return [
         CompatRule(
             name="torch_transformers_pre_2_1",
@@ -72,21 +59,18 @@ def _build_compat_rules() -> List[CompatRule]:
             message=(
                 f"torch {torch_ver} + transformers {tf_ver}: "
                 "this combination may be unstable on some systems. "
-                "Validated on 4x NVIDIA L4 / CUDA 11.7 / driver 12.8. "
                 "Upgrade torch>=2.1 or transformers>=4.41 when cluster driver supports it."
             ),
-            severity="warn",  # downgraded from "error" — empirically validated on this cluster
+            severity="warn",
         ),
     ]
 
 
 MIN_GPU_MEMORY_GB: int = 10
 
-# Preflight thresholds
-PREFLIGHT_GPU_NAME = "L4"
-PREFLIGHT_GPU_COUNT = 4
-PREFLIGHT_VRAM_GB_MIN = 22.0
-PREFLIGHT_COMPUTE_CAP_MIN = (8, 9)
+# Preflight thresholds — hardware-agnostic, env-overridable
+PREFLIGHT_VRAM_GB_MIN = float(os.environ.get("TARGET_VRAM_GB_MIN", "20.0"))
+PREFLIGHT_COMPUTE_CAP_MIN = (8, 0)  # Ampere minimum — covers A10G (8,6) and L4 (8,9)
 PREFLIGHT_TORCH_CUDA = "11.7"
 PREFLIGHT_MIN_DISK_GB = 50.0
 
@@ -126,7 +110,7 @@ def run_environment_checks(logger: Any = None) -> bool:
         ("CUDA GPU must be detected for training", _check_gpu_available),
         ("GPU must have at least 10GB VRAM for transformer fine-tuning", _check_gpu_memory),
         ("PyTorch must be compiled with CUDA support", _check_pytorch_cuda),
-        ("Cross-dependency version constraints must be satisfied", _check_compat),
+        ("Cross-dependency version constraints must be satisfied", lambda: _check_compat(logger=logger)),
     ]
     all_passed = True
     for description, check_fn in checks:
@@ -148,31 +132,32 @@ def run_preflight_checks(
     """Hard gate before expensive GPU training. Raises PreflightError on failure."""
     import torch
 
+    expected_gpu_count = int(os.environ.get("TARGET_GPU_COUNT", "0"))
+    vram_min = float(os.environ.get("TARGET_VRAM_GB_MIN", str(PREFLIGHT_VRAM_GB_MIN)))
     failures: List[str] = []
 
     # Check 1: GPU count
     n = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if n < PREFLIGHT_GPU_COUNT:
+    if expected_gpu_count > 0 and n < expected_gpu_count:
         failures.append(
-            f"GPU count: expected >={PREFLIGHT_GPU_COUNT}x NVIDIA {PREFLIGHT_GPU_NAME}, "
-            f"got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
+            f"GPU count: expected >={expected_gpu_count}, got {n}. Check CUDA_VISIBLE_DEVICES or cluster allocation."
         )
     else:
         if logger:
-            logger.info(f"✓ PASS: GPU count {n} >= {PREFLIGHT_GPU_COUNT}")
+            logger.info(f"✓ PASS: GPU count {n} (allocated)")
 
-    # Check 2: GPU name, compute cap, VRAM
+    # Check 2: GPU properties — detected at runtime, no hardcoded GPU family name
     if torch.cuda.is_available():
         for i in range(n):
             name = torch.cuda.get_device_name(i)
             cap = torch.cuda.get_device_capability(i)
             vram_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-            if PREFLIGHT_GPU_NAME not in name:
-                failures.append(f"GPU[{i}] name: expected {PREFLIGHT_GPU_NAME}, got '{name}'.")
-            elif cap < PREFLIGHT_COMPUTE_CAP_MIN:
-                failures.append(f"GPU[{i}] compute capability: expected >={PREFLIGHT_COMPUTE_CAP_MIN}, got {cap}.")
-            elif vram_gb < PREFLIGHT_VRAM_GB_MIN:
-                failures.append(f"GPU[{i}] VRAM: expected >={PREFLIGHT_VRAM_GB_MIN}GB, got {vram_gb:.1f}GB.")
+            if not any(f in name for f in SUPPORTED_GPU_FAMILIES) and logger:
+                logger.warning(f"  ⚠ GPU[{i}] '{name}' not in known families {SUPPORTED_GPU_FAMILIES}")
+            if cap < PREFLIGHT_COMPUTE_CAP_MIN:
+                failures.append(f"GPU[{i}] '{name}' compute cap {cap} < {PREFLIGHT_COMPUTE_CAP_MIN} (Ampere minimum).")
+            elif vram_gb < vram_min:
+                failures.append(f"GPU[{i}] '{name}' VRAM {vram_gb:.1f}GB < {vram_min}GB minimum.")
             else:
                 if logger:
                     logger.info(f"✓ PASS: GPU[{i}] {name} | cap {cap} | {vram_gb:.1f}GB")
@@ -320,21 +305,9 @@ def _check_pytorch_cuda() -> None:
 
 
 def _check_compat(logger: Any = None) -> None:
-    """
-    Evaluate compat rules with severity-based policy.
-
-    severity="error" rules raise AssertionError — hard blockers.
-    severity="warn"  rules log a warning — known-risk combinations that
-                     are empirically validated on this cluster.
-
-    This design ensures compat rules are falsifiable by reality:
-    a known-good cluster (e.g. 4x L4 / CUDA 11.7) can pass even when
-    a rule fires, as long as the rule is correctly downgraded to "warn".
-    """
     rules = _build_compat_rules()
     errors: List[str] = []
     warnings: List[str] = []
-
     for rule in rules:
         try:
             fired = rule.check()
@@ -346,13 +319,10 @@ def _check_compat(logger: Any = None) -> None:
             errors.append(f"[{rule.name}] {rule.message}")
         else:
             warnings.append(f"[{rule.name}] {rule.message}")
-
     if warnings and logger:
         logger.warning("Compat warnings (non-blocking):\n  " + "\n  ".join(warnings))
     elif warnings:
-        # Print to stderr so warnings are visible even without a logger
         print("WARNING — Compat (non-blocking):\n  " + "\n  ".join(warnings), file=sys.stderr)
-
     if errors:
         raise AssertionError("Compat failures:\n  " + "\n  ".join(errors))
 

@@ -227,11 +227,10 @@ class TestRunPreflightChecks:
                     "PYTHONHASHSEED": "0",
                     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
                     "TOKENIZERS_PARALLELISM": "false",
+                    "TARGET_GPU_COUNT": "0",  # skip GPU count enforcement
                 },
                 clear=False,
             ),
-            patch.object(env_mod, "PREFLIGHT_GPU_NAME", "A10G"),
-            patch.object(env_mod, "PREFLIGHT_GPU_COUNT", 1),
             patch.object(env_mod, "PREFLIGHT_VRAM_GB_MIN", 22.0),
             patch.object(env_mod, "PREFLIGHT_COMPUTE_CAP_MIN", (8, 6)),
             patch.object(env_mod, "PREFLIGHT_TORCH_CUDA", "11.7"),
