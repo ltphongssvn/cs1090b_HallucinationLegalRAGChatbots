@@ -386,14 +386,24 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 
 ### Exact Hypotheses
 
-**H1:** Hybrid BM25+BGE-M3+CrossEncoder achieves significantly higher Recall@10 than BM25 and
-BGE-M3 alone (paired bootstrap, p < 0.05).
+* **H1:** The **Hybrid** system (**BM25 + BGE-M3 + CrossEncoder**) is expected to achieve **significantly higher Recall@10** than:
+  * **BM25 alone**
+  * **BGE-M3 alone**
+Statistical significance will be tested using:
+  * **paired bootstrap**
+  * **p < 0.05**
 
-**H2:** Architectures with higher Recall@10 produce significantly lower **Contradiction-rate**
-(normalized by claim count and per 1K tokens; zero-claim responses excluded) in downstream
-generation — isolating active hallucination from retrieval-coverage gaps.
+* **H2:** Retrieval architectures with higher **Recall@10** are expected to produce significantly lower **contradiction rates** in downstream generation.
+* Contradiction rate is reported in two normalized forms:
+  * by **claim count**
+  * per **1,000 tokens**
+* **Zero-claim responses are excluded** from this calculation.
+* The purpose of this hypothesis is to test whether better retrieval reduces **active hallucination**.
+* This also helps separate true contradiction errors from simple **retrieval-coverage gaps**.
 
-**H3:** Hybrid achieves higher Recall@10 than BGE-M3 alone.
+* **H3:** The **Hybrid** retrieval system is expected to achieve **higher Recall@10** than either of the single-method baselines used alone:
+  * **BGE-M3**
+  * **BM25**
 
 ### Task Definition
 
