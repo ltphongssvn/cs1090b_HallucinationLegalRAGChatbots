@@ -23,18 +23,18 @@
 
 ## Certified Baseline Stack
 
-| Component                | Certified version |
-|--------------------------|------------------|
-| Python                   | 3.11.9 |
-| PyTorch                  | 2.0.1+cu117    |
-| transformers             | 4.39.3    |
-| sentence-transformers    | 3.1.1 |
-| Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling — confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json) |
+| Component                | Certified version                                                                                                                                     |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Python                   | 3.11.9                                                                                                                                                |
+| PyTorch                  | 2.0.1+cu117                                                                                                                                           |
+| transformers             | 4.39.3                                                                                                                                                |
+| sentence-transformers    | 3.1.1                                                                                                                                                 |
+| Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling — confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json)                             |
 | Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
-| Sparse retrieval         | bm25s |
-| Vector search            | faiss-cpu 1.13.2 |
-| LLM generator            | mistralai/Mistral-7B-Instruct-v0.2 |
-| NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli |
+| Sparse retrieval         | bm25s                                                                                                                                                 |
+| Vector search            | faiss-cpu 1.13.2                                                                                                                                      |
+| LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
+| NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 
 - This is the certified baseline for the current repo; newer upstream stacks are intentionally
 deferred until full re-certification.
