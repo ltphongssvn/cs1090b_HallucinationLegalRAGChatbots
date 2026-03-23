@@ -3,41 +3,43 @@
 
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
 
-**Author:** Thanh Phong Le — phl690@g.harvard.edu
-**Course:** CS 1090B — Harvard University
-**Cluster node:** 4× NVIDIA L4 (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4 visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
+- **Author:** Thanh Phong Le — phl690@g.harvard.edu
+- **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
+- **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 
-> Although compute nodes physically contain 4× NVIDIA L4 GPUs, student jobs are allocated a
+> - Although compute nodes physically contain 4× NVIDIA L4/A10G GPUs, student jobs are allocated a
 > single GPU by the SLURM scheduler. `CUDA_VISIBLE_DEVICES` is set automatically by SLURM, and
-> PyTorch correctly reports `torch.cuda.device_count() == 1`. All code uses `.to("cuda")` or
+> PyTorch correctly reports `torch.cuda.device_count() == 1`.
+>
+> - All code uses `.to("cuda")` or
 > `.to("cuda:0")` — never a hardcoded physical ordinal — since SLURM remaps the allocated GPU
 > to index 0 regardless of physical slot. All experiments are designed and validated under this
 > single-GPU constraint.
 >
-> KV cache + activations during Mistral generation on retrieved legal contexts consume
+> - KV cache + activations during Mistral generation on retrieved legal contexts consume
 > several additional GB beyond model weights. Sequential model loading is the mitigation strategy.
 
 ---
 
 ## Certified Baseline Stack
 
-| Component | Certified version |
-|-----------|------------------|
-| Python | 3.11.9 |
-| PyTorch | 2.0.1+cu117 |
-| transformers | 4.39.3 |
-| sentence-transformers | 3.1.1 |
+| Component                | Certified version |
+|--------------------------|------------------|
+| Python                   | 3.11.9 |
+| PyTorch                  | 2.0.1+cu117    |
+| transformers             | 4.39.3    |
+| sentence-transformers    | 3.1.1 |
 | Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling — confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json) |
-| Reranker | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
-| Sparse retrieval | bm25s |
-| Vector search | faiss-cpu 1.13.2 |
-| LLM generator | mistralai/Mistral-7B-Instruct-v0.2 |
-| NLI classifier | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli |
+| Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
+| Sparse retrieval         | bm25s |
+| Vector search            | faiss-cpu 1.13.2 |
+| LLM generator            | mistralai/Mistral-7B-Instruct-v0.2 |
+| NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli |
 
-This is the certified baseline for the current repo; newer upstream stacks are intentionally
+- This is the certified baseline for the current repo; newer upstream stacks are intentionally
 deferred until full re-certification.
 
-`BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's
+- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's
 published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`)
 and confirmed in repo smoke tests. A runtime assertion in `src/model_loader.py` guards against
 accidental pooling override; pooling flags logged to W&B once per run. Sparse and multi-vector
@@ -47,14 +49,14 @@ capabilities are out of scope.
 
 ## Revised Feasibility Statement
 
-| Component | Cap | Notes |
-|-----------|-----|-------|
-| Training pairs | 500K–1M | Not 3.2M full LePaRD set |
-| Retrieval evaluation | 10K–50K queries | Not 400K full test set |
+| Component             | Cap                      | Notes |
+|-----------------------|--------------------------|-------|
+| Training pairs        | 500K–1M                  | Not 3.2M full LePaRD set |
+| Retrieval evaluation  | 10K–50K queries          | Not 400K full test set |
 | Generation evaluation | 1,000 stratified queries | Fixed budget, stratified by circuit |
-| Iteration corpus | ~150K opinions (10%) | Loaded via DVC `data/raw/cl_federal_appellate_bulk` subset; full 1.46M for final runs |
-| Architectures | 3 core + 1 optional | BM25, BGE-M3, Hybrid + Legal-BERT reference |
-| Datasets | 2 core | CourtListener federal appellate subset + LePaRD |
+| Iteration corpus      | ~150K opinions (10%)     | Loaded via DVC `data/raw/cl_federal_appellate_bulk` subset; full 1.46M for final runs |
+| Architectures         | 3 core + 1 optional      | BM25, BGE-M3, Hybrid + Legal-BERT reference |
+| Datasets              | 2 core                   | CourtListener federal appellate subset + LePaRD |
 
 ---
 
@@ -75,27 +77,23 @@ capabilities are out of scope.
 
 ## VRAM Budget and Sequential Loading Strategy
 
-**Single GPU (23.7GB L4, SLURM-allocated).** Each phase loads only what it needs, then unloads
-before the next phase. Primary GPU dtype is bfloat16; `src/environment.py` asserts
-`transformers.__version__ == "4.39.3"`, `torch.cuda.get_device_capability()[0] >= 8`, and
-`torch.cuda.is_bf16_supported()` at startup. `TARGET_GPU_COUNT=1` is set in `.env` to match the
-SLURM single-GPU allocation; `setup.sh` preflight validates `torch.cuda.device_count() == 1`.
-Per-model fallback to fp16/fp32 remains available if a path fails smoke tests. For the NLI phase,
-`torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization
-on L4; this can trade some FP32 numerical precision for speed and is treated as an opt-in
-inference optimization, not a semantic guarantee. The `allow_tf32` state is logged per phase in
-W&B for transparency. As a repo-level cleanup safeguard, the DataLoader and its iterator are
-explicitly deleted before `gc.collect()` and `torch.cuda.empty_cache()` between phases.
-`torch.cuda.memory_stats()` logged at phase boundaries. CUDA stream synchronization time logged
-per phase. Peak allocated and reserved CUDA memory logged per phase in W&B.
+**Single GPU (23.7GB L4/A10G, SLURM-allocated).**
+- Each phase loads only what it needs, then unloads before the next phase. Primary GPU dtype is bfloat16; `src/environment.py` asserts `transformers.__version__ == "4.39.3"`, `torch.cuda.get_device_capability()[0] >= 8`, and `torch.cuda.is_bf16_supported()` at startup.
+- `TARGET_GPU_COUNT=1` is set in `.env` to match the SLURM single-GPU allocation; `setup.sh` preflight validates `torch.cuda.device_count() == 1`.
+- Per-model fallback to fp16/fp32 remains available if a path fails smoke tests. For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization on L4/A10G; this can trade some FP32 numerical precision for speed and is treated as an opt-in inference optimization, not a semantic guarantee.
+- The `allow_tf32` state is logged per phase in W&B for transparency.
+- As a repo-level cleanup safeguard, the DataLoader and its iterator are explicitly deleted before `gc.collect()` and `torch.cuda.empty_cache()` between phases.
+- `torch.cuda.memory_stats()` logged at phase boundaries.
+- CUDA stream synchronization time logged per phase.
+- Peak allocated and reserved CUDA memory logged per phase in W&B.
 
-| Phase | Model loaded | Est. VRAM | Strategy |
-|-------|-------------|-----------|---------|
-| Retrieval | BGE-M3 | ~2.27GB | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache |
-| Reranking | bge-reranker-v2-m3 | ~2GB (GPU default; CPU fallback) | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache |
+| Phase      | Model loaded             | Est. VRAM | Strategy |
+|------------|--------------------------|-----------|---------|
+| Retrieval  | BGE-M3                   | ~2.27GB | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache |
+| Reranking  | bge-reranker-v2-m3       | ~2GB (GPU default; CPU fallback) | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache |
 | Generation | Mistral-7B-Instruct-v0.2 | ~14–15GB + KV cache | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
-| NLI eval | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache |
-| Citation | SQLite | 0GB | CPU only (read-only; check_same_thread=False) |
+| NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache |
+| Citation   | SQLite                   | 0GB | CPU only (read-only; check_same_thread=False) |
 
 Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
 
@@ -120,7 +118,7 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
   each entailment/contradiction label is logged for post-hoc diagnosis. Text is tokenized on
   the fly in `__getitem__` to yield CPU tensors suitable for `pin_memory=True`;
   `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)` pads variable-length tensors for
-  Tensor Core alignment on the L4. `torch.backends.cuda.matmul.allow_tf32 = True` is set for
+  Tensor Core alignment on the L4/A10G. `torch.backends.cuda.matmul.allow_tf32 = True` is set for
   the NLI phase as a repo-level performance optimization — trades some FP32 numerical precision
   for speed, treated as opt-in inference optimization not a semantic guarantee; state logged per
   phase. `num_workers` is configurable (repo default 2; 4 for dedicated runs; 0 as fallback
@@ -297,7 +295,7 @@ effective prompt token count (Mistral tokenizer) logged per query.
 
 | Component | Capped size | Justification |
 |-----------|-------------|---------------|
-| Training pairs | 500K–1M | Contrastive convergence in hours on L4 |
+| Training pairs | 500K–1M | Contrastive convergence in hours on L4/A10G |
 | Retrieval eval | 10K–50K | Sufficient precision; avoids multi-day NLI cost |
 | Generation eval | 1,000 queries | ±2.5pp at 95% CI; stratified by circuit |
 
@@ -559,7 +557,7 @@ PII follows provider redaction practices. No human annotation for hallucination 
 
 GPU pipeline comparing retrieval architectures (TF-IDF, CNN, LSTM, BERT bi-encoder, KG-augmented) to reduce hallucination in legal RAG chatbots.
 
-**Hardware:** 4x NVIDIA L4 GPUs | Python 3.11.9 | torch 2.0.1+cu117 | CUDA 11.7 (driver 12.8)
+**Hardware:** 4x NVIDIA L4/A10G GPUs | Python 3.11.9 | torch 2.0.1+cu117 | CUDA 11.7 (driver 12.8)
 
 ## Quick Start
 ```bash
