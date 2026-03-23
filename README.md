@@ -36,27 +36,22 @@
 | LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 
-- This is the certified baseline for the current repo; newer upstream stacks are intentionally
-deferred until full re-certification.
+- This is the certified baseline for the current repo; newer upstream stacks are intentionally deferred until full re-certification.
 
-- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's
-published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`)
-and confirmed in repo smoke tests. A runtime assertion in `src/model_loader.py` guards against
-accidental pooling override; pooling flags logged to W&B once per run. Sparse and multi-vector
-capabilities are out of scope.
+- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`) and confirmed in repo smoke tests. A runtime assertion in `src/model_loader.py` guards against accidental pooling override; pooling flags logged to W&B once per run. Sparse and multi-vector capabilities are out of scope.
 
 ---
 
 ## Revised Feasibility Statement
 
-| Component             | Cap                      | Notes |
-|-----------------------|--------------------------|-------|
-| Training pairs        | 500K–1M                  | Not 3.2M full LePaRD set |
-| Retrieval evaluation  | 10K–50K queries          | Not 400K full test set |
-| Generation evaluation | 1,000 stratified queries | Fixed budget, stratified by circuit |
+| Component             | Cap                      | Notes                                                                                 |
+|-----------------------|--------------------------|---------------------------------------------------------------------------------------|
+| Training pairs        | 500K–1M                  | Not 3.2M full LePaRD set                                                              |
+| Retrieval evaluation  | 10K–50K queries          | Not 400K full test set                                                                |
+| Generation evaluation | 1,000 stratified queries | Fixed budget, stratified by circuit                                                   |
 | Iteration corpus      | ~150K opinions (10%)     | Loaded via DVC `data/raw/cl_federal_appellate_bulk` subset; full 1.46M for final runs |
-| Architectures         | 3 core + 1 optional      | BM25, BGE-M3, Hybrid + Legal-BERT reference |
-| Datasets              | 2 core                   | CourtListener federal appellate subset + LePaRD |
+| Architectures         | 3 core + 1 optional      | BM25, BGE-M3, Hybrid + Legal-BERT reference                                           |
+| Datasets              | 2 core                   | CourtListener federal appellate subset + LePaRD                                       |
 
 ---
 
@@ -87,13 +82,13 @@ capabilities are out of scope.
 - CUDA stream synchronization time logged per phase.
 - Peak allocated and reserved CUDA memory logged per phase in W&B.
 
-| Phase      | Model loaded             | Est. VRAM | Strategy |
-|------------|--------------------------|-----------|---------|
-| Retrieval  | BGE-M3                   | ~2.27GB | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache |
-| Reranking  | bge-reranker-v2-m3       | ~2GB (GPU default; CPU fallback) | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache |
-| Generation | Mistral-7B-Instruct-v0.2 | ~14–15GB + KV cache | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
-| NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache |
-| Citation   | SQLite                   | 0GB | CPU only (read-only; check_same_thread=False) |
+| Phase      | Model loaded                                | Est. VRAM                                                                                                    | Strategy                                                                                                                                                                                                   |
+|------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Retrieval  | BGE-M3                                      | ~2.27GB                                                                                                      | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache                                                                                                      |
+| Reranking  | bge-reranker-v2-m3                          | ~2GB (GPU default; CPU fallback)                                                                             | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache                          |
+| Generation | Mistral-7B-Instruct-v0.2                    | ~14–15GB + KV cache                                                                                          | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
+| NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache                                                                                                                        |
+| Citation   | SQLite                                      | 0GB                                                                                                          | CPU only (read-only; check_same_thread=False)                                                                                                                                                              |
 
 Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
 
