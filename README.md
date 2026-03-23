@@ -1,14 +1,19 @@
-# HallucinationLegalRAGChatbots
+# Reducing Hallucination in Legal RAG Chatbots
+### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
 
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
 
-### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
-
 **Author:** Thanh Phong Le — phl690@g.harvard.edu
-**Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
-**Cluster:** NVIDIA L4/A10G (1× 23.7GB VRAM, single-GPU allocation) | CUDA 11.7 | Python 3.11.9 | torch 2.0.1+cu117
+**Course:** CS 1090B — Harvard University
+**Cluster node:** 4× NVIDIA L4 (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4 visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 
-> Cluster dynamically allocates GPU resources. Current allocation: 1× L4 (23.7GB).
+> Although compute nodes physically contain 4× NVIDIA L4 GPUs, student jobs are allocated a
+> single GPU by the SLURM scheduler. `CUDA_VISIBLE_DEVICES` is set automatically by SLURM, and
+> PyTorch correctly reports `torch.cuda.device_count() == 1`. All code uses `.to("cuda")` or
+> `.to("cuda:0")` — never a hardcoded physical ordinal — since SLURM remaps the allocated GPU
+> to index 0 regardless of physical slot. All experiments are designed and validated under this
+> single-GPU constraint.
+>
 > KV cache + activations during Mistral generation on retrieved legal contexts consume
 > several additional GB beyond model weights. Sequential model loading is the mitigation strategy.
 
@@ -70,9 +75,11 @@ capabilities are out of scope.
 
 ## VRAM Budget and Sequential Loading Strategy
 
-**Single GPU (23.7GB L4).** Each phase loads only what it needs, then unloads before the next phase.
-Primary GPU dtype is bfloat16; `src/environment.py` asserts `transformers.__version__ == "4.39.3"`,
-`torch.cuda.get_device_capability()[0] >= 8`, and `torch.cuda.is_bf16_supported()` at startup.
+**Single GPU (23.7GB L4, SLURM-allocated).** Each phase loads only what it needs, then unloads
+before the next phase. Primary GPU dtype is bfloat16; `src/environment.py` asserts
+`transformers.__version__ == "4.39.3"`, `torch.cuda.get_device_capability()[0] >= 8`, and
+`torch.cuda.is_bf16_supported()` at startup. `TARGET_GPU_COUNT=1` is set in `.env` to match the
+SLURM single-GPU allocation; `setup.sh` preflight validates `torch.cuda.device_count() == 1`.
 Per-model fallback to fp16/fp32 remains available if a path fails smoke tests. For the NLI phase,
 `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization
 on L4; this can trade some FP32 numerical precision for speed and is treated as an opt-in
@@ -86,7 +93,7 @@ per phase. Peak allocated and reserved CUDA memory logged per phase in W&B.
 |-------|-------------|-----------|---------|
 | Retrieval | BGE-M3 | ~2.27GB | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache |
 | Reranking | bge-reranker-v2-m3 | ~2GB (GPU default; CPU fallback) | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache |
-| Generation | Mistral-7B-Instruct-v0.2 | ~14–15GB + KV cache | Load (bfloat16) → apply chat template → generate (do_sample=False) → assert max(prompt_tokens) < 32768 → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
+| Generation | Mistral-7B-Instruct-v0.2 | ~14–15GB + KV cache | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache |
 | Citation | SQLite | 0GB | CPU only (read-only; check_same_thread=False) |
 
@@ -150,9 +157,9 @@ Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by docume
 **4 — Production-Grade Reproducibility Already Operational**
 
 `src/repro.configure()` + `uv.lock` + DVC + manifest checksums + tests passing.
-`src/environment.py` asserts exact library versions at startup. `HF_TOKEN` is required by this
-repo on the shared cluster for authenticated Hub access and to reduce resolver/rate-limit
-failures; loaded via `dotenv` in `src/environment.py`.
+`src/environment.py` asserts exact library versions and GPU configuration at startup.
+`HF_TOKEN` is required by this repo on the shared cluster for authenticated Hub access and to
+reduce resolver/rate-limit failures; loaded via `dotenv` in `src/environment.py`.
 
 ---
 
@@ -229,12 +236,13 @@ All prompts formatted with `tokenizer.apply_chat_template(...)`. Greedy decoding
 (`temperature` omitted). Runtime assertion on prompt length before generation. No built-in moderation.
 
 ### Concern 11 — VRAM / KV Cache Risk
-All models primary bfloat16 (`is_bf16_supported()` + capability ≥ 8.0 asserted; `transformers`
-version pinned via assertion). Sequential loading + explicit DataLoader deletion + `empty_cache()`
-+ `gc.collect()` + `memory_stats()` + CUDA stream sync time + `allow_tf32` state logged per phase.
-CrossEncoder max_length=1024 + batch_size=4. NLI: repo-certified overflow windowing;
-`DataCollatorWithPadding(pad_to_multiple_of=8)`; `allow_tf32=True` (opt-in); `pin_memory=True`;
-`num_workers` configurable (0 as SLURM fallback). Projected peak within 23.7GB.
+Single GPU (SLURM-allocated, 23.7GB). All models primary bfloat16 (`is_bf16_supported()` +
+capability ≥ 8.0 asserted; `transformers` version pinned via assertion). Sequential loading +
+explicit DataLoader deletion + `empty_cache()` + `gc.collect()` + `memory_stats()` + CUDA stream
+sync time + `allow_tf32` state logged per phase. CrossEncoder max_length=1024 + batch_size=4.
+NLI: repo-certified overflow windowing; `DataCollatorWithPadding(pad_to_multiple_of=8)`;
+`allow_tf32=True` (opt-in); `pin_memory=True`; `num_workers` configurable (0 as SLURM fallback).
+Projected peak within 23.7GB.
 
 ### Concern 12 — Tier C API Rate Limits
 Resolved by local SQLite index (`check_same_thread=False`, read-only) — no live API at scale.
@@ -412,13 +420,14 @@ Capped at 500K–1M pairs. Early stopping + gradient accumulation. GPU hours →
 
 ### Stage 6 — Evaluation *(not started)*
 All models primary bfloat16; `transformers.__version__ == "4.39.3"`, `get_device_capability()[0] >= 8`,
-and `is_bf16_supported()` asserted in `environment.py`. Sequential loading per VRAM Budget table.
-`torch.cuda.memory_stats()` + CUDA stream sync time + `allow_tf32` state logged per phase +
-explicit DataLoader deletion (repo-level cleanup safeguard) + `torch.cuda.empty_cache()` +
-`gc.collect()` at every phase boundary. BGE-M3: pooling flags logged to W&B + embedding norm
-distribution logged. Reranker score distributions (min/mean/max/entropy) logged.
-Mistral: `tokenizer.apply_chat_template(...)` enforced; `assert max(prompt_tokens) < 32768`;
-`do_sample=False`; prompt token count (Mistral tokenizer) and completion token count logged.
+and `is_bf16_supported()` asserted in `environment.py`; `TARGET_GPU_COUNT=1` validated against
+`torch.cuda.device_count()`. Sequential loading per VRAM Budget table. `torch.cuda.memory_stats()`
++ CUDA stream sync time + `allow_tf32` state logged per phase + explicit DataLoader deletion
+(repo-level cleanup safeguard) + `torch.cuda.empty_cache()` + `gc.collect()` at every phase
+boundary. BGE-M3: pooling flags logged to W&B + embedding norm distribution logged. Reranker
+score distributions (min/mean/max/entropy) logged. Mistral: `tokenizer.apply_chat_template(...)`
+enforced; `assert max(prompt_tokens) < 32768`; `do_sample=False`; prompt token count (Mistral
+tokenizer) and completion token count logged per query.
 `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`: `use_fast=False` (repo-certified);
 `tokenizer.model_max_length=512`; overflow windowing repo-certified for this exact model/version;
 window count per chunk distribution logged; window-level logits aggregated per chunk; window index
@@ -452,7 +461,7 @@ prompt token counts (Mistral tokenizer) + completion token counts, gradient norm
 ## Reproducibility
 ```bash
 bash setup.sh          # bootstrap environment, manifests, and verification tests
-uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"  # verify torch + CUDA
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())"  # verify torch + CUDA + single GPU
 uv run dvc pull        # pull DVC artifacts from S3
 uv run pytest --cov=src --cov-report=term-missing  # run full test suite with coverage
 jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
@@ -460,6 +469,8 @@ jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 
 `src/repro.configure()` — first statement in every notebook cell and CLI script.
 `HF_TOKEN` is required by this repo on the shared cluster; add to `.env` before running.
+`TARGET_GPU_COUNT=1` must be set in `.env` to match SLURM single-GPU allocation.
+All device references use `.to("cuda")` or `.to("cuda:0")` — never a hardcoded physical ordinal.
 `uv.lock` + DVC → configuration-reproducible and determinism-controlled experiments.
 
 ---
@@ -469,7 +480,7 @@ jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 cs1090b_HallucinationLegalRAGChatbots/
 ├── src/
 │   ├── repro.py                 # GITIGNORED — generated by setup.sh
-│   ├── environment.py           # Runtime assertions: transformers version, bf16 support, capability ≥ 8.0; loads HF_TOKEN
+│   ├── environment.py           # Runtime assertions: transformers version, bf16 support, capability ≥ 8.0, TARGET_GPU_COUNT=1; loads HF_TOKEN
 │   ├── config.py                # PipelineConfig
 │   ├── pipeline.py              # Stage orchestration
 │   ├── bulk_download.py         # CourtListener S3 download
@@ -516,7 +527,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 |-------|------|------------------|
 | Language | Python | 3.11.9 |
 | Package manager | uv | 0.10.2 (repo-pinned) |
-| Deep learning | PyTorch | 2.0.1+cu117 |
+| Deep learning | PyTorch | 2.0.1+cu117 (node driver: CUDA 12.8) |
 | Transformers | HuggingFace transformers | 4.39.3 (version-asserted at startup) |
 | Sentence embeddings | sentence-transformers | 3.1.1 |
 | Dense retrieval | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
