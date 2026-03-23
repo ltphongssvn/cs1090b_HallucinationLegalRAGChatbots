@@ -37,8 +37,9 @@
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 
 - This is the certified baseline for the current repo; newer upstream stacks are intentionally deferred until full re-certification.
-
-- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`) and confirmed in repo smoke tests. A runtime assertion in `src/model_loader.py` guards against accidental pooling override; pooling flags logged to W&B once per run. Sparse and multi-vector capabilities are out of scope.
+- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`) and confirmed in repo smoke tests.
+- A runtime assertion in `src/model_loader.py` guards against accidental pooling override; pooling flags logged to W&B once per run.
+- Sparse and multi-vector capabilities are out of scope.
 
 ---
 
@@ -98,115 +99,155 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
 
 **1 — Automated Hallucination Measurement (No Human Annotation Bottleneck)**
 
-- **Tier A:** LePaRD 4M+ expert-annotated citation pairs — gold-standard retrieval ground truth
-- **Tier B:** `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` classifies each atomic
-  claim independently against individual retrieved chunks. DeBERTa-v3-large has a strict
-  512-token position limit (`max_position_embeddings=512`; `tokenizer.model_max_length=512`
-  enforced). The NLI tokenizer uses `use_fast=False` as the repo-certified path based on local
-  smoke tests over legal citation text. In this pinned repo environment, overflow-window
-  generation (`return_overflowing_tokens=True, max_length=512, stride=64`) has been
-  regression-tested for this exact model/version combination; public tokenizer docs describe
-  overflow helpers primarily on fast tokenizers, so this behavior is treated as repo-certified
-  rather than generally assumed. Window count per chunk distribution logged to diagnose
-  pathological long passages. Window-level logits are aggregated per chunk (not per window)
-  to preserve retrieval-level semantics and avoid double-counting. The window index triggering
-  each entailment/contradiction label is logged for post-hoc diagnosis. Text is tokenized on
-  the fly in `__getitem__` to yield CPU tensors suitable for `pin_memory=True`;
-  `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)` pads variable-length tensors for
-  Tensor Core alignment on the L4/A10G. `torch.backends.cuda.matmul.allow_tf32 = True` is set for
-  the NLI phase as a repo-level performance optimization — trades some FP32 numerical precision
-  for speed, treated as opt-in inference optimization not a semantic guarantee; state logged per
-  phase. `num_workers` is configurable (repo default 2; 4 for dedicated runs; 0 as fallback
-  under SLURM cgroup restrictions). As a repo-level cleanup safeguard, the DataLoader and
-  iterator are explicitly deleted before `gc.collect()` + `torch.cuda.empty_cache()`.
-  Aggregation rule: if any window Entails → Entailment; else if any contradicts → Contradiction;
-  else → Neutral. Zero-claim responses logged, excluded from normalization, and reported as a
-  separate metric. Contradiction rate normalized by per-query claim count and as claims per 1K
-  tokens. NLI confidence scores are diagnostic indicators, not calibrated probabilities.
-  Neutral = evidence-gap. Fully local, no API calls.
-- **Tier C:** SQLite connection uses `check_same_thread=False`; the evaluation path is read-only
-  so no concurrent writes occur. A unique citation hash (`opinion_id + anchor span`) is logged
-  per Tier C lookup for deduplication analysis. If NULL → Hard Citation Hallucination logged,
-  NLI skipped. If found + no local NLI support → CitationFound_NoLocalSupport logged.
-  When sliding-window fallback is used, the token offset of the citation anchor within the
-  selected window is logged to diagnose citation drift. Windowing is citation-anchor-first:
-  (1) Hybrid uses highest-scoring reranker passage; (2) keyword/regex on citation anchor;
-  (3) sliding-window fallback only if anchor extraction fails.
-  **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
+- **Tier A:**
+  - LePaRD 4M+ expert-annotated citation pairs — gold-standard retrieval ground truth
+- **Tier B:**
+  - `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` classifies each atomic claim independently against individual retrieved chunks. DeBERTa-v3-large has a strict 512-token position limit (`max_position_embeddings=512`; `tokenizer.model_max_length=512` enforced).
+  - The NLI tokenizer uses `use_fast=False` as the repo-certified path based on local smoke tests over legal citation text. In this pinned repo environment, overflow-window generation (`return_overflowing_tokens=True, max_length=512, stride=64`) has been regression-tested for this exact model/version combination; public tokenizer docs describe overflow helpers primarily on fast tokenizers, so this behavior is treated as repo-certified rather than generally assumed.
+  - Window count per chunk distribution logged to diagnose pathological long passages.
+  - Window-level logits are aggregated per chunk (not per window) to preserve retrieval-level semantics and avoid double-counting.
+  - The window index triggering each entailment/contradiction label is logged for post-hoc diagnosis.
+  - Text is tokenized on the fly in `__getitem__` to yield CPU tensors suitable for `pin_memory=True`; `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)` pads variable-length tensors for Tensor Core alignment on the L4/A10G.
+  - `torch.backends.cuda.matmul.allow_tf32 = True` is set for the NLI phase as a repo-level performance optimization — trades some FP32 numerical precision for speed, treated as opt-in inference optimization not a semantic guarantee; state logged per phase.
+  - `num_workers` is configurable (repo default 2; 4 for dedicated runs; 0 as fallback under SLURM cgroup restrictions).
+  - As a repo-level cleanup safeguard, the DataLoader and iterator are explicitly deleted before `gc.collect()` + `torch.cuda.empty_cache()`.
+  - Aggregation rule: if any window Entails → Entailment; else if any contradicts → Contradiction; else → Neutral.
+  - Zero-claim responses logged, excluded from normalization, and reported as a separate metric.
+  - Contradiction rate normalized by per-query claim count and as claims per 1K tokens.
+  - NLI confidence scores are diagnostic indicators, not calibrated probabilities.
+  - Neutral = evidence-gap.
+  - Fully local, no API calls.
+- **Tier C:**
+  - SQLite connection uses `check_same_thread=False`; the evaluation path is read-only so no concurrent writes occur.
+  - A unique citation hash (`opinion_id + anchor span`) is logged per Tier C lookup for deduplication analysis.
+  - If NULL → Hard Citation Hallucination logged, NLI skipped.
+  - If found + no local NLI support → CitationFound_NoLocalSupport logged.
+  - When sliding-window fallback is used, the token offset of the citation anchor within the selected window is logged to diagnose citation drift. Windowing is citation-anchor-first:
+    - (1) Hybrid uses highest-scoring reranker passage;
+    - (2) keyword/regex on citation anchor;
+    - (3) sliding-window fallback only if anchor extraction fails.
+  - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 
 **2 — Clean Experimental Design**
 
-`mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy
-decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.39.3`).
-All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization. A runtime
-assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds
-Mistral's hard limit. Prompt token count (Mistral tokenizer) and completion token count logged
-per query. Observed differences are attributable to the retrieval setup.
+- `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.39.3`).
+- All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
+- A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds Mistral's hard limit.
+- Prompt token count (Mistral tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
 
 **3 — Grounded in a Real Failure Case**
 
-Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
+- Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
 
 **4 — Production-Grade Reproducibility Already Operational**
 
-`src/repro.configure()` + `uv.lock` + DVC + manifest checksums + tests passing.
-`src/environment.py` asserts exact library versions and GPU configuration at startup.
-`HF_TOKEN` is required by this repo on the shared cluster for authenticated Hub access and to
-reduce resolver/rate-limit failures; loaded via `dotenv` in `src/environment.py`.
+- `src/repro.configure()` + `uv.lock` + DVC + manifest checksums + tests passing.
+- `src/environment.py` asserts exact library versions and GPU configuration at startup.
+- `HF_TOKEN` is required by this repo on the shared cluster for authenticated Hub access and to reduce resolver/rate-limit failures; loaded via `dotenv` in `src/environment.py`.
 
 ---
 
 ## Addressing Reviewer Concerns
 
 ### Concern 1 — Feasibility of Hallucination Measurement
+* The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
 
-**Tier A:** LePaRD capped subset. Metrics: Recall@k, MRR, NDCG@10.
+#### Tier A
+— Retrieval Grounding
+* Uses a **capped LePaRD subset**.
+* Reports standard retrieval metrics:
+  * **Recall@k**
+  * **MRR**
+  * **NDCG@10**
 
-**Tier B:** 1,000-query stratified sample → `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` (local, no API).
-NLI tokenizer: `use_fast=False` (repo-certified); `tokenizer.model_max_length=512` enforced.
-Overflow window generation repo-certified for this exact model/version combination.
-Window count per chunk distribution logged. Window-level logits aggregated per chunk.
-Text tokenized in `__getitem__`; `DataCollatorWithPadding(pad_to_multiple_of=8)`. Per-claim aggregation:
+#### Tier B
+* Use a **1,000-query stratified sample** for evaluation.
+* Run NLI locally with:
+  * `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`
+* This evaluation path uses **no external API calls**.
+* The **NLI tokenizer** is configured with:
+  * `use_fast=False` *(repo-certified setting)*
+  * `tokenizer.model_max_length = 512` *(strictly enforced)*
+* **Overflow window generation** has been **repo-certified** for this **exact model and version combination**. This means the behavior has been **verified within this repository setup**, rather than assumed to work generically across all environments.
+* The system logs the **distribution of window counts per chunk**.
+* **Window-level logits** are aggregated at the **chunk level** before final scoring.
+* Text is tokenized inside `__getitem__`.
+* Batch padding is handled by:
+  * `DataCollatorWithPadding(pad_to_multiple_of=8)`
+* Padding to a multiple of 8 helps keep tensor shapes hardware-friendly during batching. Per-claim aggregation:
 
-| Category | Definition | Aggregation | Reported As |
-|----------|-----------|-------------|-------------|
-| **Entailment** | Any window supports the claim | any(entail) → Entailment | Faithfulness metric + confidence score |
-| **Contradiction** | No entailment, any window contradicts | no entail + any(contradict) → Contradiction | Contradiction rate (normalized + per 1K tokens) |
-| **Neutral** | No entailment or contradiction | else → Neutral | Evidence-gap — **not hallucination by default** |
+| Category          | Definition                             | Aggregation                                 | Reported As                                     |
+|-------------------|----------------------------------------|---------------------------------------------|-------------------------------------------------|
+| **Entailment**    | Any window supports the claim          | any(entail) → Entailment                    | Faithfulness metric + confidence score          |
+| **Contradiction** | No entailment, any window contradicts  | no entail + any(contradict) → Contradiction | Contradiction rate (normalized + per 1K tokens) |
+| **Neutral**       | No entailment or contradiction         | else → Neutral                              | Evidence-gap — **not hallucination by default** |
 
-Window index triggering each label logged. NLI confidence scores diagnostic, not calibrated.
-Zero-claim responses excluded; zero-claim rate reported separately.
+* The **window index** that triggered each label is logged.
+* **NLI confidence scores** are recorded for diagnostics only.
+* These confidence scores are **not treated as calibrated probabilities**.
+* **Zero-claim responses** are excluded from the main hallucination-rate calculation.
+* The **zero-claim rate** is reported separately as its own metric.
 
-**Tier C:** SQLite `check_same_thread=False` (read-only). Citation hash logged per lookup.
-NULL → Hard Citation Hallucination. Found + no support → CitationFound_NoLocalSupport.
-Anchor offset logged on fallback. Windowing: (1) Hybrid reranker; (2) keyword/regex; (3) sliding-window.
-**Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
+
+**Tier C:**
+* SQLite is configured with:
+  * `check_same_thread=False`
+  * **read-only access**
+* A unique **citation hash** is logged for each lookup.
+* If the citation resolves to **`NULL`**, it is labeled **Hard Citation Hallucination**.
+* If the citation is found but has **no supporting evidence**, it is labeled **CitationFound_NoLocalSupport**.
+* If fallback passage localization is required, the system logs the **anchor offset** for debugging.
+* Passage selection follows this order:
+  * **(1) Hybrid reranker**
+  * **(2) Keyword / regex matching**
+  * **(3) Sliding-window fallback**
+- **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 
 ### Concern 2 — Embedding Model Training
 
-| Architecture | Base Model | Training | Key Hyperparameters |
-|-------------|-----------|----------|-------------------|
-| BM25 | None | None | k1=1.5, b=0.75 |
-| BGE-M3 | BAAI/bge-m3 (CLS pooling per BAAI config) | MultipleNegativesRankingLoss | lr=1e-5, warmup=10%, batch=32, epochs=3 |
-| Hybrid: BM25+BGE-M3+CrossEncoder | BGE-M3 + BAAI/bge-reranker-v2-m3 | RRF top-50 → rerank → top-10 | sentence-transformers CrossEncoder path smoke-tested in this repo; max_length=1024, batch_size=4 |
-| Legal-BERT (optional) | Legal-BERT (12GB legal text) | MultipleNegativesRankingLoss | lr=2e-5, warmup=10%, batch=32, epochs=3 |
+| Architecture                     | Base Model                                | Training                     | Key Hyperparameters                                                                              |
+|----------------------------------|-------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------|
+| BM25                             | None                                      | None                         | k1=1.5, b=0.75                                                                                   |
+| BGE-M3                           | BAAI/bge-m3 (CLS pooling per BAAI config) | MultipleNegativesRankingLoss | lr=1e-5, warmup=10%, batch=32, epochs=3                                                          |
+| Hybrid: BM25+BGE-M3+CrossEncoder | BGE-M3 + BAAI/bge-reranker-v2-m3          | RRF top-50 → rerank → top-10 | sentence-transformers CrossEncoder path smoke-tested in this repo; max_length=1024, batch_size=4 |
+| Legal-BERT (optional)            | Legal-BERT (12GB legal text)              | MultipleNegativesRankingLoss | lr=2e-5, warmup=10%, batch=32, epochs=3                                                          |
 
 ### Concern 3 — Domain Gap
-Claims scoped to federal appellate opinions.
+- Claims scoped to federal appellate opinions.
 
 ### Concern 4 — Hallucination Metric Definition
-Contradiction rate normalized by claim count and per 1K tokens. Zero-claim rate reported separately.
-CitationFound_NoLocalSupport logged separately. Window count per chunk distribution logged.
-Window-level logits aggregated per chunk. NLI scores diagnostic only. Neutral ≠ hallucination.
 
-### Concern 5 — Citation Existence vs Correctness
-Tier C: citation hash logged per lookup; NULL → Hard Citation Hallucination; found + no NLI
-support → CitationFound_NoLocalSupport; anchor offset logged on fallback;
-(1) Hybrid reranker; (2) keyword/regex; (3) sliding-window.
+* **Contradiction rate** is reported in two normalized forms:
+  * by **claim count**
+  * per **1,000 tokens**
+* **Zero-claim responses** are tracked and reported as a **separate metric**.
+* **CitationFound_NoLocalSupport** is logged separately from other citation outcomes.
+* The system logs the **distribution of window counts per chunk**.
+* **Window-level logits** are aggregated at the **chunk level**.
+* **NLI scores** are treated as **diagnostic indicators only**, not calibrated probabilities.
+* **Neutral** is **not automatically counted as hallucination**.
+
+### Concern 5 — Citation Existence vs. Citation Correctness
+
+* **Tier C** assigns and logs a unique citation hash for every citation lookup.
+* If the citation resolves to `NULL`, it is labeled **Hard Citation Hallucination**.
+* If the citation is found but the cited passage does **not** provide local NLI support for the claimed proposition, it is labeled **CitationFound_NoLocalSupport**.
+* If fallback passage localization is needed, the system logs the **citation anchor offset** for debugging.
+* Local evidence is selected in this order:
+  * **(1) Hybrid reranker**
+  * **(2) Keyword / regex matching**
+  * **(3) Sliding-window fallback**
 
 ### Concern 6 — Architecture Alignment
-BM25 → Hybrid pipeline spectrum. BM25 indexed over same pre-chunked payloads as BGE-M3.
-Chunk budget (1024 subwords) is a controlled design choice, not a BGE-M3 limit.
+
+* The retrieval systems are organized along a spectrum:
+  * **BM25** → lexical baseline
+  * **BGE-M3** → dense retriever
+  * **Hybrid** → combined retrieval pipeline
+* **BM25** is indexed over the **same pre-chunked payloads** used by **BGE-M3**.
+* This keeps the comparison fair by ensuring both methods operate on the same chunked inputs.
+* The **1024-subword chunk budget** is a **controlled experimental design choice**.
+* It is **not** a hard limitation of **BGE-M3** itself.
 
 ### Concern 7 — Scientific Claim Precision
 Scoped to federal appellate opinions.
@@ -215,30 +256,83 @@ Scoped to federal appellate opinions.
 CNN/BiLSTM replaced — see Architecture Classification.
 
 ### Concern 9 — Chunking Accuracy
-spaCy tokens ≠ BPE subword tokens. `nlp.max_length` set high enough for full appellate opinions.
-Chunks built using `AutoTokenizer.from_pretrained(encoder_model)` inside the chunking loop.
-**Chunk budget standardized to 1024 subwords with 128-subword overlap (512 for Legal-BERT) as a
-controlled design choice for retriever–reranker consistency, not a limit of BGE-M3 itself.**
-Same pre-chunked payloads fed to both `bm25s` and BGE-M3. Effective prompt token count (Mistral
-tokenizer) logged per query; `assert max(prompt_tokens) < 32768` fires loudly if violated.
-Optional ablation: 64-subword overlap on 10% subset.
+
+* **spaCy tokens are not the same as BPE subword tokens.**
+* `nlp.max_length` is set high enough to process full federal appellate opinions safely.
+* Chunks are built using:
+  * `AutoTokenizer.from_pretrained(encoder_model)`
+  * inside the chunking loop
+* The chunking policy is standardized as:
+  * **1024 subwords per chunk**
+  * **128-subword overlap**
+  * **512-subword chunks for Legal-BERT**
+* This chunk budget is a **controlled experimental design choice** for retriever–reranker consistency.
+* It is **not** a hard limit of **BGE-M3** itself.
+* The **same pre-chunked payloads** are used for both:
+  * `bm25s`
+  * `BGE-M3`
+* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* A runtime guard enforces context length:
+  * `assert max(prompt_tokens) < 32768`
+* If that assertion fails, the pipeline stops loudly rather than silently overflowing context.
+* Optional ablation:
+  * test **64-subword overlap**
+  * on a **10% subset**
 
 ### Concern 10 — LLM Generator
-`mistralai/Mistral-7B-Instruct-v0.2` — smoke-tested in repo under `transformers 4.39.3`.
-All prompts formatted with `tokenizer.apply_chat_template(...)`. Greedy decoding via `do_sample=False`
-(`temperature` omitted). Runtime assertion on prompt length before generation. No built-in moderation.
+
+* The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
+* It has been **smoke-tested in this repository** under **`transformers 4.39.3`**.
+* All prompts are formatted using:
+  * `tokenizer.apply_chat_template(...)`
+* Generation uses **greedy decoding** with:
+  * `do_sample=False`
+* `temperature` is intentionally **omitted**.
+* A **runtime assertion** checks prompt length before generation starts.
+* This ensures the pipeline fails loudly if the prompt exceeds the allowed context size.
+* The model has **no built-in moderation layer**.
 
 ### Concern 11 — VRAM / KV Cache Risk
-Single GPU (SLURM-allocated, 23.7GB). All models primary bfloat16 (`is_bf16_supported()` +
-capability ≥ 8.0 asserted; `transformers` version pinned via assertion). Sequential loading +
-explicit DataLoader deletion + `empty_cache()` + `gc.collect()` + `memory_stats()` + CUDA stream
-sync time + `allow_tf32` state logged per phase. CrossEncoder max_length=1024 + batch_size=4.
-NLI: repo-certified overflow windowing; `DataCollatorWithPadding(pad_to_multiple_of=8)`;
-`allow_tf32=True` (opt-in); `pin_memory=True`; `num_workers` configurable (0 as SLURM fallback).
-Projected peak within 23.7GB.
+
+* All experiments run on a **single SLURM-allocated GPU** with **23.7GB VRAM**.
+* All models use **bfloat16** as the primary dtype.
+* The environment asserts the following before execution:
+  * `torch.cuda.is_bf16_supported()`
+  * GPU capability **≥ 8.0**
+  * pinned `transformers` version
+* To stay within VRAM limits, the pipeline uses **sequential model loading**.
+* Memory cleanup is enforced between phases using:
+  * explicit **DataLoader deletion**
+  * `torch.cuda.empty_cache()`
+  * `gc.collect()`
+* The pipeline logs memory and execution diagnostics at each phase, including:
+  * `torch.cuda.memory_stats()`
+  * CUDA stream synchronization time
+  * `allow_tf32` state
+* The **CrossEncoder reranker** is constrained to:
+  * `max_length=1024`
+  * `batch_size=4`
+* The **NLI phase** uses:
+  * repo-certified overflow windowing
+  * `DataCollatorWithPadding(pad_to_multiple_of=8)`
+  * `allow_tf32=True` *(opt-in)*
+  * `pin_memory=True`
+  * configurable `num_workers`
+* For SLURM-restricted environments, `num_workers=0` is available as a fallback.
+* The **projected peak memory usage** is expected to remain within the **23.7GB VRAM budget**.
+
 
 ### Concern 12 — Tier C API Rate Limits
-Resolved by local SQLite index (`check_same_thread=False`, read-only) — no live API at scale.
+
+* Tier C does **not** rely on live API calls at evaluation time.
+* API rate-limit risk is avoided by using a **local SQLite index** instead.
+* The SQLite connection is configured with:
+  * `check_same_thread=False`
+  * **read-only access**
+* This allows citation checks to run **locally at scale** without external API throttling.
+* Result:
+  * no live API dependency
+  * no rate-limit bottleneck during large evaluation runs
 
 ### Concern 13 — Training Cost vs Timeline
 Explicit compute caps set up front — see Revised Feasibility Statement.
