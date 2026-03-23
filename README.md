@@ -36,10 +36,16 @@
 | LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 
-- This is the certified baseline for the current repo; newer upstream stacks are intentionally deferred until full re-certification.
-- `BAAI/bge-m3` is used in single-vector dense mode only with CLS pooling, as specified in BAAI's published `1_Pooling/config.json` (`pooling_mode_cls_token=true`, `pooling_mode_mean_tokens=false`) and confirmed in repo smoke tests.
-- A runtime assertion in `src/model_loader.py` guards against accidental pooling override; pooling flags logged to W&B once per run.
-- Sparse and multi-vector capabilities are out of scope.
+* This is the certified baseline stack for the current repository; newer upstream stacks are intentionally deferred for now, they will be adopted only after full re-certification in this repo.
+* **`BAAI/bge-m3`** is used **only in single-vector dense retrieval mode**.
+* It uses **CLS pooling**, not mean pooling.
+* This is defined in BAAI’s published `1_Pooling/config.json`, where:
+  * `pooling_mode_cls_token=true`
+  * `pooling_mode_mean_tokens=false`
+* The same pooling setup has also been **confirmed by smoke tests in this repository**.
+* A **runtime assertion** in `src/model_loader.py` prevents accidental pooling overrides.
+* The selected **pooling flags** are logged to **W&B once per run**.
+* Sparse and multi-vector capabilities are out of scope.
 
 ---
 
@@ -74,14 +80,33 @@
 ## VRAM Budget and Sequential Loading Strategy
 
 **Single GPU (23.7GB L4/A10G, SLURM-allocated).**
-- Each phase loads only what it needs, then unloads before the next phase. Primary GPU dtype is bfloat16; `src/environment.py` asserts `transformers.__version__ == "4.39.3"`, `torch.cuda.get_device_capability()[0] >= 8`, and `torch.cuda.is_bf16_supported()` at startup.
-- `TARGET_GPU_COUNT=1` is set in `.env` to match the SLURM single-GPU allocation; `setup.sh` preflight validates `torch.cuda.device_count() == 1`.
-- Per-model fallback to fp16/fp32 remains available if a path fails smoke tests. For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization on L4/A10G; this can trade some FP32 numerical precision for speed and is treated as an opt-in inference optimization, not a semantic guarantee.
-- The `allow_tf32` state is logged per phase in W&B for transparency.
-- As a repo-level cleanup safeguard, the DataLoader and its iterator are explicitly deleted before `gc.collect()` and `torch.cuda.empty_cache()` between phases.
-- `torch.cuda.memory_stats()` logged at phase boundaries.
-- CUDA stream synchronization time logged per phase.
-- Peak allocated and reserved CUDA memory logged per phase in W&B.
+* Each phase loads **only the model and data it needs**.
+* After a phase finishes, its resources are **unloaded before the next phase begins**.
+* The primary GPU dtype is **bfloat16**.
+* At startup, `src/environment.py` enforces these checks:
+  * `transformers.__version__ == "4.39.3"`
+  * `torch.cuda.get_device_capability()[0] >= 8`
+  * `torch.cuda.is_bf16_supported()`
+* These checks ensure the environment matches the repo’s certified GPU and library assumptions before execution starts.
+* `TARGET_GPU_COUNT=1` is set in `.env` to match the **single-GPU allocation** provided by SLURM.
+* During preflight, `setup.sh` validates that:
+  * `torch.cuda.device_count() == 1`
+* This ensures the runtime environment matches the expected **single-GPU execution setup**.
+* Per-model fallback to fp16/fp32 remains available if a path fails smoke tests.
+* For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization on L4/A10G; this can trade some FP32 numerical precision for speed and is treated as an opt-in inference optimization, not a semantic guarantee.
+* The `allow_tf32` setting is logged in **W&B** for each phase. This provides **transparency** about whether TF32 acceleration was enabled during that phase.
+* As a **repo-level cleanup safeguard**, both the **DataLoader** and its **iterator** are explicitly deleted between phases.
+* This deletion happens **before** calling:
+  * `gc.collect()`
+  * `torch.cuda.empty_cache()`
+* The goal is to reduce the chance of **stale memory references** and improve **GPU memory cleanup** between pipeline phases.
+* `torch.cuda.memory_stats()` is logged at each **phase boundary**.
+* This records GPU memory diagnostics **before and after major pipeline stages**.
+* It helps track **allocation behavior**, **memory pressure**, and possible **VRAM leaks** across phases.
+* The pipeline logs **CUDA stream synchronization time** for each phase.
+* **Per phase**, W&B logs:
+  * **peak allocated CUDA memory**
+  * **peak reserved CUDA memory**
 
 | Phase      | Model loaded                                | Est. VRAM                                                                                                    | Strategy                                                                                                                                                                                                   |
 |------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -150,10 +175,10 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
 ## Addressing Reviewer Concerns
 
 ### Concern 1 — Feasibility of Hallucination Measurement
-* The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
+The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
 
 #### Tier A
-— Retrieval Grounding
+Retrieval Grounding
 * Uses a **capped LePaRD subset**.
 * Reports standard retrieval metrics:
   * **Recall@k**
@@ -340,12 +365,20 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ---
 
 ## Research Question
-
-**Which retrieval setup most improves evidence grounding and reduces contradiction and neutral-evidence failures in a legal RAG system built over U.S. federal appellate opinions?**
-
-Three core systems: BM25 → BGE-M3 → Hybrid BM25+BGE-M3+CrossEncoder.
-Legal-BERT as optional domain-reference model. Generator: `mistralai/Mistral-7B-Instruct-v0.2`
-(frozen, greedy decoding, chat template applied, sequential load).
+* The central research question is:
+  * **Which retrieval setup most improves evidence grounding and reduces contradiction and neutral-evidence failures in a legal RAG system built over U.S. federal appellate opinions?**
+* The study compares **three core retrieval systems**:
+  * **BM25**
+  * **BGE-M3**
+  * **Hybrid BM25 + BGE-M3 + CrossEncoder**
+* **Legal-BERT** is included as an **optional domain-reference model**.
+* The generator model is held constant as:
+  * **`mistralai/Mistral-7B-Instruct-v0.2`**
+* The generator is used under the following fixed conditions:
+  * **frozen weights**
+  * **greedy decoding**
+  * **chat template applied**
+  * **sequential loading**
 
 ---
 
