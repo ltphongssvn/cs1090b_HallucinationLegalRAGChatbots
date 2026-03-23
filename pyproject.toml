@@ -55,6 +55,7 @@ dev = [
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",
+    "ignore:builtin type swigvarlink:DeprecationWarning",
 ]
 markers = [
     "unit: Pure function tests, no I/O",
