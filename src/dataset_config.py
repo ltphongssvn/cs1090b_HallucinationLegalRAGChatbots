@@ -1,6 +1,6 @@
 # src/dataset_config.py
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Dict, Literal
 
 
 @dataclass
@@ -8,7 +8,6 @@ class DatasetConfig:
     """
     Hydra-injectable configuration for a pile-of-law subset.
     All fields overridable via configs/data/legal_rag.yaml.
-
     data_source:
       "artifact" — load from preprocessed local artifact (training default)
       "hf"       — load from HF Hub with trust_remote_code (ingestion only)
@@ -33,12 +32,16 @@ class DatasetConfig:
     @classmethod
     def from_hydra(cls, cfg: object) -> "DatasetConfig":
         """Instantiate from a Hydra DictConfig or plain dict."""
-        try:
-            from omegaconf import OmegaConf  # type: ignore[import]
+        d: Dict[str, Any]
+        if isinstance(cfg, dict):
+            d = dict(cfg)
+        else:
+            try:
+                from omegaconf import OmegaConf  # type: ignore[import]
 
-            d = OmegaConf.to_container(cfg, resolve=True)
-        except ImportError:
-            d = dict(cfg)  # type: ignore[call-overload]
+                d = dict(OmegaConf.to_container(cfg, resolve=True))  # type: ignore[arg-type]
+            except ImportError:
+                d = dict(cfg)  # type: ignore[call-overload]
         if "text_fields" in d:
             d["text_fields"] = tuple(d["text_fields"])
         if "required_fields" in d:

@@ -1,0 +1,350 @@
+============================================================
+ cs1090b_HallucinationLegalRAGChatbots — Environment Bootstrap
+ Target: 4x NVIDIA L4 | Python 3.11.9 | torch 2.0.1+cu117
+ Driver CUDA: 12.8 (forward-compat) | torch runtime: 11.7
+ Repro: PYTHONHASHSEED=0 | CUBLAS=:4096:8 | RANDOM_SEED=0
+ Modes: DRY_RUN=0 | SKIP_GPU=0 | NO_DOWNLOAD=0 | NO_JUPYTER=0 | LOG_LEVEL=1
+============================================================
+▶ preflight_fast_checks
+ Running preflight fast checks (pre-venv, seconds)...
+  ✓ disk: 8589923901GB free >= 50GB
+  ✓ uv: uv 0.10.2
+  ✓ pyproject.toml + uv.lock: present
+  ✓ nvidia-smi: present
+  ✓ nvidia-smi GPU count: 4 >= 4
+  ✓ nvidia-smi GPU name: contains 'L4'
+  ✓ driver CUDA: 12.8
+  ✓ All preflight fast checks passed.
+▶ check_uv
+  ✓ uv: uv 0.10.2
+▶ check_lockfile
+  ✓ uv.lock sha256: 3ac3a4547106ba177af6c78046b120bfea376d7d40e8d77d75bede774d0660ee
+▶ log_gpu
+ --- nvidia-smi per-GPU summary (pre-venv) ---
+  GPU 0:NVIDIA L4 | VRAM:23034 MiB | Driver:570.172.08
+  GPU 1:NVIDIA L4 | VRAM:23034 MiB | Driver:570.172.08
+  GPU 2:NVIDIA L4 | VRAM:23034 MiB | Driver:570.172.08
+  GPU 3:NVIDIA L4 | VRAM:23034 MiB | Driver:570.172.08
+  ✓ CUDA toolkit (nvcc): V12.9.86
+▶ ensure_venv
+  ✓ .venv already exists with Python 3.11.9 — skipping
+▶ verify_python
+  ✓ Python: Python 3.11.9
+▶ sync_dependencies
+Audited 313 packages in 649ms
+  ✓ Dependencies synced from uv.lock
+▶ check_dependency_drift
+ Checking for dependency drift...
+  ✓ pyproject.toml vs uv.lock — skipping mtime check (unreliable after git ops)
+  ✓ uv lock --check — consistent
+  ✓ uv sync --check — matches uv.lock
+  Tier 4: metadata version check...
+  [0;32m✓[0m torch                2.0.1 (metadata)
+  [0;32m✓[0m transformers         4.39.3 (metadata)
+  [0;32m✓[0m datasets             4.7.0 (metadata)
+  [0;32m✓[0m faiss-cpu            1.13.2 (metadata)
+  [0;32m✓[0m spacy                3.8.11 (metadata)
+  [0;32m✓[0m scikit-learn         1.8.0 (metadata)
+  [0;32m✓[0m numpy                1.26.4 (metadata)
+  [0;32m✓[0m pandas               2.3.3 (metadata)
+  [0;32m✓[0m accelerate           1.13.0 (metadata)
+  [0;32m✓[0m peft                 0.9.0 (metadata)
+  [0;32m✓[0m evaluate             0.4.6 (metadata)
+  [0;32m✓[0m wandb                0.25.1 (metadata)
+  Metadata versions ok — proceeding to import verification
+
+  Tier 5: actual import + functional call...
+  [0;32m✓[0m torch                import ok | tensor mean=2.0 ok, version=2.0.1+cu117
+  [0;32m✓[0m transformers         import ok | version=4.39.3
+  [0;32m✓[0m datasets             import ok | version=4.7.0, arrow=23.0.1
+  [0;32m✓[0m faiss-cpu            import ok | IndexFlatL2 add/search ok
+  [0;32m✓[0m spacy                import ok | version=3.8.11, blank vocab ok
+  [0;32m✓[0m scikit-learn         import ok | version=1.8.0, numpy array ok
+  [0;32m✓[0m numpy                import ok | version=1.26.4, sum ok
+  [0;32m✓[0m pandas               import ok | version=2.3.3, DataFrame ok
+  [0;32m✓[0m accelerate           import ok | version=1.13.0, Accelerator accessible
+  [0;32m✓[0m peft                 import ok | version=0.9.0, LoraConfig(r=8) ok
+  [0;32m✓[0m evaluate             import ok | version=0.4.6, module ok
+  [0;32m✓[0m wandb                import ok | version=0.25.1, init/log API accessible
+  All packages verified: metadata + import + functional call
+  ✓ Dependency drift check complete — all tiers passed
+▶ detect_hardware
+ Detecting hardware (post-venv, torch-level)...
+  Property             Detected                       Target
+  --------             --------                       ------
+  GPU name             'NVIDIA L4'                    contains 'L4'
+  GPU count            4                              4
+  torch CUDA           11.7                           11.7
+  driver CUDA          12.8                           12.8
+  cuDNN                8907
+  GPU[0]: NVIDIA L4 | 23.67GB | cap [8, 9]
+  GPU[1]: NVIDIA L4 | 23.67GB | cap [8, 9]
+  GPU[2]: NVIDIA L4 | 23.67GB | cap [8, 9]
+  GPU[3]: NVIDIA L4 | 23.67GB | cap [8, 9]
+  ✓ Hardware detection complete — all values match targets.
+▶ write_repro_env
+ Writing reproducibility .env...
+  [0;32m✓[0m PYTHONHASHSEED=0
+  [0;32m✓[0m CUBLAS_WORKSPACE_CONFIG=:4096:8
+  [0;32m✓[0m TOKENIZERS_PARALLELISM=false
+  [0;32m✓[0m RANDOM_SEED=0
+▶ write_repro_module
+ Writing src/repro.py...
+  ✓ src/repro.py written (RANDOM_SEED=0)
+  [repro] Reproducibility configured:
+    PYTHONHASHSEED=0
+    CUBLAS_WORKSPACE_CONFIG=:4096:8
+    TOKENIZERS_PARALLELISM=false
+    deterministic_algorithms=True
+    cudnn_benchmark=False
+    cudnn_deterministic=True
+    random_seed=0
+    torch.cuda.manual_seed_all(0) → 4 GPU(s)
+  [0;32m✓[0m src/repro.configure() verified
+▶ verify_numerical_stability
+ Verifying numerical/runtime stability...
+  [0;32m✓[0m CUBLAS_WORKSPACE_CONFIG=:4096:8
+  [0;32m✓[0m PYTHONHASHSEED=0
+  [0;32m✓[0m TOKENIZERS_PARALLELISM=false
+  [0;32m✓[0m RANDOM_SEED=0
+  [0;32m✓[0m torch deterministic flags — ok
+  [2mNOTE: Notebooks must call: from src.repro import configure; configure()[0m
+▶ download_nlp_models
+ Installing spaCy en_core_web_sm 3.8.0 (pinned)...
+  ✓ en_core_web_sm 3.8.0 already installed — skipping
+▶ run_env_smoke_tests
+ Running environment smoke tests...
+  [0;32m✓[0m torch 2.0.1+cu117 — tensor op ok
+  [0;32m✓[0m transformers 4.39.3 — tokenizer ok
+  [0;32m✓[0m faiss — index add/search ok
+  [0;32m✓[0m spacy 3.8.11 | model 3.8.0 | entities: ['ORG']
+▶ run_gpu_smoke_tests
+ Running GPU smoke tests — enforcing TARGET_* constraints on all 4 GPUs...
+  [0;32m✓[0m CUDA available | torch runtime 11.7
+  [0;32m✓[0m GPU count: 4 >= 4
+  [0;32m✓[0m GPU[0] NVIDIA L4 | cap (8, 9) | 23.7GB
+  [0;32m✓[0m GPU[1] NVIDIA L4 | cap (8, 9) | 23.7GB
+  [0;32m✓[0m GPU[2] NVIDIA L4 | cap (8, 9) | 23.7GB
+  [0;32m✓[0m GPU[3] NVIDIA L4 | cap (8, 9) | 23.7GB
+  [0;32m✓[0m GPU[0] (NVIDIA L4) — tensor op + memory alloc/dealloc ok
+  [0;32m✓[0m GPU[1] (NVIDIA L4) — tensor op + memory alloc/dealloc ok
+  [0;32m✓[0m GPU[2] (NVIDIA L4) — tensor op + memory alloc/dealloc ok
+  [0;32m✓[0m GPU[3] (NVIDIA L4) — tensor op + memory alloc/dealloc ok
+  [0;32m✓[0m All 4 GPUs passed tensor op + memory alloc/dealloc
+▶ write_manifest
+ Writing environment manifest + SBOM (via src/manifest_collector.py)...
+  [repro] Reproducibility configured:
+    PYTHONHASHSEED=0
+    CUBLAS_WORKSPACE_CONFIG=:4096:8
+    TOKENIZERS_PARALLELISM=false
+    deterministic_algorithms=True
+    cudnn_benchmark=False
+    cudnn_deterministic=True
+    random_seed=0
+    torch.cuda.manual_seed_all(0) → 4 GPU(s)
+  [0;32m✓[0m manifest → logs/environment_manifest.json
+    freeze snapshot: 272 packages
+    cpu: AMD EPYC 7R13 Processor | cores: 48 | RAM: 181.8GB
+  ✓ SBOM (JSON) → logs/sbom.json (313 components)
+  ✓ SBOM (XML)  → logs/sbom.xml
+▶ register_kernel
+ Registering Jupyter kernel...
+Installed kernelspec hallucination-legal-rag in /shared/home/phl690/.local/share/jupyter/kernels/hallucination-legal-rag
+  [0;32m✓[0m kernel: HallucinationLegalRAG (3.11.9)
+    path: /shared/home/phl690/.local/share/jupyter/kernels/hallucination-legal-rag
+▶ verify_tests
+ Verifying test suite (tiered execution)...
+ Running shell script tests (bats-core)...
+1..108
+ok 1 _is_dry_run returns 0 (true) when DRY_RUN=1
+ok 2 _is_dry_run returns 1 (false) when DRY_RUN=0
+ok 3 _is_dry_run returns 1 (false) when DRY_RUN is unset
+ok 4 _is_dry_run returns 1 (false) when DRY_RUN is empty string
+ok 5 _msg_dry_run outputs DRY RUN prefix and both arguments
+ok 6 _msg_ok outputs checkmark and message
+ok 7 _msg_info outputs info symbol and message at LOG_LEVEL=2
+ok 8 _msg_info is silent at LOG_LEVEL=1 (normal mode)
+ok 9 _msg_info is silent at LOG_LEVEL=0 (quiet mode)
+ok 10 _msg_skip outputs skip symbol and message
+ok 11 _msg_error outputs all four structured fields
+ok 12 _msg_error outputs What/Why/Fix labels
+ok 13 _msg_error always prints at LOG_LEVEL=0 (quiet mode)
+ok 14 _msg_warn action-required outputs ACTION REQUIRED tag
+ok 15 _msg_warn informational outputs informational tag
+ok 16 _msg_warn is silent at LOG_LEVEL=0
+ok 17 _require_project_root exits 1 when pyproject.toml missing
+ok 18 _require_project_root passes when pyproject.toml present
+ok 19 _require_uv auto-resolves when uv is on PATH
+ok 20 _require_uv exits 1 when UV is broken path
+ok 21 _require_repro_env exits 1 when .env missing
+ok 22 _require_repro_env exits 1 when RANDOM_SEED is empty
+ok 23 _require_repro_env passes when .env present and RANDOM_SEED set
+ok 24 step_end PASS records step name in SUMMARY_STEPS
+ok 25 step_end SKIP records SKIP in SUMMARY_STATUS
+ok 26 step_end DRY records DRY in SUMMARY_STATUS
+ok 27 step_end WARN records WARN in SUMMARY_STATUS
+ok 28 step_end records duration in SUMMARY_DURATION
+ok 29 run_step skips function when STEP is set to different name
+ok 30 run_step executes function when STEP matches function name
+ok 31 run_step executes function when STEP is unset
+ok 32 _check_lockfile_present fails when both files missing
+ok 33 _check_lockfile_present fails when only uv.lock missing
+ok 34 _check_lockfile_present fails when only pyproject.toml missing
+ok 35 _check_lockfile_present passes when both files present
+ok 36 check_lockfile exits 1 with structured error when uv.lock missing
+ok 37 check_lockfile exits 1 when pyproject.toml missing (_require_project_root fires first)
+ok 38 check_lockfile passes and prints sha256 when both files present
+ok 39 _check_uv_present passes when uv is on PATH
+ok 40 ensure_venv in DRY_RUN=1 does not create .venv
+ok 41 sync_dependencies in DRY_RUN=1 prints preview without requiring venv Python
+ok 42 _check_disk_space passes on a real filesystem with space
+ok 43 _check_disk_space fails when TARGET_MIN_DISK_GB exceeds available
+ok 44 write_repro_env in DRY_RUN=1 does not write .env
+ok 45 write_repro_module in DRY_RUN=1 does not write src/repro.py
+ok 46 write_manifest in DRY_RUN=1 does not write logs/environment_manifest.json
+ok 47 register_kernel in DRY_RUN=1 does not invoke ipykernel install
+ok 48 check_lockfile error message contains uv lock command
+ok 49 _require_project_root error message contains cd command
+ok 50 check_uv exits 1 when uv not on PATH
+ok 51 _require_uv exits 1 with install hint when uv missing
+ok 52 _require_uv exits 1 with broken uv binary message
+ok 53 check_lockfile exits 1 with error when pyproject.toml absent
+ok 54 _require_project_root exits 1 with cd hint when pyproject.toml missing
+ok 55 check_lockfile exits 1 with uv.lock error when pyproject.toml present but uv.lock absent
+ok 56 _require_project_root is the first gate in preflight_fast_checks
+ok 57 _require_python exits 1 when PYTHON binary is missing
+ok 58 _require_python exits 1 when venv Python has wrong version
+ok 59 ensure_venv in DRY_RUN=1 does not create .venv
+ok 60 _check_nvidia_smi_present fails when nvidia-smi absent from PATH
+ok 61 _check_gpu_count_smi fails when count below target
+ok 62 run_gpu_smoke_tests skips cleanly with SKIP_GPU=1
+ok 63 run_gpu_smoke_tests in SKIP_GPU=1 records SKIP in summary
+ok 64 SKIP_GPU=1 does not require NVIDIA tools
+ok 65 run_env_smoke_tests fails with fix hint for CPU-only torch wheel
+ok 66 register_kernel in DRY_RUN=1 does not require venv Python
+ok 67 register_kernel with NO_JUPYTER=1 skips without requiring Python
+ok 68 _require_hardware_detected warns when DETECTED_GPU_COUNT is UNDETECTED
+ok 69 write_repro_module exits 1 with structured error when .env absent
+ok 70 write_manifest exits 1 with structured error when uv.lock absent
+ok 71 .venv/bin/python exists and is executable
+ok 72 .venv Python is exactly 3.11.9
+ok 73 .venv Python executable path is inside PROJECT_ROOT
+ok 74 .venv torch version is 2.0.1+cu117 (not CPU wheel)
+ok 75 .venv torch reports CUDA runtime 11.7
+ok 76 .venv transformers version satisfies >=4.35,<4.41
+ok 77 .venv faiss C extension loads and IndexFlatL2 is functional
+ok 78 .venv spaCy en_core_web_sm is pinned version 3.8.0
+ok 79 .venv spaCy NER pipeline processes legal text correctly
+ok 80 .venv dev tools are installed (pytest, mypy, hypothesis)
+ok 81 .venv ipykernel is installed
+ok 82 manifest exists at logs/environment_manifest.json
+ok 83 manifest is valid JSON
+ok 84 manifest contains all required top-level keys
+ok 85 manifest contains no UNDETECTED sentinel values
+ok 86 manifest contains no NOT SET sentinel values for repro_env keys
+ok 87 manifest repro_env.PYTHONHASHSEED is '0'
+ok 88 manifest repro_env.RANDOM_SEED is '0'
+ok 89 manifest numerical_stability.deterministic_algorithms_enabled is true
+ok 90 manifest numerical_stability.cudnn_benchmark is false
+ok 91 manifest hardware_detected.hardware_match is 'true'
+ok 92 manifest hardware_detected.gpu_count matches TARGET_GPU_COUNT (4)
+ok 93 manifest gpu_count matches len(gpus) array
+ok 94 manifest torch version is 2.0.1+cu117
+ok 95 manifest uv_lock_sha256 matches actual uv.lock on disk
+ok 96 manifest git_sha is not 'not-a-git-repo'
+ok 97 manifest spacy_model_version is 3.8.0
+ok 98 manifest installed_packages has no 'not installed' entries for core packages
+ok 99 manifest parity_module is src/repro.py and parity_usage is correct
+ok 100 kernelspec directory exists at expected path
+ok 101 kernelspec kernel.json exists
+ok 102 kernelspec kernel.json is valid JSON
+ok 103 kernelspec display_name is HallucinationLegalRAG (3.11.9)
+ok 104 kernelspec argv[0] points to venv Python (not system Python)
+ok 105 kernelspec argv[0] Python binary exists and is executable
+ok 106 kernelspec argv[0] Python reports version 3.11.9
+ok 107 kernelspec name is hallucination-legal-rag
+ok 108 kernelspec language is python
+  ✓ All shell tests passed
+................................................................................................................ [ 25%]
+................................................................................................................ [ 50%]
+................................................................................................................ [ 75%]
+..............................................................................................................   [100%]
+446 passed, 49 deselected in 73.47s (0:01:13)
+  ✓ Tier 2 passed: 446 unit tests executed
+  [0;32m✓[0m tokenizer: seq_len=11
+  [0;32m✓[0m CPU forward pass ok | probs=[0.507, 0.493]
+  [0;32m✓[0m FAISS 100-vector self-query L2≈0 confirmed
+  ✓ CPU inference smoke test passed
+  [0;32m✓[0m GPU[0] NVIDIA L4 — FP16 4096x4096 matmul: 4.3ms
+  [0;32m✓[0m GPU[1] NVIDIA L4 — FP16 4096x4096 matmul: 2.0ms
+  [0;32m✓[0m GPU[2] NVIDIA L4 — FP16 4096x4096 matmul: 2.0ms
+  [0;32m✓[0m GPU[3] NVIDIA L4 — FP16 4096x4096 matmul: 2.0ms
+  [0;32m✓[0m All 4 GPUs passed FP16 matmul benchmark
+  [0;32m✓[0m BERT GPU inference ok | [CLS] shape=[1, 768] norm=15.337
+  [0;32m✓[0m IVF index trained on 2496 vectors (dim=768, centroids=64)
+  [0;32m✓[0m 5000 vectors added | ntotal=5000
+  [0;32m✓[0m IVF search: 10/10 self-queries in top-5 (nprobe=8)
+  [0;32m✓[0m Vector store serialize/deserialize: results identical
+  [0;32m✓[0m Vector store integrity check passed — RAG retriever component confirmed
+  ✓ Tier 5 passed: GPU benchmark + BERT inference + vector store integrity
+  ✓ All verification tiers passed
+
+============================================================
+ Setup Summary  (total: 6m 14s)
+============================================================
+  Step                                     Status   Duration
+  ----                                     ------   --------
+  preflight_fast_checks                    PASS   1s
+  check_uv                                 PASS   0s
+  check_lockfile                           PASS   0s
+  log_gpu                                  PASS   0s
+  ensure_venv                              PASS   0s
+  verify_python                            PASS   0s
+  sync_dependencies                        PASS   2s
+  check_dependency_drift                   PASS   28s
+  detect_hardware                          PASS   8s
+  write_repro_env                          PASS   0s
+  write_repro_module                       PASS   6s
+  verify_numerical_stability               PASS   5s
+  download_nlp_models                      PASS   9s
+  run_env_smoke_tests                      PASS   26s
+  run_gpu_smoke_tests                      PASS   26s
+  write_manifest                           PASS   37s
+  register_kernel                          PASS   7s
+  verify_tests                             PASS   219s
+============================================================
+============================================================
+ Environment ready — full certification passed.
+
+ Quick reference:
+   Activate venv:  source .venv/bin/activate
+   Jupyter kernel: HallucinationLegalRAG (3.11.9)
+   Manifest:       logs/environment_manifest.json
+
+ Notebook Cell 1 (required first line):
+   from src.repro import configure; repro_cfg = configure()
+
+ Data acquisition:
+   Notebook Cell 2 — CourtListener REST API pipeline
+
+ Available modes:
+   LOG_LEVEL=0    Quiet — errors only (CI)
+   LOG_LEVEL=2    Verbose — all messages including INFO
+   VERBOSE=1      Alias for LOG_LEVEL=2
+   DRY_RUN=1      Preview all side effects (no writes)
+   NO_DOWNLOAD=1  Skip spaCy model download/install
+   NO_JUPYTER=1   Skip Jupyter kernel registration
+   OFFLINE=1      Use cached wheels; fail if not present
+   SKIP_GPU=1     Skip GPU smoke tests
+   DEBUG=1        Full shell trace (set -x)
+   STEP=<fn>      Run one step only
+
+ Module map (edit the right file):
+   Hardware policy:    scripts/validate_gpu.sh
+   NLP model:          scripts/setup_nlp.sh
+   Notebook/repro:     scripts/setup_notebook.sh
+   Constants/seeds:    scripts/lib.sh
+   Manifest Python:    src/manifest_collector.py
+   Drift check Python: src/drift_check.py
+ Seed expt:   Edit RANDOM_SEED in scripts/lib.sh, re-run, commit
+============================================================

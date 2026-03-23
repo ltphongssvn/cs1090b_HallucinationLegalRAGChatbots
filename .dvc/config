@@ -1,0 +1,5 @@
+[core]
+    remote = s3-dvc
+['remote "s3-dvc"']
+    url = s3://cs1090b-hallucinationlegalragchatbots/dvc
+    region = us-east-2
