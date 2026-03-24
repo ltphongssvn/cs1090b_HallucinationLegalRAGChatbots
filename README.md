@@ -910,11 +910,18 @@ uv run pytest --cov=src --cov-report=term-missing  # run full test suite with co
 jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 ```
 
-`src/repro.configure()` — first statement in every notebook cell and CLI script.
-`HF_TOKEN` is required by this repo on the shared cluster; add to `.env` before running.
-`TARGET_GPU_COUNT=1` must be set in `.env` to match SLURM single-GPU allocation.
-All device references use `.to("cuda")` or `.to("cuda:0")` — never a hardcoded physical ordinal.
-`uv.lock` + DVC → configuration-reproducible and determinism-controlled experiments.
+* `src/repro.configure()` must be the **first statement** in every notebook cell and CLI script.
+* `HF_TOKEN` is required by this repository on the shared cluster.
+* Add `HF_TOKEN` to `.env` **before running** the project.
+* `TARGET_GPU_COUNT=1` must also be set in `.env`.
+* This value must match the **SLURM single-GPU allocation**.
+* All device placement must use:
+  * `.to("cuda")`
+  * or `.to("cuda:0")`
+* Never use a **hardcoded physical GPU ordinal**.
+* `uv.lock` and DVC together provide:
+  * **configuration reproducibility**
+  * **determinism-controlled experiments**
 
 ---
 
@@ -966,28 +973,28 @@ cs1090b_HallucinationLegalRAGChatbots/
 
 ## Certified Baseline Tech Stack
 
-| Layer | Tool | Certified version |
-|-------|------|------------------|
-| Language | Python | 3.11.9 |
-| Package manager | uv | 0.10.2 (repo-pinned) |
-| Deep learning | PyTorch | 2.0.1+cu117 (node driver: CUDA 12.8) |
-| Transformers | HuggingFace transformers | 4.39.3 (version-asserted at startup) |
-| Sentence embeddings | sentence-transformers | 3.1.1 |
-| Dense retrieval | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
-| CrossEncoder reranker | BAAI/bge-reranker-v2-m3 | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
-| BM25 retrieval | bm25s | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
-| Vector search | faiss-cpu | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
-| LLM generator | mistralai/Mistral-7B-Instruct-v0.2 | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
-| Tokenizer dependency | sentencepiece | 0.2.1 |
-| NLI classifier | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; allow_tf32=True (opt-in; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
-| NLP sentence boundaries | spaCy + en_core_web_sm | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions) |
-| Chunking tokenizer | AutoTokenizer (transformers) | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT) |
-| Citation index | SQLite (stdlib) | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| Experiment tracking | W&B | 0.25.1 |
-| Data versioning | DVC 3.67.0 + dvc-s3 3.3.0 | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
-| Test framework | pytest + hypothesis | lockfile-pinned |
-| Linting | ruff | lockfile-pinned |
-| Type checking | mypy | lockfile-pinned |
+| Layer                   | Tool                                                                                                 | Certified version |
+|-------------------------|------------------------------------------------------------------------------------------------------|------------------|
+| Language                | Python                                                                                               | 3.11.9 |
+| Package manager         | uv                                                                                                   | 0.10.2 (repo-pinned) |
+| Deep learning           | PyTorch                                                                                              | 2.0.1+cu117 (node driver: CUDA 12.8) |
+| Transformers            | HuggingFace transformers                                                                             | 4.39.3 (version-asserted at startup) |
+| Sentence embeddings     | sentence-transformers                                                                                | 3.1.1 |
+| Dense retrieval         | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
+| CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
+| BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
+| Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
+| LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
+| Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
+| NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; allow_tf32=True (opt-in; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
+| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions) |
+| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT) |
+| Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
+| Experiment tracking     | W&B                                                                                                  | 0.25.1 |
+| Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
+| Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
+| Linting                 | ruff                                                                                                 | lockfile-pinned |
+| Type checking           | mypy                                                                                                 | lockfile-pinned |
 
 ---
 
