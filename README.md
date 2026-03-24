@@ -387,32 +387,50 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ### Exact Hypotheses
 
 * **H1:** The **Hybrid** system (**BM25 + BGE-M3 + CrossEncoder**) is expected to achieve **significantly higher Recall@10** than:
-  * **BM25 alone**
-  * **BGE-M3 alone**
-Statistical significance will be tested using:
-  * **paired bootstrap**
-  * **p < 0.05**
+    * **BM25 alone**
+    * **BGE-M3 alone**
+  * Statistical significance will be tested using:
+    * **paired bootstrap**
+    * **p < 0.05**
 
 * **H2:** Retrieval architectures with higher **Recall@10** are expected to produce significantly lower **contradiction rates** in downstream generation.
-* Contradiction rate is reported in two normalized forms:
-  * by **claim count**
-  * per **1,000 tokens**
-* **Zero-claim responses are excluded** from this calculation.
-* The purpose of this hypothesis is to test whether better retrieval reduces **active hallucination**.
-* This also helps separate true contradiction errors from simple **retrieval-coverage gaps**.
+
+  * Contradiction rate is reported in two normalized forms:
+    * by **claim count**
+    * per **1,000 tokens**
+  * **Zero-claim responses are excluded** from this calculation.
+  * The purpose of this hypothesis is to test whether better retrieval reduces **active hallucination**.
+  * This also helps separate true contradiction errors from simple **retrieval-coverage gaps**.
 
 * **H3:** The **Hybrid** retrieval system is expected to achieve **higher Recall@10** than either of the single-method baselines used alone:
-  * **BGE-M3**
-  * **BM25**
+    * **BGE-M3**
+    * **BM25**
 
 ### Task Definition
 
-**Retrieval:** Minimize rank(p* | q, C) over CourtListener federal appellate corpus C.
-**Generation:** q + top-10 chunks (1024 subwords each), formatted via
-`tokenizer.apply_chat_template(...)` → `mistralai/Mistral-7B-Instruct-v0.2` (frozen,
-`do_sample=False`, sequential load) → R. Runtime assertion on prompt length before generation;
-effective prompt token count (Mistral tokenizer) logged per query.
-**Start Tier A on 10–20% subset; add Tier B/C after validation.**
+* **Retrieval:** Minimize rank(p* | q, C) over CourtListener federal appellate corpus C. The system receives a legal question **`q`**, searches the corpus **`C`** of federal appellate opinions, and tries to place the **correct supporting passage `p*`** as high as possible in the results list. `rank(p* | q, C)` is the retrieval position of the gold legal passage `p*` for query `q` within corpus `C`, and minimizing it means pushing the correct evidence as close to the top of the retrieved results as possible.
+
+* **Generation input** consists of:
+  * the query `q`
+  * the **top-10 retrieved chunks**
+  * each chunk capped at **1024 subwords**
+“q + top-10 chunks” means the user’s query combined with the 10 highest-ranked retrieved evidence chunks, which together form the grounded input sent to the generator model.
+  * The full prompt is formatted using:
+    * `tokenizer.apply_chat_template(...)`
+  * The generator model is:
+    * `mistralai/Mistral-7B-Instruct-v0.2`
+  * The generator is kept **frozen** during evaluation.
+  * Decoding uses:
+    * `do_sample=False`
+  * The model is loaded using a **sequential loading strategy**.
+  * Output response is:
+    * `R`
+  * Before generation starts, a **runtime assertion** checks prompt length.
+  * The **effective prompt token count** is logged for each query using the **Mistral tokenizer**.
+
+  * Begin with **Tier A** on a **10–20% subset** of the data.
+  * Use this smaller run to **validate the pipeline and metrics first**.
+  * Add **Tier B** and **Tier C** only after Tier A has been successfully validated.
 
 ### Data Split Strategy (Capped)
 
