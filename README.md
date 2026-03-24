@@ -172,9 +172,9 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
 
 ---
 
-## Addressing Reviewer Concerns
+## Addressing TF Reviewer Comments and Instructor Notes
 
-### Concern 1 — Feasibility of Hallucination Measurement
+### Comment 1 — Feasibility of Hallucination Measurement
 The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
 
 #### Tier A
@@ -228,7 +228,7 @@ Retrieval Grounding
   * **(3) Sliding-window fallback**
 - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 
-### Concern 2 — Embedding Model Training
+### Comment 2 — Embedding Model Training
 
 | Architecture                     | Base Model                                | Training                     | Key Hyperparameters                                                                              |
 |----------------------------------|-------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------|
@@ -237,10 +237,14 @@ Retrieval Grounding
 | Hybrid: BM25+BGE-M3+CrossEncoder | BGE-M3 + BAAI/bge-reranker-v2-m3          | RRF top-50 → rerank → top-10 | sentence-transformers CrossEncoder path smoke-tested in this repo; max_length=1024, batch_size=4 |
 | Legal-BERT (optional)            | Legal-BERT (12GB legal text)              | MultipleNegativesRankingLoss | lr=2e-5, warmup=10%, batch=32, epochs=3                                                          |
 
-### Concern 3 — Domain Gap
+---
+
+## Self-Audit Findings and Corrections
+
+### Revision 1 — Domain Gap
 - Claims scoped to federal appellate opinions.
 
-### Concern 4 — Hallucination Metric Definition
+### Revision 2 — Hallucination Metric Definition
 
 * **Contradiction rate** is reported in two normalized forms:
   * by **claim count**
@@ -252,7 +256,7 @@ Retrieval Grounding
 * **NLI scores** are treated as **diagnostic indicators only**, not calibrated probabilities.
 * **Neutral** is **not automatically counted as hallucination**.
 
-### Concern 5 — Citation Existence vs. Citation Correctness
+### Revision 3 — Citation Existence vs. Citation Correctness
 
 * **Tier C** assigns and logs a unique citation hash for every citation lookup.
 * If the citation resolves to `NULL`, it is labeled **Hard Citation Hallucination**.
@@ -263,7 +267,7 @@ Retrieval Grounding
   * **(2) Keyword / regex matching**
   * **(3) Sliding-window fallback**
 
-### Concern 6 — Architecture Alignment
+### Revision 4 — Architecture Alignment
 
 * The retrieval systems are organized along a spectrum:
   * **BM25** → lexical baseline
@@ -274,13 +278,13 @@ Retrieval Grounding
 * The **1024-subword chunk budget** is a **controlled experimental design choice**.
 * It is **not** a hard limitation of **BGE-M3** itself.
 
-### Concern 7 — Scientific Claim Precision
+### Revision 5 — Scientific Claim Precision
 Scoped to federal appellate opinions.
 
-### Concern 8 — Outdated Architectures
+### Revision 6 — Outdated Architectures
 CNN/BiLSTM replaced — see Architecture Classification.
 
-### Concern 9 — Chunking Accuracy
+### Revision 7 — Chunking Accuracy
 
 * **spaCy tokens are not the same as BPE subword tokens.**
 * `nlp.max_length` is set high enough to process full federal appellate opinions safely.
@@ -304,7 +308,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * test **64-subword overlap**
   * on a **10% subset**
 
-### Concern 10 — LLM Generator
+### Revision 8 — LLM Generator
 
 * The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
 * It has been **smoke-tested in this repository** under **`transformers 4.39.3`**.
@@ -317,7 +321,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * This ensures the pipeline fails loudly if the prompt exceeds the allowed context size.
 * The model has **no built-in moderation layer**.
 
-### Concern 11 — VRAM / KV Cache Risk
+### Revision 9 — VRAM / KV Cache Risk
 
 * All experiments run on a **single SLURM-allocated GPU** with **23.7GB VRAM**.
 * All models use **bfloat16** as the primary dtype.
@@ -347,7 +351,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * The **projected peak memory usage** is expected to remain within the **23.7GB VRAM budget**.
 
 
-### Concern 12 — Tier C API Rate Limits
+### Revision 10 — Tier C API Rate Limits
 
 * Tier C does **not** rely on live API calls at evaluation time.
 * API rate-limit risk is avoided by using a **local SQLite index** instead.
@@ -359,7 +363,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * no live API dependency
   * no rate-limit bottleneck during large evaluation runs
 
-### Concern 13 — Training Cost vs Timeline
+### Revision 11 — Training Cost vs Timeline
 Explicit compute caps set up front — see Revised Feasibility Statement.
 
 ---
@@ -490,18 +494,26 @@ Paired bootstrap (B=10,000). P-values + 95% CIs. Cohen's d. Benjamini-Hochberg F
 | (c) | Hybrid: BM25+BGE-M3+bge-reranker-v2-m3 | Transformer + lexical + CrossEncoder reranker | **Expected strongest** |
 | (d) | Legal-BERT Bi-Encoder | Domain-specific Transformer | Optional domain-reference model |
 
-Sparse retrieval uses `bm25s` indexed over the same pre-chunked payloads as BGE-M3. Dense
-retrieval uses the repo-certified stack (`sentence-transformers 3.1.1`, `transformers 4.39.3`),
-CLS pooling per BAAI's published `1_Pooling/config.json`; runtime assertion in `model_loader.py`
-guards against accidental override; pooling flags logged to W&B once per run. Chunk budget
-standardized to 1024 subwords with 128-subword overlap (512 for Legal-BERT) as a controlled
-design choice. Reranker (`BAAI/bge-reranker-v2-m3`) via `sentence-transformers CrossEncoder`
-path smoke-tested in this repo; bfloat16; GPU default with CPU fallback; max_length=1024 +
-batch_size=4; score distributions (min/mean/max/entropy) logged; ranks serialized; top-50 → top-10.
-FAISS Flat for capped/validation; IVF for full-corpus final runs — `index.train()` on ~100K-vector
-subset; `assert index.is_trained`; recall@k vs nprobe logged on validation set to justify IVF
-parameters; nprobe/nlist logged per run in W&B; (`OMP_NUM_THREADS` + `MKL_NUM_THREADS` in
-`setup.sh`). CPU FAISS (`faiss-cpu 1.13.2`).
+* **Sparse retrieval** uses **`bm25s`**, `bm25s` is indexed over the **same pre-chunked payloads** embedded by **BGE-M3**. “pre-chunked payloads” means the retrieval-ready text chunks created ahead of time from legal opinions and reused identically by BM25 and BGE-M3 so the architecture comparison stays fair and reproducible.**
+
+* **Dense retrieval** uses the repo-certified stack:
+  * `sentence-transformers 3.1.1`
+  * `transformers 4.39.3`
+* It uses **CLS pooling**, following BAAI’s published:
+  * `1_Pooling/config.json`
+* A **runtime assertion** in `model_loader.py` prevents accidental pooling override.
+* The active **pooling flags** are logged to **Weights & Biases (W&B)** once per run.
+
+* The chunking policy is standardized as follows:
+  * **1024 subwords per chunk**
+  * **128-subword overlap**
+  * **512 subwords per chunk for Legal-BERT**
+* This is a **controlled experimental design choice**.
+* It is intended to keep chunking **consistent across the pipeline**.
+
+Reranker (`BAAI/bge-reranker-v2-m3`) via `sentence-transformers CrossEncoder` path smoke-tested in this repo; bfloat16; GPU default with CPU fallback; max_length=1024 + batch_size=4; score distributions (min/mean/max/entropy) logged; ranks serialized; top-50 → top-10.
+FAISS Flat for capped/validation; IVF for full-corpus final runs — `index.train()` on ~100K-vector subset; `assert index.is_trained`; recall@k vs nprobe logged on validation set to justify IVF parameters; nprobe/nlist logged per run in W&B; (`OMP_NUM_THREADS` + `MKL_NUM_THREADS` in `setup.sh`).
+CPU FAISS (`faiss-cpu 1.13.2`).
 
 ---
 
