@@ -93,7 +93,7 @@
   * `torch.cuda.device_count() == 1`
 * This ensures the runtime environment matches the expected **single-GPU execution setup**.
 * Per-model fallback to fp16/fp32 remains available if a path fails smoke tests.
-* For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization on L4/A10G; this can trade some FP32 numerical precision for speed and is treated as an opt-in inference optimization, not a semantic guarantee.
+* For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization targeting remaining float32 matmul/convolution paths on L4; in a bfloat16-heavy pipeline its impact is limited but it is retained as an opt-in inference optimization — this can trade some FP32 numerical precision for speed and is not a semantic guarantee.
 * The `allow_tf32` setting is logged in **W&B** for each phase. This provides **transparency** about whether TF32 acceleration was enabled during that phase.
 * As a **repo-level cleanup safeguard**, both the **DataLoader** and its **iterator** are explicitly deleted between phases.
 * This deletion happens **before** calling:
@@ -133,7 +133,7 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
   - Window-level logits are aggregated per chunk (not per window) to preserve retrieval-level semantics and avoid double-counting.
   - The window index triggering each entailment/contradiction label is logged for post-hoc diagnosis.
   - Text is tokenized on the fly in `__getitem__` to yield CPU tensors suitable for `pin_memory=True`; `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)` pads variable-length tensors for Tensor Core alignment on the L4/A10G.
-  - `torch.backends.cuda.matmul.allow_tf32 = True` is set for the NLI phase as a repo-level performance optimization — trades some FP32 numerical precision for speed, treated as opt-in inference optimization not a semantic guarantee; state logged per phase.
+  - `torch.backends.cuda.matmul.allow_tf32 = True` is set for the NLI phase as a repo-level performance optimization targeting remaining float32 matmul/convolution paths; in a bfloat16-heavy pipeline its impact is limited but it is retained as an opt-in inference optimization, not a semantic guarantee; state logged per phase.
   - `num_workers` is configurable (repo default 2; 4 for dedicated runs; 0 as fallback under SLURM cgroup restrictions).
   - As a repo-level cleanup safeguard, the DataLoader and iterator are explicitly deleted before `gc.collect()` + `torch.cuda.empty_cache()`.
   - Aggregation rule: if any window Entails → Entailment; else if any contradicts → Contradiction; else → Neutral.
@@ -344,7 +344,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * The **NLI phase** uses:
   * repo-certified overflow windowing
   * `DataCollatorWithPadding(pad_to_multiple_of=8)`
-  * `allow_tf32=True` *(opt-in)*
+  * `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged)
   * `pin_memory=True`
   * configurable `num_workers`
 * For SLURM-restricted environments, `num_workers=0` is available as a fallback.
@@ -521,7 +521,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Tokenize in `__getitem__`
     * Use:
       * `DataCollatorWithPadding(pad_to_multiple_of=8)`
-      * `allow_tf32=True` *(opt-in)*
+      * `allow_tf32=True` opt-in targets remaining float32 paths
       * `pin_memory=True`
       * configurable `num_workers`
       * `num_workers=0` as SLURM fallback
@@ -837,7 +837,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * window-level logits at the **chunk level**
   * uses:
     * `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)`
-    * `allow_tf32=True` *(opt-in; state logged)*
+    * `allow_tf32=True` (opt-in; targets remaining float32 matmul/convolution paths; limited impact in bfloat16-heavy pipeline; state logged)
     * `pin_memory=True`
     * configurable `num_workers`
 * **SQLite citation layer**
@@ -986,7 +986,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
 | LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
-| NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; allow_tf32=True (opt-in; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
+| NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT) |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
