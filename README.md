@@ -3,7 +3,7 @@
 
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
 
-- **Author:** Thanh Phong Le — phl690@g.harvard.edu
+- **Author:** PHONG LE — phl690@g.harvard.edu
 - **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 
@@ -438,37 +438,133 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 
 ### Data Split Strategy (Capped)
 
-| Split | Capped size | Use |
-|-------|-------------|-----|
-| Train | **500K–1M pairs** | Fine-tuning BGE-M3, reranker |
-| Validation | **50K pairs** | Hyperparameter tuning, RRF grid search |
-| Test (retrieval) | **10K–50K pairs** | Tier A evaluation |
-| Test (generation) | **1,000 queries** | Tier B/C evaluation |
+| Split             | Capped size       | Use                                    |
+|-------------------|-------------------|----------------------------------------|
+| Train             | **500K–1M pairs** | Fine-tuning BGE-M3, reranker           |
+| Validation        | **50K pairs**     | Hyperparameter tuning, RRF grid search |
+| Test (retrieval)  | **10K–50K pairs** | Tier A evaluation                      |
+| Test (generation) | **1,000 queries** | Tier B/C evaluation                    |
 
 ### Sample Size
 
-| Component | Capped size | Justification |
-|-----------|-------------|---------------|
-| Training pairs | 500K–1M | Contrastive convergence in hours on L4/A10G |
-| Retrieval eval | 10K–50K | Sufficient precision; avoids multi-day NLI cost |
-| Generation eval | 1,000 queries | ±2.5pp at 95% CI; stratified by circuit |
+| Component       | Capped size   | Justification                                   |
+|-----------------|---------------|-------------------------------------------------|
+| Training pairs  | 500K–1M       | Contrastive convergence in hours on L4/A10G     |
+| Retrieval eval  | 10K–50K       | Sufficient precision; avoids multi-day NLI cost |
+| Generation eval | 1,000 queries | ±2.5pp at 95% CI; stratified by circuit         |
 
 ### Evaluation Protocol
 
-1. Acquire LePaRD; cap training at 500K–1M pairs
-2. Train/adapt all retrievers on capped train split; `bm25s` indexed over pre-chunked payloads
-3. Validate on 10–20% CourtListener subset; scale if results hold; log recall@k vs nprobe on validation set to justify IVF parameters
-4. Sequential evaluation per 1,000 queries (allocator diagnostics + CUDA stream sync + allow_tf32 state logged + explicit DataLoader deletion + `empty_cache` + `gc.collect` between phases):
-   - Load BGE-M3 (bfloat16) → log pooling flags to W&B → retrieve top-50 (1024-subword chunks) → log embedding norm distribution → save → unload
-   - Load bge-reranker-v2-m3 (bfloat16; CrossEncoder; GPU default; max_length=1024, batch_size=4) → rerank top-50 → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload
-   - Load Mistral-7B-Instruct-v0.2 (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload
-   - Load DeBERTa-v3 NLI (bfloat16; use_fast=False; model_max_length=512; repo-certified overflow windowing max_length=512, stride=64; log window count per chunk distribution; tokenized in __getitem__; DataCollatorWithPadding pad_to_multiple_of=8; allow_tf32=True opt-in; pin_memory=True; num_workers configurable, 0 as SLURM fallback) → classify each atomic claim; window-level logits aggregated per chunk → log window index per label → log labels + confidence scores + claim counts → del dataloader → unload
-   - SQLite (check_same_thread=False; read-only) → log citation hash (opinion_id + anchor span) → NULL: Hard Citation Hallucination; found + no support: CitationFound_NoLocalSupport; log anchor offset on fallback; found + support: (1) reranker scores, (2) keyword/regex, (3) sliding-window → NLI 512-token passage (CPU)
-5. Aggregate; report contradiction rate (normalized + per 1K tokens), zero-claim rate, Hard Citation Hallucination rate, CitationFound_NoLocalSupport rate; significance tests; W&B
+1. **Acquire LePaRD** as the core retrieval dataset.**Cap the training set** to **500K–1M pairs** for feasibility and controlled compute.
+
+2. Train or adapt **all retrievers** using the **capped training split**, index **`bm25s`** over the **same pre-chunked payloads** used in the experiment.
+
+3. Validate first on a **10–20% subset** of the CourtListener corpus, scale up to the full corpus **only if the subset results remain stable and promising**. On the validation set, log **Recall@k versus `nprobe`**, use those validation results to **justify the chosen IVF search parameters**.
+
+4. Evaluation runs **sequentially over each batch of 1,000 queries**.
+
+  * Between phases, the pipeline logs and enforces:
+    * allocator diagnostics
+    * CUDA stream synchronization time
+    * `allow_tf32` state
+    * explicit **DataLoader deletion**
+    * `torch.cuda.empty_cache()`
+    * `gc.collect()`
+
+  * **Phase 1 — Dense retrieval with BGE-M3**
+    * Load **BGE-M3** in **bfloat16**
+    * Log **pooling flags** to W&B
+    * Retrieve **top-50** passages using **1024-subword chunks**
+    * Log **embedding norm distribution**
+    * Save results
+    * Unload model
+
+  * **Phase 2 — Reranking with bge-reranker-v2-m3**
+    * Load **`bge-reranker-v2-m3`** in **bfloat16**
+    * Use:
+      * **CrossEncoder**
+      * **GPU by default**
+      * `max_length=1024`
+      * `batch_size=4`
+    * Rerank the **top-50** candidates
+    * Log score distribution:
+      * minimum
+      * mean
+      * maximum
+      * entropy
+    * Serialize scores and ranks
+    * Return the **top-10** results
+    * Unload model
+
+  * **Phase 3 — Generation with Mistral-7B-Instruct-v0.2**
+    * Load **`Mistral-7B-Instruct-v0.2`** in **bfloat16**
+    * Apply the **chat template**
+    * Assert:
+      * `max(prompt_tokens) < 32768`
+    * Generate with:
+      * `do_sample=False`
+    * Log:
+      * prompt token count using the **Mistral tokenizer**
+      * completion token count
+    * Save outputs
+    * Unload model
+
+  * **Phase 4 — NLI evaluation with DeBERTa-v3**
+    * Load **DeBERTa-v3 NLI** in **bfloat16**
+    * Use:
+      * `use_fast=False`
+      * `model_max_length=512`
+      * repo-certified overflow windowing with:
+        * `max_length=512`
+        * `stride=64`
+    * Log **window count per chunk distribution**
+    * Tokenize in `__getitem__`
+    * Use:
+      * `DataCollatorWithPadding(pad_to_multiple_of=8)`
+      * `allow_tf32=True` *(opt-in)*
+      * `pin_memory=True`
+      * configurable `num_workers`
+      * `num_workers=0` as SLURM fallback
+    * Classify each **atomic claim**
+    * Aggregate **window-level logits** at the **chunk level**
+    * Log:
+      * window index per label
+      * labels
+      * confidence scores
+      * claim counts
+    * Delete DataLoader
+    * Unload model
+
+  * **Phase 5 — Citation checking with SQLite**
+    * Use **SQLite** with:
+      * `check_same_thread=False`
+      * read-only mode
+    * Log **citation hash**:
+      * `opinion_id + anchor span`
+    * If lookup returns `NULL`:
+      * label as **Hard Citation Hallucination**
+    * If citation is found but has **no support**:
+      * label as **CitationFound_NoLocalSupport**
+
+  * The last SQLite bullet in the source text appears cut off after **“log an”**.
+
+5. Aggregate all evaluation outputs across queries and phases.
+  * Report **contradiction rate** in two forms:
+    * normalized by **claim count**
+    * per **1,000 tokens**
+  * Report the **zero-claim rate** separately.
+  * Report the **Hard Citation Hallucination rate** separately.
+  * Report the **CitationFound_NoLocalSupport rate** separately.
+  * Run **significance tests** on the reported metrics.
+  * Log all results and diagnostics to **Weights & Biases (W&B)**.
 
 ### Significance Testing
 
-Paired bootstrap (B=10,000). P-values + 95% CIs. Cohen's d. Benjamini-Hochberg FDR.
+* **Paired bootstrap** with **B = 10,000** resamples
+* Report **p-values**
+* Report **95% confidence intervals (CIs)**
+* Report **effect size** using **Cohen’s d**
+* Apply **Benjamini–Hochberg FDR correction** for multiple comparisons
 
 ### Ablation Plan
 
@@ -511,9 +607,41 @@ Paired bootstrap (B=10,000). P-values + 95% CIs. Cohen's d. Benjamini-Hochberg F
 * This is a **controlled experimental design choice**.
 * It is intended to keep chunking **consistent across the pipeline**.
 
-Reranker (`BAAI/bge-reranker-v2-m3`) via `sentence-transformers CrossEncoder` path smoke-tested in this repo; bfloat16; GPU default with CPU fallback; max_length=1024 + batch_size=4; score distributions (min/mean/max/entropy) logged; ranks serialized; top-50 → top-10.
-FAISS Flat for capped/validation; IVF for full-corpus final runs — `index.train()` on ~100K-vector subset; `assert index.is_trained`; recall@k vs nprobe logged on validation set to justify IVF parameters; nprobe/nlist logged per run in W&B; (`OMP_NUM_THREADS` + `MKL_NUM_THREADS` in `setup.sh`).
-CPU FAISS (`faiss-cpu 1.13.2`).
+* **Reranker model:** `BAAI/bge-reranker-v2-m3`
+  * is being loaded and run using the **CrossEncoder class provided by the `sentence-transformers` library**.
+  * is smoke-tested in this repository
+  * uses **bfloat16** as the primary dtype
+  * runs on **GPU by default**
+  * supports **CPU fallback** if GPU execution is unavailable
+  * is configured with:
+    * `max_length=1024`
+    * `batch_size=4`
+  * logs reranker **score distributions**, including:
+    * minimum
+    * mean
+    * maximum
+    * entropy
+  * **Ranks are serialized** for later analysis
+  * Reranking flow **top-50 → top-10**: the system first retrieves 50 likely relevant legal chunks, then reranks those candidates and keeps the 10 strongest chunks as final evidence for downstream answer generation.
+
+* **FAISS Flat** is used for:
+  * capped experiments
+  * validation runs
+* **FAISS IVF** is reserved for:
+  * full-corpus final runs
+* Before IVF search is used:
+  * `index.train()` is run on an approximately **100K-vector subset**
+  * `assert index.is_trained` verifies that training completed successfully
+* To justify the chosen IVF settings:
+  * **recall@k vs. nprobe** is logged on the validation set
+* The following FAISS search parameters are logged to **W&B** for each run:
+  * `nprobe`
+  * `nlist`
+* CPU thread settings are controlled in `setup.sh` through:
+  * `OMP_NUM_THREADS`
+  * `MKL_NUM_THREADS`
+* **FAISS runs on CPU** in this setup.
+* The pinned package version is **`faiss-cpu 1.13.2`**.
 
 ---
 
@@ -537,75 +665,230 @@ CPU FAISS (`faiss-cpu 1.13.2`).
 
 ### Stage 1 — Raw Data Acquisition
 
-**CourtListener federal appellate subset (🔄):** 1,465,484 opinions, 23-field JSONL.
-SQLite citation index for Tier C (`check_same_thread=False`; read-only evaluation path;
-citation hash logged per lookup). Fast iteration: ~150K (10% subset); full 1.46M for final runs.
+* **CourtListener federal appellate subset (🔄)**
+  * Contains **1,465,484 opinions**
+  * Stored as **23-field JSONL** records
 
-**LePaRD (⏳ Priority 1):** ~4M pairs; training capped at 500K–1M. HuggingFace + GitHub.
-`src/dataset_loader.py` ready. `HF_TOKEN` is required by this repo on the shared cluster for
-authenticated Hub access and to reduce resolver/rate-limit failures; loaded via `dotenv` in
-`src/environment.py` and passed to every `from_pretrained()` call.
+* **Tier C citation support**
+  * Uses a local **SQLite citation index**
+  * Configured with `check_same_thread=False`
+  * Evaluation path is **read-only**
+  * A **citation hash** is logged for every lookup
 
-All tracked by DVC → S3 `cs1090b-hallucinationlegalragchatbots` (us-east-2).
+* **Iteration strategy**
+  * **Fast iteration:** ~150K opinions (**10% subset**)
+  * **Final runs:** full **1.46M-opinion** corpus
+
+
+* **LePaRD** is **Priority 1**.
+* The full dataset contains **~4 million pairs**.
+* Training will be **capped at 500K–1M pairs** for feasibility.
+* The dataset source is:
+  * **Hugging Face**
+  * **GitHub**
+* `src/dataset_loader.py` is already **ready** for LePaRD ingestion.
+* This repo requires **`HF_TOKEN`** on the shared cluster.
+* `HF_TOKEN` is used for:
+  * authenticated Hugging Face access
+  * reducing resolver failures
+  * reducing rate-limit failures
+* The token is loaded via **`dotenv`** in:
+  * `src/environment.py`
+* It is then passed to every:
+  * `from_pretrained()` call
+
+* All datasets and artifacts are tracked with **DVC**.
+* The DVC remote storage is **S3**.
+* The configured S3 bucket is:
+  * `cs1090b-hallucinationlegalragchatbots`
+* The bucket region is:
+  * `us-east-2`
 
 ### Stage 2 — Raw Artifact Registration
-Immutable manifest: 159 checksums, 1,465,484 rows, filter chain, `uv.lock` SHA256.
-Contract tests validate manifest on every pipeline run. SBOM (357 components).
+* An **immutable manifest** is generated for the dataset and pipeline state.
+* The manifest records:
+  * **159 shard checksums**
+  * **1,465,484 total rows**
+  * the full **filter-chain provenance**
+  * the **`uv.lock` SHA256** value
+* **Contract tests** validate the manifest on **every pipeline run**.
+* An **SBOM** is also generated, covering **357 software components**.
 
 ### Stage 3 — Preprocessing + Tokenizer-Aware Chunking
-Streaming CSV. HTML strip, encoding cleanup, Westlaw boilerplate removal.
-**spaCy stripped-down pipeline** (`exclude=["ner", "parser", "lemmatizer"]`) with `nlp.max_length`
-set high enough for full appellate opinions. Chunks built using
-`AutoTokenizer.from_pretrained(encoder_model)` inside the chunking loop. **Chunk budget
-standardized to 1024 subwords with 128-subword overlap (512 for Legal-BERT) as a controlled
-design choice for retriever–reranker consistency, not a limit of BGE-M3 itself.** Pre-chunked
-string payloads saved and reused by both BGE-M3 and `bm25s`. Effective prompt token count
-(Mistral tokenizer) logged per query; `assert max(prompt_tokens) < 32768` fires loudly if
-violated.
-Citation-aware splits, metadata per chunk (court_id, year, is_precedential, opinion_id, chunk_index).
-SQLite citation index built from `data/raw/cl_federal_appellate_bulk` via `src/extract.py`.
+* Data is processed through a **streaming CSV pipeline**.
+* Preprocessing includes:
+  * **HTML stripping**
+  * **encoding cleanup**
+  * **Westlaw boilerplate removal**
+* A **stripped-down spaCy pipeline** is used with:
+  * `exclude=["ner", "parser", "lemmatizer"]`
+* `nlp.max_length` is set high enough to safely handle **full federal appellate opinions**.
+* Chunks are built using:
+  * `AutoTokenizer.from_pretrained(encoder_model)`
+  * inside the **chunking loop**
+* The chunking policy is standardized as:
+  * **1024 subwords per chunk**
+  * **128-subword overlap**
+  * **512-subword chunks for Legal-BERT**
+* This chunk budget is a **controlled experimental design choice** for **retriever–reranker consistency**.
+* It is **not** a hard limitation of **BGE-M3**.
+* Pre-chunked string payloads are:
+  * **saved once**
+  * **reused by both BGE-M3 and `bm25s`**
+* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* A runtime guard enforces prompt length:
+  * `assert max(prompt_tokens) < 32768`
+* If that assertion fails, the pipeline stops loudly instead of silently exceeding context limits.
+* The pipeline creates **citation-aware data splits**.
+* Metadata stored for each chunk includes:
+  * `court_id`
+  * `year`
+  * `is_precedential`
+  * `opinion_id`
+  * `chunk_index`
+* A **SQLite citation index** is built from:
+  * `data/raw/cl_federal_appellate_bulk`
+  * via `src/extract.py`
+
 
 ### Stage 4 — Index Generation *(not started)*
-BM25 (`bm25s`) indexed over pre-chunked payloads from Stage 3 (not raw text). FAISS dense index:
-**Flat for capped/validation** (no training required); **IVF for full-corpus final runs** —
-`index.train()` on ~100K-vector random subset; `assert index.is_trained` guard before search;
-recall@k vs nprobe logged on validation set to justify IVF parameters; nprobe/nlist logged per
-run in W&B (`OMP_NUM_THREADS` + `MKL_NUM_THREADS` in `setup.sh`). `BAAI/bge-reranker-v2-m3`
-via `sentence-transformers CrossEncoder` path smoke-tested in this repo; bfloat16; GPU default,
-CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged;
-scores and ranks serialized; returns top-10. SQLite citation index.
+* **BM25 (`bm25s`)** is indexed over the **pre-chunked payloads from Stage 3**, not over raw text.
+* The **FAISS dense index** uses two modes:
+  * **Flat index** for capped / validation runs
+    * no index training required
+  * **IVF index** for full-corpus final runs
+    * `index.train()` runs on a random subset of about **100K vectors**
+    * `assert index.is_trained` is checked before search
+* To justify IVF settings, the pipeline logs:
+  * **recall@k vs. nprobe** on the validation set
+  * **nprobe** and **nlist** per run in **W&B**
+* Threading controls are set in `setup.sh` with:
+  * `OMP_NUM_THREADS`
+  * `MKL_NUM_THREADS`
+* **`BAAI/bge-reranker-v2-m3`** is used through the **`sentence-transformers` CrossEncoder** path.
+* This reranker path has been **smoke-tested in the repository**.
+* Reranker execution settings:
+  * primary dtype: **bfloat16**
+  * **GPU by default**
+  * **CPU fallback available**
+  * `max_length=1024`
+  * `batch_size=4`
+* The reranker logs score distribution statistics, including:
+  * **minimum**
+  * **mean**
+  * **maximum**
+  * **entropy**
+* Reranker outputs are persisted by:
+  * serializing **scores**
+  * serializing **ranks**
+* The reranker returns the **top 10** results after reranking.
+* A **SQLite citation index** is also maintained for citation-related lookup tasks.
 
 ### Stage 5 — Model Training *(not started)*
-Capped at 500K–1M pairs. Early stopping + gradient accumulation. GPU hours → W&B.
+* Training is **capped at 500K–1M pairs**.
+* **Early stopping** is used to avoid unnecessary training once performance stops improving.
+* **Gradient accumulation** is used to support effective larger-batch training under GPU memory constraints.
+* **GPU hours** are logged to **Weights & Biases (W&B)**.
 
 ### Stage 6 — Evaluation *(not started)*
-All models primary bfloat16; `transformers.__version__ == "4.39.3"`, `get_device_capability()[0] >= 8`,
-and `is_bf16_supported()` asserted in `environment.py`; `TARGET_GPU_COUNT=1` validated against
-`torch.cuda.device_count()`. Sequential loading per VRAM Budget table. `torch.cuda.memory_stats()`
-+ CUDA stream sync time + `allow_tf32` state logged per phase + explicit DataLoader deletion
-(repo-level cleanup safeguard) + `torch.cuda.empty_cache()` + `gc.collect()` at every phase
-boundary. BGE-M3: pooling flags logged to W&B + embedding norm distribution logged. Reranker
-score distributions (min/mean/max/entropy) logged. Mistral: `tokenizer.apply_chat_template(...)`
-enforced; `assert max(prompt_tokens) < 32768`; `do_sample=False`; prompt token count (Mistral
-tokenizer) and completion token count logged per query.
-`MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`: `use_fast=False` (repo-certified);
-`tokenizer.model_max_length=512`; overflow windowing repo-certified for this exact model/version;
-window count per chunk distribution logged; window-level logits aggregated per chunk; window index
-per label logged; `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)`;
-`allow_tf32=True` (opt-in; state logged); `pin_memory=True`; `num_workers` configurable.
-SQLite: citation hash logged per lookup; NULL → Hard Citation Hallucination;
-found + no support → CitationFound_NoLocalSupport; anchor offset logged on fallback.
-Reported metrics: contradiction rate (normalized + per 1K tokens), zero-claim rate, Hard Citation
-Hallucination rate, CitationFound_NoLocalSupport rate. Projected peak VRAM within 23.7GB.
+* All models use **bfloat16** as the primary dtype.
+* `environment.py` asserts the following at startup:
+  * `transformers.__version__ == "4.39.3"`
+  * `torch.cuda.get_device_capability()[0] >= 8`
+  * `torch.cuda.is_bf16_supported()`
+* `TARGET_GPU_COUNT=1` is validated against:
+  * `torch.cuda.device_count()`
+* Models are loaded **sequentially** according to the VRAM budget plan.
+* At every phase boundary, the pipeline performs cleanup and logging:
+  * `torch.cuda.memory_stats()`
+  * CUDA stream synchronization time
+  * `allow_tf32` state
+  * explicit DataLoader deletion
+  * `torch.cuda.empty_cache()`
+  * `gc.collect()`
+* **BGE-M3**
+  * pooling flags are logged to **W&B**
+  * embedding norm distribution is logged
+* **Reranker**
+  * score distributions are logged, including:
+    * minimum
+    * mean
+    * maximum
+    * entropy
+* **Mistral**
+  * prompt formatting is enforced with:
+    * `tokenizer.apply_chat_template(...)`
+  * prompt length is guarded by:
+    * `assert max(prompt_tokens) < 32768`
+  * generation uses:
+    * `do_sample=False`
+  * per-query logging includes:
+    * prompt token count
+    * completion token count
+* **`MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`**
+  * uses `use_fast=False` as the repo-certified path
+  * enforces:
+    * `tokenizer.model_max_length=512`
+  * overflow windowing is repo-certified for this exact model/version
+  * logs:
+    * window count per chunk distribution
+    * window index for each assigned label
+  * aggregates:
+    * window-level logits at the **chunk level**
+  * uses:
+    * `DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)`
+    * `allow_tf32=True` *(opt-in; state logged)*
+    * `pin_memory=True`
+    * configurable `num_workers`
+* **SQLite citation layer**
+  * logs a citation hash for every lookup
+  * `NULL` is labeled:
+    * **Hard Citation Hallucination**
+  * found citation but no support is labeled:
+    * **CitationFound_NoLocalSupport**
+  * citation anchor offset is logged when fallback logic is used
+* Reported metrics include:
+  * contradiction rate
+    * normalized by claim count
+    * reported per 1K tokens
+  * zero-claim rate
+  * Hard Citation Hallucination rate
+  * CitationFound_NoLocalSupport rate
+* The projected peak VRAM usage remains within the **23.7GB** budget.
 
 ### Stage 7 — Experiment Tracking *(not started)*
-`src/wandb_logger.py` ready. Per-phase GPU hours, peak CUDA memory, allocator diagnostics, CUDA
-stream sync times, `allow_tf32` state per phase, BGE-M3 pooling flags, embedding norm
-distributions, reranker score distributions (min/mean/max/entropy), FAISS recall@k vs nprobe +
-nprobe/nlist, NLI window count distributions, NLI confidence distributions, window indices per
-label, per-query claim counts, claims per 1K tokens, zero-claim rate, Hard Citation Hallucination
-counts, CitationFound_NoLocalSupport counts, citation hashes, citation anchor token offsets,
-prompt token counts (Mistral tokenizer) + completion token counts, gradient norms — integration pending.
+* `src/wandb_logger.py` is **ready**.
+* **W&B integration is still pending**.
+When integrated, the logger is intended to track:
+* **Per-phase GPU hours**
+* **Peak CUDA memory**
+* **Allocator diagnostics**
+* **CUDA stream synchronization times**
+* **`allow_tf32` state** for each phase
+* **BGE-M3 pooling flags**
+* **Embedding norm distributions**
+* **Reranker score distributions**, including:
+  * minimum
+  * mean
+  * maximum
+  * entropy
+* **FAISS retrieval diagnostics**, including:
+  * Recall@k vs `nprobe`
+  * `nprobe`
+  * `nlist`
+* **NLI window count distributions**
+* **NLI confidence distributions**
+* **Window indices per label**
+* **Per-query claim counts**
+* **Claims per 1,000 tokens**
+* **Zero-claim rate**
+* **Hard Citation Hallucination counts**
+* **CitationFound_NoLocalSupport counts**
+* **Citation hashes**
+* **Citation anchor token offsets**
+* **Prompt token counts** using the Mistral tokenizer
+* **Completion token counts**
+* **Gradient norms**
 
 ---
 
@@ -710,10 +993,12 @@ cs1090b_HallucinationLegalRAGChatbots/
 
 ## Ethical Considerations
 
-All datasets publicly available. CourtListener CC BY-ND 4.0.
-`mistralai/Mistral-7B-Instruct-v0.2` has no built-in moderation mechanisms per its model card;
-outputs are used strictly for retrieval research under academic supervision.
-PII follows provider redaction practices. No human annotation for hallucination measurement.
+* All datasets used in the project are **publicly available**.
+* **CourtListener** data is used under **CC BY-ND 4.0**.
+* **`mistralai/Mistral-7B-Instruct-v0.2`** does **not** include built-in moderation mechanisms, according to its model card.
+* Model outputs are used **strictly for retrieval research** under **academic supervision**.
+* Any **PII handling** follows the **redaction practices of the original data provider**.
+* The project uses **no human annotation** for hallucination measurement.
 
 ---
 
