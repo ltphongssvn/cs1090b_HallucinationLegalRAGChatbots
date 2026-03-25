@@ -31,6 +31,7 @@ pytestmark = pytest.mark.unit
 
 FIXTURE_JSONL = Path("tests/fixtures/courtlistener_sample.jsonl")
 
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -139,6 +140,10 @@ class TestProbeConfigMagicNumbers:
 # ---------------------------------------------------------------------------
 
 
+def _load_fixture_records() -> list[dict]:
+    return [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
+
+
 class TestFixtureJSONL:
     def test_fixture_file_exists(self):
         """tests/fixtures/courtlistener_sample.jsonl must exist in the repo."""
@@ -148,7 +153,7 @@ class TestFixtureJSONL:
         )
 
     def test_fixture_is_valid_jsonl(self):
-        records = [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
+        records = _load_fixture_records()
         assert len(records) >= 5
 
     def test_fixture_has_all_23_schema_fields(self):
@@ -177,18 +182,18 @@ class TestFixtureJSONL:
             "is_precedential",
             "text_entropy",
         }
-        records = [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
+        records = _load_fixture_records()
         for r in records:
             missing = EXPECTED_FIELDS - set(r.keys())
             assert not missing, f"Fixture record missing fields: {missing}"
 
     def test_fixture_is_deterministic(self):
-        r1 = [json.loads(l) for l in FIXTURE_JSONL.read_text().splitlines() if l.strip()]
-        r2 = [json.loads(l) for l in FIXTURE_JSONL.read_text().splitlines() if l.strip()]
+        r1 = _load_fixture_records()
+        r2 = _load_fixture_records()
         assert r1 == r2
 
     def test_fixture_text_length_matches_text(self):
-        records = [json.loads(l) for l in FIXTURE_JSONL.read_text().splitlines() if l.strip()]
+        records = _load_fixture_records()
         for r in records:
             assert abs(r["text_length"] - len(r["text"])) < 10, "text_length field must match actual text length"
 
@@ -254,7 +259,6 @@ class TestCIMode:
         """--ci-mode must sys.exit(1) when all_passed=False."""
         shard = tmp_path / "shards" / "s.jsonl"
         shard.parent.mkdir()
-        # Write records that will fail A9 (all zero citations)
         bad_records = _make_records(100, citation_count=0)
         with open(shard, "w") as fh:
             for r in bad_records:

@@ -9,7 +9,7 @@ Implements Category A dataset-readiness gates required before Stage 3:
   A11 — tokenizer-aware chunk count verification (BAAI/bge-m3, 1024-subword budget)
   A12 — citation anchor survival check in normalized text
   A13 — sentence density check via repo-certified spaCy pipeline (not NLTK)
-  B6  — text_entropy empirical distribution (threshold must be data-derived)
+  B6  — text_entropy empirical distribution + spot-check for formula drift
 
 Expected schema (23 fields):
   id, cluster_id, docket_id, court_id, court_name, case_name, date_filed,
@@ -23,6 +23,7 @@ CLI usage:
       --data-dir data/raw/cl_federal_appellate_bulk \\
       --subset 10000 \\
       --output logs/dataset_probe_report.json
+  uv run python -m src.dataset_probe ... --ci-mode  # exits 1 if any gate fails
 
 All output written to --output as JSON. No side effects on corpus shards.
 """
@@ -36,12 +37,20 @@ import math
 import random
 import re
 import statistics
+import sys
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterator
 
+import wandb  # type: ignore[import]
 from transformers import AutoTokenizer  # type: ignore[import]
+
+# ---------------------------------------------------------------------------
+# Probe version — increment when report schema changes
+# ---------------------------------------------------------------------------
+
+PROBE_VERSION = "2.0.0"
 
 # ---------------------------------------------------------------------------
 # ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
@@ -51,10 +60,11 @@ from transformers import AutoTokenizer  # type: ignore[import]
 @dataclasses.dataclass(frozen=True)
 class ProbeConfig:
     """
-    All probe thresholds in one place so experiment settings are explicit,
-    versionable, injectable, and JSON-serializable for provenance logging.
+    All probe thresholds and sampling parameters in one place.
+    Explicit, versionable, injectable, and JSON-serializable for provenance logging.
     """
 
+    # Pass/fail thresholds
     min_text_length: int = 1500
     chunk_size_subwords: int = 1024
     chunk_overlap_subwords: int = 128
@@ -68,10 +78,22 @@ class ProbeConfig:
     a12_min_pct_with_anchor: float = 60.0
     # A13 threshold calibrated to 15% based on empirical corpus run:
     # median=71.5 sentences, mean=118.8 — corpus is NLI-ready.
-    # spaCy sentencizer on legal text produces ~11% below-20-sentence rate
-    # even after A8 filtering; 15% gives a principled margin above that.
     a13_max_below_threshold_pct: float = 15.0
     quality_signals_sample_n: int = 500
+
+    # Subsample sizes — previously magic numbers, now explicit and loggable
+    a11_subsample_n: int = 200
+    a12_subsample_n: int = 500
+    a13_subsample_n: int = 200
+
+    # A13 text cap — previously 50_000 magic number, now explicit
+    # Caps per-doc cost for spaCy processing in the probe (not in training)
+    a13_text_cap_chars: int = 50_000
+
+    # B6 entropy spot-check tolerance — max allowed deviation between
+    # stored text_entropy and probe-computed Shannon entropy before flagging drift
+    b6_entropy_spot_check_tolerance: float = 1.0
+    b6_entropy_spot_check_sample_n: int = 10
 
 
 # Module-level defaults (kept for backward-compatible imports)
@@ -119,6 +141,23 @@ def _percentile(sorted_values: list[Any], p: float) -> Any:
         return sorted_values[-1]
     idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
     return sorted_values[idx]
+
+
+# ---------------------------------------------------------------------------
+# Shannon entropy helper — used by B6 spot-check
+# ---------------------------------------------------------------------------
+
+
+def _shannon_entropy(text: str) -> float:
+    """Compute word-level Shannon entropy (bits). Returns 0.0 for empty text."""
+    words = text.split()
+    if not words:
+        return 0.0
+    freq: dict[str, int] = {}
+    for w in words:
+        freq[w] = freq.get(w, 0) + 1
+    n = len(words)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
 
 
 # ---------------------------------------------------------------------------
@@ -305,10 +344,7 @@ def gate_a8_text_length_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    A8 — text_length distribution + RAG viability threshold.
-    Pass condition: <25% below min_text_length. ~20% short-doc tail is expected.
-    """
+    """A8 — text_length distribution. Pass: <25% below min_text_length."""
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A8_text_length_distribution", "pass": False, "note": "No records."}
@@ -371,7 +407,7 @@ def gate_a9_citation_count_distribution(
 
 def gate_a11_tokenizer_chunk_count(
     records: list[dict[str, Any]],
-    sample_n: int = 200,
+    sample_n: int | None = None,
     seed: int = 0,
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
@@ -379,8 +415,10 @@ def gate_a11_tokenizer_chunk_count(
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
     AutoTokenizer imported at module level so tests can patch it network-free.
     Tokenizer revision logged for reproducibility.
+    sample_n defaults to cfg.a11_subsample_n (was magic number 200).
     """
     cfg = config or ProbeConfig()
+    effective_sample_n = sample_n if sample_n is not None else cfg.a11_subsample_n
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
 
@@ -396,7 +434,7 @@ def gate_a11_tokenizer_chunk_count(
         }
 
     rng = random.Random(seed)
-    subsample = rng.sample(records, min(sample_n, len(records)))
+    subsample = rng.sample(records, min(effective_sample_n, len(records)))
 
     chunk_counts: list[int] = []
     token_lengths: list[int] = []
@@ -432,15 +470,17 @@ def gate_a11_tokenizer_chunk_count(
 
 def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
-    sample_n: int = 500,
+    sample_n: int | None = None,
     seed: int = 0,
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival in normalized text field.
     NOTE: regex-based detection is a heuristic approximation, not a precision extractor.
+    sample_n defaults to cfg.a12_subsample_n (was magic number 500).
     """
     cfg = config or ProbeConfig()
+    effective_sample_n = sample_n if sample_n is not None else cfg.a12_subsample_n
     if not records:
         return {"gate": "A12_citation_anchor_survival", "pass": False, "note": "No records."}
 
@@ -452,7 +492,7 @@ def gate_a12_citation_anchor_survival(
         re.MULTILINE,
     )
     rng = random.Random(seed)
-    subsample = rng.sample(records, min(sample_n, len(records)))
+    subsample = rng.sample(records, min(effective_sample_n, len(records)))
 
     has_anchor = 0
     citation_counts_found: list[int] = []
@@ -481,17 +521,18 @@ def gate_a12_citation_anchor_survival(
 
 def gate_a13_sentence_density(
     records: list[dict[str, Any]],
-    sample_n: int = 200,
+    sample_n: int | None = None,
     seed: int = 0,
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
     """
     A13 — Sentence density on A8-filtered records only (text_length >= min_text_length).
     Uses repo-certified spaCy pipeline with sentencizer (not NLTK, not parser).
-    Pass threshold: 15% below min_sentence_count — calibrated to empirical corpus run
-    (median=71.5 sentences, mean=118.8, observed below-rate=11% after A8 filter).
+    sample_n defaults to cfg.a13_subsample_n (was magic number 200).
+    text cap defaults to cfg.a13_text_cap_chars (was magic number 50_000).
     """
     cfg = config or ProbeConfig()
+    effective_sample_n = sample_n if sample_n is not None else cfg.a13_subsample_n
     if not records:
         return {"gate": "A13_sentence_density", "pass": False, "note": "No records."}
 
@@ -521,12 +562,12 @@ def gate_a13_sentence_density(
         }
 
     rng = random.Random(seed)
-    subsample = rng.sample(substantive, min(sample_n, len(substantive)))
+    subsample = rng.sample(substantive, min(effective_sample_n, len(substantive)))
 
     sent_counts: list[int] = []
     below_threshold = 0
     for r in subsample:
-        text = str(r.get("text", ""))[:50_000]
+        text = str(r.get("text", ""))[: cfg.a13_text_cap_chars]
         doc = nlp(text)
         n_sents = sum(1 for _ in doc.sents)
         sent_counts.append(n_sents)
@@ -558,13 +599,31 @@ def gate_b6_text_entropy_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """B6 — text_entropy distribution. Pass always — threshold is data-derived."""
+    """
+    B6 — text_entropy distribution + spot-check for formula drift.
+    Spot-check computes Shannon entropy on a subsample and compares against
+    the stored text_entropy field to detect upstream formula changes.
+    Pass always (distribution-only) — threshold is data-derived.
+    """
+    cfg = config or ProbeConfig()
     if not records:
         return {"gate": "B6_text_entropy_distribution", "pass": True, "note": "No records."}
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
     zero_entropy = sum(1 for e in entropies if e == 0.0)
+
+    # Spot-check: compute entropy on sample and compare to stored values
+    spot_sample = records[: cfg.b6_entropy_spot_check_sample_n]
+    deviations: list[float] = []
+    for r in spot_sample:
+        text = str(r.get("text", ""))
+        computed = _shannon_entropy(text)
+        stored = float(r.get("text_entropy", 0.0))
+        deviations.append(abs(computed - stored))
+    max_deviation = max(deviations) if deviations else 0.0
+    spot_consistent = max_deviation <= cfg.b6_entropy_spot_check_tolerance
+
     return {
         "gate": "B6_text_entropy_distribution",
         "count": len(entropies),
@@ -580,6 +639,12 @@ def gate_b6_text_entropy_distribution(
         "p95": _percentile(entropies_sorted, 95),
         "zero_entropy_count": zero_entropy,
         "zero_entropy_pct": round(100.0 * zero_entropy / len(entropies), 2),
+        "spot_check": {
+            "consistent": spot_consistent,
+            "max_deviation": round(max_deviation, 4),
+            "tolerance": cfg.b6_entropy_spot_check_tolerance,
+            "sample_n": len(spot_sample),
+        },
         "pass": True,
         "note": "Use p10 as provisional low-entropy filter cutoff for Stage 3.",
     }
@@ -668,6 +733,7 @@ class CourtListenerDatasetProbe:
     """
     Orchestrates all dataset-readiness gates for the local CourtListener corpus.
     Accepts injected ProbeConfig for reproducible, versioned experiment settings.
+    Supports optional W&B logging for experiment tracking.
     """
 
     def __init__(self, config: ProbeConfig | None = None) -> None:
@@ -689,6 +755,7 @@ class CourtListenerDatasetProbe:
         seed: int = 0,
         skip_tokenizer: bool = False,
         skip_spacy: bool = False,
+        log_to_wandb: bool = False,
     ) -> dict[str, Any]:
         return run_probe(
             data_dir=data_dir,
@@ -698,6 +765,7 @@ class CourtListenerDatasetProbe:
             skip_tokenizer=skip_tokenizer,
             skip_spacy=skip_spacy,
             config=self.config,
+            log_to_wandb=log_to_wandb,
         )
 
 
@@ -714,6 +782,7 @@ def run_probe(
     skip_tokenizer: bool = False,
     skip_spacy: bool = False,
     config: ProbeConfig | None = None,
+    log_to_wandb: bool = False,
 ) -> dict[str, Any]:
     cfg = config or ProbeConfig()
 
@@ -745,6 +814,7 @@ def run_probe(
             "shard_errors": audit["shard_errors"],
         },
         "provenance": {
+            "probe_version": PROBE_VERSION,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "spacy_version": spacy_version,
             "spacy_model_version": spacy_model_version,
@@ -801,6 +871,19 @@ def run_probe(
         json.dump(report, fh, indent=2)
     print(f"[dataset_probe] Report written → {output}")
     print(f"[dataset_probe] PASSED: {passed} | FAILED: {failed} | SKIPPED: {skipped}")
+
+    if log_to_wandb and wandb.run is not None:
+        wandb.log(
+            {
+                "probe/passed_gates": len(passed),
+                "probe/failed_gates": len(failed),
+                "probe/all_passed": report["summary"]["all_passed"],
+                "probe/parse_errors": audit["total_parse_errors"],
+                **{f"probe/quality/{k}": v for k, v in report["quality_signals"]["signal_counts"].items()},
+                "probe/pct_clean": report["quality_signals"]["pct_clean"],
+            }
+        )
+
     return report
 
 
@@ -817,8 +900,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-tokenizer", action="store_true")
     parser.add_argument("--skip-spacy", action="store_true")
+    parser.add_argument(
+        "--ci-mode",
+        action="store_true",
+        help="Exit 1 if any gate fails — use as CI hard gate before training jobs.",
+    )
     args = parser.parse_args()
-    run_probe(
+    report = run_probe(
         data_dir=args.data_dir,
         subset=args.subset,
         output=args.output,
@@ -826,6 +914,9 @@ def main() -> None:
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
     )
+    if args.ci_mode and not report["summary"]["all_passed"]:
+        print(f"[dataset_probe] CI mode: gate failures detected — {report['summary']['failed']}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
