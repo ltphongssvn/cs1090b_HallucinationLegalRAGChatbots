@@ -1,9 +1,8 @@
 # tests/test_dataset_probe.py
 """
 Full contract tests for src/dataset_probe.py — CourtListener local shard probe.
-Merged from test_dataset_probe.py (v1 contracts) and test_dataset_probe_v2.py (v2 improvements).
+Single authoritative test file covering all contracts.
 """
-
 from __future__ import annotations
 
 import json
@@ -15,13 +14,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.dataset_probe import (
-    CHUNK_OVERLAP_SUBWORDS,
-    CHUNK_SIZE_SUBWORDS,
-    ENCODER_MODEL,
-    MIN_SENTENCE_COUNT,
-    PROBE_VERSION,
-    PROVISIONAL_MIN_TEXT_LENGTH,
-    SPACY_MODEL,
     CourtListenerDatasetProbe,
     ModelQualitySignals,
     ProbeConfig,
@@ -38,6 +30,13 @@ from src.dataset_probe import (
     run_probe,
     sample_records,
     validate_schema,
+    PROVISIONAL_MIN_TEXT_LENGTH,
+    CHUNK_SIZE_SUBWORDS,
+    CHUNK_OVERLAP_SUBWORDS,
+    ENCODER_MODEL,
+    SPACY_MODEL,
+    MIN_SENTENCE_COUNT,
+    PROBE_VERSION,
 )
 
 pytestmark = pytest.mark.unit
@@ -124,7 +123,6 @@ class TestProbeConfig:
 
     def test_is_json_serializable(self):
         import dataclasses
-
         cfg = ProbeConfig()
         d = dataclasses.asdict(cfg)
         json.dumps(d)
@@ -176,6 +174,23 @@ class TestProbeConfigMagicNumbers:
         assert "a11_subsample_n" in config
         assert "a12_subsample_n" in config
         assert "a13_subsample_n" in config
+
+
+class TestProbeConfigGenerativeModel:
+    def test_has_a11_generative_model(self):
+        assert hasattr(ProbeConfig(), "a11_generative_model")
+
+    def test_a11_generative_model_default_is_mistral(self):
+        val = ProbeConfig().a11_generative_model.lower()
+        assert "mistral" in val
+
+    def test_a11_generative_model_custom_accepted(self):
+        cfg = ProbeConfig(a11_generative_model="meta-llama/Llama-2-7b")
+        assert cfg.a11_generative_model == "meta-llama/Llama-2-7b"
+
+    def test_a11_generative_model_empty_string_accepted(self):
+        cfg = ProbeConfig(a11_generative_model="")
+        assert cfg.a11_generative_model == ""
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +375,7 @@ class TestGateA8:
 
 
 # ---------------------------------------------------------------------------
-# Gate A9
+# Gate A9 — advisory note
 # ---------------------------------------------------------------------------
 
 
@@ -380,9 +395,20 @@ class TestGateA9:
     def test_empty_records_handled(self):
         assert "pass" in gate_a9_citation_count_distribution([])
 
+    def test_note_clarifies_advisory_role(self):
+        """A9 note must clarify it is advisory, not a hard corpus filter."""
+        r = gate_a9_citation_count_distribution(_make_records(10))
+        note = r["note"].lower()
+        assert "advisory" in note or "probe" in note or "filter" in note
+
+    def test_note_mentions_full_corpus_unfiltered(self):
+        r = gate_a9_citation_count_distribution(_make_records(10))
+        note = r["note"].lower()
+        assert "full" in note or "corpus" in note or "final" in note
+
 
 # ---------------------------------------------------------------------------
-# Gate A11 — mocked tokenizer (network-free)
+# Gate A11 — mocked tokenizer + generative tokenizer check
 # ---------------------------------------------------------------------------
 
 
@@ -392,35 +418,64 @@ class TestGateA11:
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert gate_a11_tokenizer_chunk_count(_make_records(10), sample_n=10)["pass"] is True
+        assert gate_a11_tokenizer_chunk_count(_make_records(10))["pass"] is True
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_encoder_model(self, mock_cls):
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5).get("encoder_model") == ENCODER_MODEL
+        assert gate_a11_tokenizer_chunk_count(_make_records(5)).get("encoder_model") == ENCODER_MODEL
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_tokenizer_revision(self, mock_cls):
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert "tokenizer_revision" in gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
+        assert "tokenizer_revision" in gate_a11_tokenizer_chunk_count(_make_records(5))
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_fail_on_tokenizer_load_error(self, mock_cls):
         mock_cls.from_pretrained.side_effect = OSError("not found")
-        r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
+        r = gate_a11_tokenizer_chunk_count(_make_records(5))
         assert r["pass"] is False
         assert "error" in r
 
     def test_empty_records_handled(self):
         assert "pass" in gate_a11_tokenizer_chunk_count([])
 
+    def test_uses_all_records_when_fewer_than_subsample_n(self):
+        """No internal subsampling — all 5 records must be processed."""
+        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
+            mock_tok = MagicMock()
+            mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+            mock_cls.from_pretrained.return_value = mock_tok
+            r = gate_a11_tokenizer_chunk_count(_make_records(5))
+            assert r["subsample_n"] == 5
+
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_reports_generative_token_check_when_model_set(self, mock_cls):
+        """A11 must report generative_token_check when a11_generative_model is set."""
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_cls.from_pretrained.return_value = mock_tok
+        cfg = ProbeConfig(a11_generative_model="mistralai/Mistral-7B-Instruct-v0.2")
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
+        assert "generative_token_check" in r
+
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_skips_generative_check_when_model_empty(self, mock_cls):
+        """A11 must skip generative check when a11_generative_model is empty."""
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_cls.from_pretrained.return_value = mock_tok
+        cfg = ProbeConfig(a11_generative_model="")
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
+        assert "generative_token_check" not in r
+
 
 # ---------------------------------------------------------------------------
-# Gate A12
+# Gate A12 — no internal subsampling
 # ---------------------------------------------------------------------------
 
 
@@ -438,9 +493,14 @@ class TestGateA12:
     def test_empty_records_handled(self):
         assert "pass" in gate_a12_citation_anchor_survival([])
 
+    def test_uses_all_records_when_fewer_than_subsample_n(self):
+        """No internal subsampling — all 5 records must be processed."""
+        r = gate_a12_citation_anchor_survival(_make_records(5))
+        assert r["subsample_n"] == 5
+
 
 # ---------------------------------------------------------------------------
-# Gate A13
+# Gate A13 — nlp injection + no internal subsampling
 # ---------------------------------------------------------------------------
 
 
@@ -466,6 +526,30 @@ class TestGateA13:
 
     def test_empty_records_handled(self):
         assert "pass" in gate_a13_sentence_density([])
+
+    def test_uses_all_substantive_records_when_fewer_than_subsample_n(self):
+        """No internal subsampling — all 5 substantive records must be processed."""
+        long_text = "The court held this point clearly. " * 100
+        records = _make_records(5, text_length=5000, text=long_text)
+        r = gate_a13_sentence_density(records)
+        assert r["subsample_n"] == 5
+
+    def test_accepts_nlp_argument(self):
+        """gate_a13_sentence_density must accept an optional nlp argument."""
+        import inspect
+        sig = inspect.signature(gate_a13_sentence_density)
+        assert "nlp" in sig.parameters
+
+    def test_uses_injected_nlp_without_calling_spacy_load(self):
+        """When nlp is injected, gate_a13 must not call spacy.load."""
+        mock_nlp = MagicMock()
+        mock_doc = MagicMock()
+        mock_doc.sents = iter([MagicMock() for _ in range(60)])
+        mock_nlp.return_value = mock_doc
+        records = _make_records(5, text_length=5000)
+        with patch("src.dataset_probe.spacy") as mock_spacy:
+            gate_a13_sentence_density(records, nlp=mock_nlp)
+            mock_spacy.load.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +578,6 @@ class TestGateB6:
 
     def test_b6_spot_check_passes_when_formula_consistent(self):
         import math
-
         text = "the court held that the defendant was liable"
         words = text.split()
         freq: dict[str, float] = {}
@@ -519,7 +602,11 @@ class TestGateB6:
 
 
 def _load_fixture_records() -> list[dict]:
-    return [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
+    return [
+        json.loads(line)
+        for line in FIXTURE_JSONL.read_text().splitlines()
+        if line.strip()
+    ]
 
 
 class TestFixtureJSONL:
@@ -531,28 +618,11 @@ class TestFixtureJSONL:
 
     def test_fixture_has_all_23_schema_fields(self):
         EXPECTED = {
-            "id",
-            "cluster_id",
-            "docket_id",
-            "court_id",
-            "court_name",
-            "case_name",
-            "date_filed",
-            "precedential_status",
-            "opinion_type",
-            "extracted_by_ocr",
-            "raw_text",
-            "text",
-            "text_length",
-            "text_source",
-            "cleaning_flags",
-            "source",
-            "token_count",
-            "paragraph_count",
-            "citation_count",
-            "text_hash",
-            "citation_density",
-            "is_precedential",
+            "id", "cluster_id", "docket_id", "court_id", "court_name",
+            "case_name", "date_filed", "precedential_status", "opinion_type",
+            "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
+            "cleaning_flags", "source", "token_count", "paragraph_count",
+            "citation_count", "text_hash", "citation_density", "is_precedential",
             "text_entropy",
         }
         for r in _load_fixture_records():
@@ -567,7 +637,6 @@ class TestFixtureJSONL:
 
     def test_fixture_usable_as_shard(self, tmp_path):
         import shutil
-
         shard_dir = tmp_path / "fixture_shards"
         shard_dir.mkdir()
         shutil.copy(FIXTURE_JSONL, shard_dir / "courtlistener_sample.jsonl")
@@ -583,15 +652,11 @@ class TestFixtureJSONL:
 
 class TestModelQualitySignalsIntegration:
     def test_quality_signals_in_report(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         assert "quality_signals" in report
 
     def test_quality_signals_has_frequency_counts(self, sample_shard_dir, tmp_path):
-        qs = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )["quality_signals"]
+        qs = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)["quality_signals"]
         assert "signal_counts" in qs
         assert "pct_clean" in qs
 
@@ -606,23 +671,17 @@ class TestModelQualitySignalsIntegration:
 
 class TestRunProbeReportSchema:
     def test_report_has_required_keys(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         for key in ("gates", "summary", "provenance", "quality_signals"):
             assert key in report
 
     def test_summary_has_all_buckets(self, sample_shard_dir, tmp_path):
-        summary = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )["summary"]
+        summary = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)["summary"]
         for key in ("passed", "failed", "skipped", "all_passed"):
             assert key in summary
 
     def test_report_is_json_serializable(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         json.dumps(report)
 
     def test_report_written_to_disk(self, sample_shard_dir, tmp_path):
@@ -630,6 +689,10 @@ class TestRunProbeReportSchema:
         run_probe(data_dir=sample_shard_dir, subset=20, output=out, skip_tokenizer=True, skip_spacy=True)
         assert out.exists()
         assert json.loads(out.read_text())
+
+    def test_run_probe_does_subsampling_before_gates(self, sample_shard_dir, tmp_path):
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
+        assert report["subset_n"] == 20
 
 
 # ---------------------------------------------------------------------------
@@ -639,30 +702,22 @@ class TestRunProbeReportSchema:
 
 class TestProvenance:
     def test_provenance_has_required_keys(self, sample_shard_dir, tmp_path):
-        prov = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )["provenance"]
+        prov = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)["provenance"]
         for key in ("timestamp", "spacy_model_version", "probe_config", "probe_version"):
             assert key in prov
 
     def test_probe_config_in_provenance(self, sample_shard_dir, tmp_path):
-        prov = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )["provenance"]
+        prov = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)["provenance"]
         assert "min_text_length" in prov["probe_config"]
 
 
 class TestProbeVersion:
     def test_provenance_has_probe_version(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         assert "probe_version" in report["provenance"]
 
     def test_probe_version_is_string(self, sample_shard_dir, tmp_path):
-        v = run_probe(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )["provenance"]["probe_version"]
+        v = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)["provenance"]["probe_version"]
         assert isinstance(v, str) and len(v) >= 3
 
     def test_probe_version_constant_exported(self):
@@ -670,11 +725,21 @@ class TestProbeVersion:
 
 
 # ---------------------------------------------------------------------------
-# CourtListenerDatasetProbe
+# CourtListenerDatasetProbe — validate_row removed, orchestrator contract
 # ---------------------------------------------------------------------------
 
 
 class TestCourtListenerDatasetProbe:
+    def test_probe_has_no_validate_row_method(self):
+        """validate_row is dead code — must not exist on CourtListenerDatasetProbe."""
+        assert not hasattr(CourtListenerDatasetProbe(), "validate_row")
+
+    def test_probe_still_has_run_method(self):
+        assert hasattr(CourtListenerDatasetProbe(), "run")
+
+    def test_probe_still_has_config(self):
+        assert hasattr(CourtListenerDatasetProbe(), "config")
+
     def test_accepts_custom_config(self):
         probe = CourtListenerDatasetProbe(config=ProbeConfig(min_text_length=500))
         assert probe.config.min_text_length == 500
@@ -683,20 +748,14 @@ class TestCourtListenerDatasetProbe:
         assert CourtListenerDatasetProbe().config == ProbeConfig()
 
     def test_run_returns_report(self, sample_shard_dir, tmp_path):
-        report = CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = CourtListenerDatasetProbe().run(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         assert "gates" in report and "summary" in report
 
     def test_shard_audit_in_report(self, sample_shard_dir, tmp_path):
-        assert "shard_audit" in CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        assert "shard_audit" in CourtListenerDatasetProbe().run(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
 
     def test_skipped_gates_recorded(self, sample_shard_dir, tmp_path):
-        report = CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = CourtListenerDatasetProbe().run(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         assert "A11" in report["summary"]["skipped"]
         assert "A13" in report["summary"]["skipped"]
 
@@ -705,20 +764,11 @@ class TestCourtListenerDatasetProbe:
         assert CourtListenerDatasetProbe(config=cfg).config.a11_subsample_n == 10
 
     def test_probe_run_accepts_log_to_wandb(self, sample_shard_dir, tmp_path):
-        report = CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-            log_to_wandb=False,
-        )
+        report = CourtListenerDatasetProbe().run(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True, log_to_wandb=False)
         assert report is not None
 
     def test_probe_run_returns_probe_version_in_provenance(self, sample_shard_dir, tmp_path):
-        report = CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-        )
+        report = CourtListenerDatasetProbe().run(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True)
         assert "probe_version" in report["provenance"]
 
 
@@ -729,36 +779,17 @@ class TestCourtListenerDatasetProbe:
 
 class TestWandbLoggingHook:
     def test_run_probe_accepts_log_to_wandb_false(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-            log_to_wandb=False,
-        )
+        report = run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True, log_to_wandb=False)
         assert "gates" in report
 
     @patch("src.dataset_probe.wandb")
     def test_run_probe_calls_wandb_when_enabled(self, mock_wandb, sample_shard_dir, tmp_path):
         mock_wandb.run = MagicMock()
-        run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-            log_to_wandb=True,
-        )
+        run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True, log_to_wandb=True)
         assert mock_wandb.log.called
 
     def test_default_does_not_require_wandb(self, sample_shard_dir, tmp_path):
-        assert (
-            run_probe(
-                data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
-            )
-            is not None
-        )
+        assert run_probe(data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -774,43 +805,15 @@ class TestCIMode:
             for r in _make_records(100, citation_count=0):
                 fh.write(json.dumps(r) + "\n")
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(shard.parent),
-                "--subset",
-                "100",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe", "--data-dir", str(shard.parent), "--subset", "100", "--output", str(tmp_path / "r.json"), "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 1
 
     def test_ci_mode_exits_0_when_all_pass(self, sample_shard_dir, tmp_path):
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "50",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe", "--data-dir", str(sample_shard_dir), "--subset", "50", "--output", str(tmp_path / "r.json"), "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
@@ -821,21 +824,8 @@ class TestCIMode:
             for r in _make_records(100, citation_count=0):
                 fh.write(json.dumps(r) + "\n")
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(shard.parent),
-                "--subset",
-                "100",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe", "--data-dir", str(shard.parent), "--subset", "100", "--output", str(tmp_path / "r.json"), "--skip-tokenizer", "--skip-spacy"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
@@ -848,40 +838,15 @@ class TestCIMode:
 class TestCLI:
     def test_cli_runs_and_exits_zero(self, sample_shard_dir, tmp_path):
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "20",
-                "--output",
-                str(tmp_path / "cli_out.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe", "--data-dir", str(sample_shard_dir), "--subset", "20", "--output", str(tmp_path / "cli_out.json"), "--skip-tokenizer", "--skip-spacy"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
     def test_cli_writes_json_output(self, sample_shard_dir, tmp_path):
         out = tmp_path / "cli_out.json"
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "20",
-                "--output",
-                str(out),
-                "--skip-tokenizer",
-                "--skip-spacy",
-            ],
+            [sys.executable, "-m", "src.dataset_probe", "--data-dir", str(sample_shard_dir), "--subset", "20", "--output", str(out), "--skip-tokenizer", "--skip-spacy"],
             capture_output=True,
         )
         assert out.exists()
