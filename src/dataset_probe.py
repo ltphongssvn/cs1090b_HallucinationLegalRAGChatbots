@@ -5,10 +5,10 @@ Dataset readiness probe for local CourtListener federal appellate JSONL shards.
 Implements Category A dataset-readiness gates required before Stage 3:
   A7  — text_source breakdown (missing 17.2% audit)
   A8  — text_length distribution + RAG viability threshold derivation
-  A9  — citation_count distribution (zero-citation filter for fast-iteration subset)
-  A11 — tokenizer-aware chunk count verification (BAAI/bge-m3, 1024-subword budget)
+  A9  — citation_count distribution (advisory — not a hard corpus filter)
+  A11 — tokenizer-aware chunk count (BGE-M3 + optional Mistral generative check)
   A12 — citation anchor survival check in normalized text
-  A13 — sentence density check via repo-certified spaCy pipeline (not NLTK)
+  A13 — sentence density check via repo-certified spaCy pipeline (nlp injectable)
   B6  — text_entropy empirical distribution + spot-check for formula drift
 
 Expected schema (23 fields):
@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterator
 
+import spacy as spacy  # type: ignore[import]
 import wandb  # type: ignore[import]
 from transformers import AutoTokenizer  # type: ignore[import]
 
@@ -50,7 +51,7 @@ from transformers import AutoTokenizer  # type: ignore[import]
 # Probe version — increment when report schema changes
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.0.0"
+PROBE_VERSION = "2.1.0"
 
 # ---------------------------------------------------------------------------
 # ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
@@ -81,12 +82,12 @@ class ProbeConfig:
     a13_max_below_threshold_pct: float = 15.0
     quality_signals_sample_n: int = 500
 
-    # Subsample sizes — previously magic numbers, now explicit and loggable
+    # Subsample sizes — explicit and loggable (were magic numbers)
     a11_subsample_n: int = 200
     a12_subsample_n: int = 500
     a13_subsample_n: int = 200
 
-    # A13 text cap — previously 50_000 magic number, now explicit
+    # A13 text cap — explicit and loggable (was magic number 50_000)
     # Caps per-doc cost for spaCy processing in the probe (not in training)
     a13_text_cap_chars: int = 50_000
 
@@ -94,6 +95,12 @@ class ProbeConfig:
     # stored text_entropy and probe-computed Shannon entropy before flagging drift
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
+
+    # Optional secondary generative tokenizer for A11.
+    # README uses mistralai/Mistral-7B-Instruct-v0.2 for prompt length assertion.
+    # A chunk fitting 1024 BGE-M3 subwords may be larger under the Mistral tokenizer.
+    # Set to "" to skip generative tokenizer check.
+    a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
 
 
 # Module-level defaults (kept for backward-compatible imports)
@@ -380,7 +387,12 @@ def gate_a9_citation_count_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A9 — citation_count distribution."""
+    """
+    A9 — citation_count distribution.
+    ADVISORY ONLY — this probe does not hard-filter the corpus.
+    The full 1.46M-opinion corpus is used unfiltered for final runs.
+    Only the ~150K fast-iteration subset optionally filters citation_count > 5.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A9_citation_count_distribution", "pass": False, "note": "No records."}
@@ -401,7 +413,12 @@ def gate_a9_citation_count_distribution(
         "above_5_count": above_5,
         "above_5_pct": round(100.0 * above_5 / n, 2),
         "pass": zero / n < cfg.a9_zero_citation_pass_pct / 100.0,
-        "note": ("For ~150K fast-iteration subset, filter citation_count > 5 to maximise Tier C utility."),
+        "note": (
+            "Advisory probe only — does not hard-filter the corpus. "
+            "Full 1.46M-opinion corpus is used unfiltered for final runs. "
+            "Fast-iteration subset (~150K) may optionally filter citation_count > 5 "
+            "to maximise Tier C utility."
+        ),
     }
 
 
@@ -415,12 +432,23 @@ def gate_a11_tokenizer_chunk_count(
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
     AutoTokenizer imported at module level so tests can patch it network-free.
     Tokenizer revision logged for reproducibility.
-    sample_n defaults to cfg.a11_subsample_n (was magic number 200).
+
+    Subsampling is done by run_probe before calling this gate.
+    This gate processes the full records list passed to it.
+    sample_n is retained for backward compatibility but ignored when records
+    already fit within the budget — run_probe controls sampling.
+
+    Optional secondary check against a11_generative_model (Mistral by default):
+    A chunk fitting 1024 BGE-M3 subwords may exceed the Mistral context window.
+    README asserts max(prompt_tokens) < 32768 using the Mistral tokenizer.
+    Set a11_generative_model="" to skip this check.
     """
     cfg = config or ProbeConfig()
-    effective_sample_n = sample_n if sample_n is not None else cfg.a11_subsample_n
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
+
+    # Use all records passed — subsampling is run_probe's responsibility
+    subsample = records
 
     try:
         tok = AutoTokenizer.from_pretrained(cfg.encoder_model)
@@ -432,9 +460,6 @@ def gate_a11_tokenizer_chunk_count(
             "error": str(exc),
             "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
         }
-
-    rng = random.Random(seed)
-    subsample = rng.sample(records, min(effective_sample_n, len(records)))
 
     chunk_counts: list[int] = []
     token_lengths: list[int] = []
@@ -451,7 +476,7 @@ def gate_a11_tokenizer_chunk_count(
         if n_chunks > 1:
             multi_chunk += 1
 
-    return {
+    result: dict[str, Any] = {
         "gate": "A11_tokenizer_chunk_count",
         "encoder_model": cfg.encoder_model,
         "tokenizer_revision": tokenizer_revision,
@@ -467,6 +492,41 @@ def gate_a11_tokenizer_chunk_count(
         "note": "median_chunks_per_doc >= 2 confirms corpus supports multi-chunk splitting.",
     }
 
+    # Optional secondary generative tokenizer check (Mistral by default)
+    # README: assert max(prompt_tokens) < 32768 using Mistral tokenizer
+    if cfg.a11_generative_model:
+        try:
+            gen_tok = AutoTokenizer.from_pretrained(cfg.a11_generative_model)
+            gen_lengths: list[int] = []
+            mistral_limit = 32_768
+            over_limit = 0
+            for r in subsample:
+                text = str(r.get("text", ""))
+                gen_ids = gen_tok(text, add_special_tokens=False)["input_ids"]
+                gen_lengths.append(len(gen_ids))
+                if len(gen_ids) > mistral_limit:
+                    over_limit += 1
+            result["generative_token_check"] = {
+                "model": cfg.a11_generative_model,
+                "mean_tokens": round(statistics.mean(gen_lengths), 1),
+                "median_tokens": statistics.median(gen_lengths),
+                "max_tokens": max(gen_lengths),
+                "over_32k_count": over_limit,
+                "over_32k_pct": round(100.0 * over_limit / len(subsample), 2),
+                "note": (
+                    "README asserts max(prompt_tokens) < 32768 using Mistral tokenizer. "
+                    "Docs with >32k tokens will trigger the runtime assertion in generation."
+                ),
+            }
+        except Exception as exc:
+            result["generative_token_check"] = {
+                "model": cfg.a11_generative_model,
+                "error": str(exc),
+                "note": "Generative tokenizer load failed — skipping secondary check.",
+            }
+
+    return result
+
 
 def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
@@ -476,13 +536,16 @@ def gate_a12_citation_anchor_survival(
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival in normalized text field.
-    NOTE: regex-based detection is a heuristic approximation, not a precision extractor.
-    sample_n defaults to cfg.a12_subsample_n (was magic number 500).
+    NOTE: regex-based detection is a heuristic approximation.
+    Subsampling is done by run_probe before calling this gate.
+    This gate processes the full records list passed to it.
     """
     cfg = config or ProbeConfig()
-    effective_sample_n = sample_n if sample_n is not None else cfg.a12_subsample_n
     if not records:
         return {"gate": "A12_citation_anchor_survival", "pass": False, "note": "No records."}
+
+    # Use all records passed — subsampling is run_probe's responsibility
+    subsample = records
 
     CITATION_RE = re.compile(
         r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
@@ -491,8 +554,6 @@ def gate_a12_citation_anchor_survival(
         r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
         re.MULTILINE,
     )
-    rng = random.Random(seed)
-    subsample = rng.sample(records, min(effective_sample_n, len(records)))
 
     has_anchor = 0
     citation_counts_found: list[int] = []
@@ -524,33 +585,37 @@ def gate_a13_sentence_density(
     sample_n: int | None = None,
     seed: int = 0,
     config: ProbeConfig | None = None,
+    nlp: Any | None = None,
 ) -> dict[str, Any]:
     """
     A13 — Sentence density on A8-filtered records only (text_length >= min_text_length).
-    Uses repo-certified spaCy pipeline with sentencizer (not NLTK, not parser).
-    sample_n defaults to cfg.a13_subsample_n (was magic number 200).
-    text cap defaults to cfg.a13_text_cap_chars (was magic number 50_000).
+
+    nlp is injectable for testing — when provided, spacy.load is NOT called internally.
+    When nlp=None, spaCy is loaded internally using cfg.spacy_model.
+    spaCy imported at module level so patch('src.dataset_probe.spacy') works in tests.
+
+    Subsampling is done by run_probe before calling this gate.
+    This gate processes the full substantive records list passed to it.
     """
     cfg = config or ProbeConfig()
-    effective_sample_n = sample_n if sample_n is not None else cfg.a13_subsample_n
     if not records:
         return {"gate": "A13_sentence_density", "pass": False, "note": "No records."}
 
-    try:
-        import spacy  # type: ignore[import]
-
-        nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
-        if "sentencizer" not in nlp.pipe_names:
-            nlp.add_pipe("sentencizer")
-        nlp.max_length = 2_000_000
-        spacy_version = spacy.__version__
-    except Exception as exc:
-        return {
-            "gate": "A13_sentence_density",
-            "pass": False,
-            "error": str(exc),
-            "note": f"spaCy model load failed: {exc}",
-        }
+    spacy_version = "injected"
+    if nlp is None:
+        try:
+            nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
+            nlp.max_length = 2_000_000
+            spacy_version = spacy.__version__
+        except Exception as exc:
+            return {
+                "gate": "A13_sentence_density",
+                "pass": False,
+                "error": str(exc),
+                "note": f"spaCy model load failed: {exc}",
+            }
 
     substantive = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
     if not substantive:
@@ -561,8 +626,8 @@ def gate_a13_sentence_density(
             "note": "No records pass A8 length filter.",
         }
 
-    rng = random.Random(seed)
-    subsample = rng.sample(substantive, min(effective_sample_n, len(substantive)))
+    # Use all substantive records — subsampling is run_probe's responsibility
+    subsample = substantive
 
     sent_counts: list[int] = []
     below_threshold = 0
@@ -725,7 +790,7 @@ class ModelQualitySignals:
 
 
 # ---------------------------------------------------------------------------
-# Top-level probe class
+# Top-level probe class — config-injecting orchestrator
 # ---------------------------------------------------------------------------
 
 
@@ -734,18 +799,13 @@ class CourtListenerDatasetProbe:
     Orchestrates all dataset-readiness gates for the local CourtListener corpus.
     Accepts injected ProbeConfig for reproducible, versioned experiment settings.
     Supports optional W&B logging for experiment tracking.
+
+    validate_row removed — it was dead code never called outside tests.
+    Full batch validation is provided by validate_schema().
     """
 
     def __init__(self, config: ProbeConfig | None = None) -> None:
         self.config = config or ProbeConfig()
-
-    def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """Lite single-row text check. Full batch checks via validate_schema()."""
-        errors: list[str] = []
-        text = row.get("text", "")
-        if not isinstance(text, str) or len(text) < 50:
-            errors.append(f"text too short or missing: {len(str(text))} chars")
-        return errors
 
     def run(
         self,
@@ -770,7 +830,7 @@ class CourtListenerDatasetProbe:
 
 
 # ---------------------------------------------------------------------------
-# run_probe
+# run_probe — subsampling happens here before gates are called
 # ---------------------------------------------------------------------------
 
 
@@ -790,11 +850,16 @@ def run_probe(
     audit = iter_shards_with_audit(data_dir)
     all_records = audit["records"]
 
+    # Subsampling happens here — gates receive pre-sampled lists
     rng = random.Random(seed)
     records = rng.sample(all_records, subset) if len(all_records) > subset else all_records
     print(f"[dataset_probe] Loaded {len(records)} records.")
 
-    import spacy  # type: ignore[import]
+    # Subsample for A11/A12/A13 gates — controlled here, not inside gates
+    a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
+    a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
+    a13_candidates = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
+    a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
 
     try:
         spacy_version = spacy.__version__
@@ -802,6 +867,17 @@ def run_probe(
     except Exception:
         spacy_version = "unknown"
         spacy_model_version = "unknown"
+
+    # Load spaCy once for A13 if not skipped
+    nlp_pipeline: Any | None = None
+    if not skip_spacy:
+        try:
+            nlp_pipeline = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+            if "sentencizer" not in nlp_pipeline.pipe_names:
+                nlp_pipeline.add_pipe("sentencizer")
+            nlp_pipeline.max_length = 2_000_000
+        except Exception:
+            nlp_pipeline = None
 
     report: dict[str, Any] = {
         "data_dir": str(data_dir),
@@ -836,20 +912,20 @@ def run_probe(
     report["gates"]["A9"] = gate_a9_citation_count_distribution(records, cfg)
 
     print("[dataset_probe] Gate A12: citation anchor survival ...")
-    report["gates"]["A12"] = gate_a12_citation_anchor_survival(records, config=cfg)
+    report["gates"]["A12"] = gate_a12_citation_anchor_survival(a12_sample, config=cfg)
 
     print("[dataset_probe] Gate B6: text_entropy distribution ...")
     report["gates"]["B6"] = gate_b6_text_entropy_distribution(records, cfg)
 
     if not skip_tokenizer:
         print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
-        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(records, config=cfg)
+        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(a11_sample, config=cfg)
     else:
         report["gates"]["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(records, config=cfg)
+        report["gates"]["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
     else:
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
@@ -915,7 +991,7 @@ def main() -> None:
         skip_spacy=args.skip_spacy,
     )
     if args.ci_mode and not report["summary"]["all_passed"]:
-        print(f"[dataset_probe] CI mode: gate failures detected — {report['summary']['failed']}")
+        print(f"[dataset_probe] CI mode: gate failures — {report['summary']['failed']}")
         sys.exit(1)
 
 
