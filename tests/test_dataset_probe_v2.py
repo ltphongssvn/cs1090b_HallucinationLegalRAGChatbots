@@ -9,6 +9,7 @@ TDD contract tests for the 7 actionable improvements to src/dataset_probe.py:
   15. Optional W&B logging hook in run_probe()
   16. probe_version in provenance block
 """
+
 from __future__ import annotations
 
 import json
@@ -152,11 +153,28 @@ class TestFixtureJSONL:
 
     def test_fixture_has_all_23_schema_fields(self):
         EXPECTED_FIELDS = {
-            "id", "cluster_id", "docket_id", "court_id", "court_name",
-            "case_name", "date_filed", "precedential_status", "opinion_type",
-            "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
-            "cleaning_flags", "source", "token_count", "paragraph_count",
-            "citation_count", "text_hash", "citation_density", "is_precedential",
+            "id",
+            "cluster_id",
+            "docket_id",
+            "court_id",
+            "court_name",
+            "case_name",
+            "date_filed",
+            "precedential_status",
+            "opinion_type",
+            "extracted_by_ocr",
+            "raw_text",
+            "text",
+            "text_length",
+            "text_source",
+            "cleaning_flags",
+            "source",
+            "token_count",
+            "paragraph_count",
+            "citation_count",
+            "text_hash",
+            "citation_density",
+            "is_precedential",
             "text_entropy",
         }
         records = [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
@@ -172,14 +190,14 @@ class TestFixtureJSONL:
     def test_fixture_text_length_matches_text(self):
         records = [json.loads(l) for l in FIXTURE_JSONL.read_text().splitlines() if l.strip()]
         for r in records:
-            assert abs(r["text_length"] - len(r["text"])) < 10, (
-                "text_length field must match actual text length"
-            )
+            assert abs(r["text_length"] - len(r["text"])) < 10, "text_length field must match actual text length"
 
     def test_fixture_usable_as_shard(self, tmp_path):
         """Fixture JSONL must be loadable by iter_shards_with_audit."""
-        from src.dataset_probe import iter_shards_with_audit
         import shutil
+
+        from src.dataset_probe import iter_shards_with_audit
+
         shard_dir = tmp_path / "fixture_shards"
         shard_dir.mkdir()
         shutil.copy(FIXTURE_JSONL, shard_dir / "courtlistener_sample.jsonl")
@@ -202,6 +220,7 @@ class TestB6EntropySpotCheck:
 
     def test_b6_spot_check_passes_when_formula_consistent(self):
         import math
+
         text = "the court held that the defendant was liable"
         words = text.split()
         freq: dict[str, float] = {}
@@ -243,10 +262,15 @@ class TestCIMode:
 
         result = subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(shard.parent),
-                "--subset", "100",
-                "--output", str(tmp_path / "r.json"),
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(shard.parent),
+                "--subset",
+                "100",
+                "--output",
+                str(tmp_path / "r.json"),
                 "--skip-tokenizer",
                 "--skip-spacy",
                 "--ci-mode",
@@ -260,10 +284,15 @@ class TestCIMode:
         """--ci-mode must exit 0 when all gates pass."""
         result = subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "50",
-                "--output", str(tmp_path / "r.json"),
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "50",
+                "--output",
+                str(tmp_path / "r.json"),
                 "--skip-tokenizer",
                 "--skip-spacy",
                 "--ci-mode",
@@ -284,10 +313,15 @@ class TestCIMode:
 
         result = subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(shard.parent),
-                "--subset", "100",
-                "--output", str(tmp_path / "r.json"),
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(shard.parent),
+                "--subset",
+                "100",
+                "--output",
+                str(tmp_path / "r.json"),
                 "--skip-tokenizer",
                 "--skip-spacy",
             ],
@@ -370,6 +404,7 @@ class TestProbeVersion:
 
     def test_probe_version_constant_exported(self):
         from src.dataset_probe import PROBE_VERSION
+
         assert isinstance(PROBE_VERSION, str)
         assert len(PROBE_VERSION) >= 3
 
