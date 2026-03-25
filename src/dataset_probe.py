@@ -37,6 +37,7 @@ import math
 import random
 import re
 import statistics
+import subprocess
 import sys
 import unicodedata
 from datetime import datetime, timezone
@@ -127,6 +128,26 @@ REQUIRED_FIELDS: frozenset[str] = frozenset(
         "paragraph_count",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Git SHA helper — ties probe report to exact code version
+# Consistent with src/manifest_collector.py which uses git rev-parse HEAD
+# ---------------------------------------------------------------------------
+
+
+def _get_git_sha() -> str:
+    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "not-a-git-repo"
 
 
 # ---------------------------------------------------------------------------
@@ -435,8 +456,7 @@ def gate_a11_tokenizer_chunk_count(
 
     Subsampling is done by run_probe before calling this gate.
     This gate processes the full records list passed to it.
-    sample_n is retained for backward compatibility but ignored when records
-    already fit within the budget — run_probe controls sampling.
+    sample_n retained for backward compatibility but subsampling is run_probe's job.
 
     Optional secondary check against a11_generative_model (Mistral by default):
     A chunk fitting 1024 BGE-M3 subwords may exceed the Mistral context window.
@@ -447,7 +467,6 @@ def gate_a11_tokenizer_chunk_count(
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
 
-    # Use all records passed — subsampling is run_probe's responsibility
     subsample = records
 
     try:
@@ -538,13 +557,11 @@ def gate_a12_citation_anchor_survival(
     A12 — Citation anchor survival in normalized text field.
     NOTE: regex-based detection is a heuristic approximation.
     Subsampling is done by run_probe before calling this gate.
-    This gate processes the full records list passed to it.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A12_citation_anchor_survival", "pass": False, "note": "No records."}
 
-    # Use all records passed — subsampling is run_probe's responsibility
     subsample = records
 
     CITATION_RE = re.compile(
@@ -595,7 +612,6 @@ def gate_a13_sentence_density(
     spaCy imported at module level so patch('src.dataset_probe.spacy') works in tests.
 
     Subsampling is done by run_probe before calling this gate.
-    This gate processes the full substantive records list passed to it.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -626,7 +642,6 @@ def gate_a13_sentence_density(
             "note": "No records pass A8 length filter.",
         }
 
-    # Use all substantive records — subsampling is run_probe's responsibility
     subsample = substantive
 
     sent_counts: list[int] = []
@@ -678,7 +693,6 @@ def gate_b6_text_entropy_distribution(
     entropies_sorted = sorted(entropies)
     zero_entropy = sum(1 for e in entropies if e == 0.0)
 
-    # Spot-check: compute entropy on sample and compare to stored values
     spot_sample = records[: cfg.b6_entropy_spot_check_sample_n]
     deviations: list[float] = []
     for r in spot_sample:
@@ -891,6 +905,7 @@ def run_probe(
         },
         "provenance": {
             "probe_version": PROBE_VERSION,
+            "git_sha": _get_git_sha(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "spacy_version": spacy_version,
             "spacy_model_version": spacy_model_version,
