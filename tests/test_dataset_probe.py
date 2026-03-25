@@ -26,6 +26,7 @@ from src.dataset_probe import (
     gate_a13_sentence_density,
     gate_b6_text_entropy_distribution,
     iter_shards,
+    iter_shards_with_audit,
     run_probe,
     sample_records,
     validate_schema,
@@ -100,6 +101,7 @@ def default_config() -> ProbeConfig:
 # ProbeConfig dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestProbeConfig:
     def test_is_frozen(self):
         cfg = ProbeConfig()
@@ -127,6 +129,7 @@ class TestProbeConfig:
 
     def test_is_json_serializable(self):
         import dataclasses
+
         cfg = ProbeConfig()
         d = dataclasses.asdict(cfg)
         json.dumps(d)  # must not raise
@@ -135,6 +138,7 @@ class TestProbeConfig:
 # ---------------------------------------------------------------------------
 # _percentile helper
 # ---------------------------------------------------------------------------
+
 
 class TestPercentile:
     def test_p0_returns_min(self):
@@ -150,7 +154,6 @@ class TestPercentile:
         assert _percentile([42], 50) == 42
 
     def test_requires_sorted_input(self):
-        # _percentile assumes pre-sorted list
         result = _percentile(sorted([10, 1, 5, 3]), 50)
         assert result in [3, 5]
 
@@ -158,6 +161,7 @@ class TestPercentile:
 # ---------------------------------------------------------------------------
 # iter_shards — malformed JSON audit
 # ---------------------------------------------------------------------------
+
 
 class TestIterShards:
     def test_raises_on_empty_dir(self, tmp_path):
@@ -179,34 +183,33 @@ class TestIterShards:
         assert len(records) == 1
 
     def test_counts_malformed_lines(self, tmp_path):
-        """iter_shards must surface malformed line count, not silently discard."""
+        """iter_shards_with_audit must surface malformed line count."""
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id":"1","text":"good"}\nNOT_JSON\n{"id":"2","text":"good"}\n')
-        result = iter_shards(tmp_path)
-        # Collect with audit info
-        records, parse_errors = _collect_with_audit(result)
-        assert len(records) == 2
-        assert parse_errors == 1
+        audit = iter_shards_with_audit(tmp_path)
+        assert len(audit["records"]) == 2
+        assert audit["total_parse_errors"] == 1
 
     def test_shard_level_diagnostics_available(self, tmp_path):
         """iter_shards_with_audit must return per-shard error counts."""
-        from src.dataset_probe import iter_shards_with_audit
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id":"1","text":"good"}\nBAD\n')
         audit = iter_shards_with_audit(tmp_path)
         assert audit["total_parse_errors"] == 1
         assert audit["shard_errors"]["s.jsonl"] == 1
 
-
-def _collect_with_audit(it):
-    """Helper: collect records and parse error count from audited iterator."""
-    from src.dataset_probe import iter_shards_with_audit
-    return [], 0  # placeholder — real test uses iter_shards_with_audit directly
+    def test_blank_lines_counted_separately(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('\n{"id":"1","text":"good"}\n\n')
+        audit = iter_shards_with_audit(tmp_path)
+        assert audit["total_blank_lines"] == 2
+        assert audit["total_parse_errors"] == 0
 
 
 # ---------------------------------------------------------------------------
 # sample_records
 # ---------------------------------------------------------------------------
+
 
 class TestSampleRecords:
     def test_returns_correct_count(self, sample_shard_dir):
@@ -233,6 +236,7 @@ class TestSampleRecords:
 # ---------------------------------------------------------------------------
 # validate_schema — type checks
 # ---------------------------------------------------------------------------
+
 
 class TestValidateSchema:
     def test_passes_complete_records(self):
@@ -276,6 +280,7 @@ class TestValidateSchema:
 # Gate A7
 # ---------------------------------------------------------------------------
 
+
 class TestGateA7:
     def test_gate_key(self):
         assert gate_a7_text_source_breakdown(_make_records(10))["gate"] == "A7_text_source_breakdown"
@@ -302,6 +307,7 @@ class TestGateA7:
 # Gate A8 — boundary tests
 # ---------------------------------------------------------------------------
 
+
 class TestGateA8:
     def test_passes_at_24_99_pct(self):
         records = _make_records(7501, text_length=5000) + _make_records(2499, text_length=100)
@@ -325,6 +331,7 @@ class TestGateA8:
 # Gate A9 — boundary tests
 # ---------------------------------------------------------------------------
 
+
 class TestGateA9:
     def test_passes_at_19_99_pct(self):
         records = _make_records(8001, citation_count=5) + _make_records(1999, citation_count=0)
@@ -345,37 +352,33 @@ class TestGateA9:
 
 # ---------------------------------------------------------------------------
 # Gate A11 — mocked tokenizer (network-free)
+# Patch at transformers.AutoTokenizer since it is imported at module level.
 # ---------------------------------------------------------------------------
 
-class TestGateA11:
-    def _mock_tok(self, token_counts: list[int]):
-        tok = MagicMock()
-        tok.side_effect = [{"input_ids": list(range(n))} for n in token_counts]
-        return tok
 
+class TestGateA11:
     @patch("src.dataset_probe.AutoTokenizer")
     def test_pass_when_median_chunks_gte_2(self, mock_cls):
-        mock_cls.from_pretrained.return_value = MagicMock(
-            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
-        )
-        records = _make_records(10)
-        r = gate_a11_tokenizer_chunk_count(records, sample_n=10)
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_cls.from_pretrained.return_value = mock_tok
+        r = gate_a11_tokenizer_chunk_count(_make_records(10), sample_n=10)
         assert r["pass"] is True
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_encoder_model(self, mock_cls):
-        mock_cls.from_pretrained.return_value = MagicMock(
-            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
-        )
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_cls.from_pretrained.return_value = mock_tok
         r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
         assert r.get("encoder_model") == ENCODER_MODEL
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_tokenizer_revision(self, mock_cls):
         """Tokenizer revision must be logged for reproducibility."""
-        mock_cls.from_pretrained.return_value = MagicMock(
-            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
-        )
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_cls.from_pretrained.return_value = mock_tok
         r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
         assert "tokenizer_revision" in r
 
@@ -394,6 +397,7 @@ class TestGateA11:
 # ---------------------------------------------------------------------------
 # Gate A12
 # ---------------------------------------------------------------------------
+
 
 class TestGateA12:
     def test_pass_when_most_have_anchors(self):
@@ -415,6 +419,7 @@ class TestGateA12:
 # ---------------------------------------------------------------------------
 # Gate A13 — short docs excluded via A8 filter
 # ---------------------------------------------------------------------------
+
 
 class TestGateA13:
     def test_excludes_short_docs_below_a8_threshold(self):
@@ -449,6 +454,7 @@ class TestGateA13:
 # Gate B6
 # ---------------------------------------------------------------------------
 
+
 class TestGateB6:
     def test_always_passes(self):
         assert gate_b6_text_entropy_distribution(_make_records(10))["pass"] is True
@@ -470,6 +476,7 @@ class TestGateB6:
 # ---------------------------------------------------------------------------
 # ModelQualitySignals — integrated into run_probe
 # ---------------------------------------------------------------------------
+
 
 class TestModelQualitySignalsIntegration:
     def test_quality_signals_in_report(self, sample_shard_dir, tmp_path):
@@ -502,6 +509,7 @@ class TestModelQualitySignalsIntegration:
 # ---------------------------------------------------------------------------
 # run_probe — report schema
 # ---------------------------------------------------------------------------
+
 
 class TestRunProbeReportSchema:
     def test_report_has_required_keys(self, sample_shard_dir, tmp_path):
@@ -553,6 +561,7 @@ class TestRunProbeReportSchema:
 # Provenance block
 # ---------------------------------------------------------------------------
 
+
 class TestProvenance:
     def test_provenance_has_required_keys(self, sample_shard_dir, tmp_path):
         report = run_probe(
@@ -580,6 +589,7 @@ class TestProvenance:
 # ---------------------------------------------------------------------------
 # CourtListenerDatasetProbe — config injection
 # ---------------------------------------------------------------------------
+
 
 class TestCourtListenerDatasetProbe:
     def test_accepts_custom_config(self, sample_shard_dir, tmp_path):
@@ -619,14 +629,20 @@ class TestCourtListenerDatasetProbe:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 class TestCLI:
     def test_cli_runs_and_exits_zero(self, sample_shard_dir, tmp_path):
         result = subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "20",
-                "--output", str(tmp_path / "cli_out.json"),
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "20",
+                "--output",
+                str(tmp_path / "cli_out.json"),
                 "--skip-tokenizer",
                 "--skip-spacy",
             ],
@@ -639,10 +655,15 @@ class TestCLI:
         out = tmp_path / "cli_out.json"
         subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "20",
-                "--output", str(out),
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "20",
+                "--output",
+                str(out),
                 "--skip-tokenizer",
                 "--skip-spacy",
             ],

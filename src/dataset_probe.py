@@ -30,69 +30,150 @@ All output written to --output as JSON. No side effects on corpus shards.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import random
 import re
 import statistics
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator, Iterator
 
-REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "court_id",
-        "text",
-        "text_length",
-        "text_source",
-        "citation_count",
-        "citation_density",
-        "is_precedential",
-        "text_entropy",
-        "token_count",
-        "paragraph_count",
-    }
-)
+# ---------------------------------------------------------------------------
+# ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
+# ---------------------------------------------------------------------------
 
-# RAG viability floor — Stage 3 applies this as a hard filter before chunking.
-# Pass condition: <25% below threshold (corpus has known ~20% short-doc tail).
-PROVISIONAL_MIN_TEXT_LENGTH = 1500
 
-# Tokenizer chunk budget from README Stage 3 controlled design choice.
-CHUNK_SIZE_SUBWORDS = 1024
-CHUNK_OVERLAP_SUBWORDS = 128
+@dataclasses.dataclass(frozen=True)
+class ProbeConfig:
+    """
+    All probe thresholds in one place so experiment settings are explicit,
+    versionable, injectable, and JSON-serializable for provenance logging.
+    """
 
-# Encoder model for A11 tokenizer-aware chunk count check (README-certified).
-ENCODER_MODEL = "BAAI/bge-m3"
+    min_text_length: int = 1500
+    chunk_size_subwords: int = 1024
+    chunk_overlap_subwords: int = 128
+    min_sentence_count: int = 20
+    encoder_model: str = "BAAI/bge-m3"
+    spacy_model: str = "en_core_web_sm"
+    a7_known_formats_pass_pct: float = 80.0
+    a8_below_threshold_pass_pct: float = 25.0
+    a9_zero_citation_pass_pct: float = 20.0
+    a11_min_median_chunks: float = 2.0
+    a12_min_pct_with_anchor: float = 60.0
+    a13_max_below_threshold_pct: float = 10.0
+    quality_signals_sample_n: int = 500
 
-# spaCy model for A13 sentence density check (repo-certified pipeline).
-SPACY_MODEL = "en_core_web_sm"
+
+# Module-level defaults (kept for backward-compatible imports)
+PROVISIONAL_MIN_TEXT_LENGTH = ProbeConfig().min_text_length
+CHUNK_SIZE_SUBWORDS = ProbeConfig().chunk_size_subwords
+CHUNK_OVERLAP_SUBWORDS = ProbeConfig().chunk_overlap_subwords
+ENCODER_MODEL = ProbeConfig().encoder_model
+SPACY_MODEL = ProbeConfig().spacy_model
 SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
+MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 
-# Minimum sentence count for Tier B NLI atomic-claim density.
-# A13 only evaluates records that pass the A8 length filter (text_length >= 1500)
-# so short summary dispositions do not pollute this gate.
-MIN_SENTENCE_COUNT = 20
+REQUIRED_FIELDS: frozenset[str] = frozenset({
+    "id",
+    "court_id",
+    "text",
+    "text_length",
+    "text_source",
+    "citation_count",
+    "citation_density",
+    "is_precedential",
+    "text_entropy",
+    "token_count",
+    "paragraph_count",
+})
+
+# ---------------------------------------------------------------------------
+# Percentile helper — single reusable implementation
+# ---------------------------------------------------------------------------
+
+
+def _percentile(sorted_values: list[Any], p: float) -> Any:
+    """
+    Return the p-th percentile of a pre-sorted list.
+    p must be in [0, 100]. Uses ceiling-index method consistent with numpy default.
+    """
+    n = len(sorted_values)
+    if n == 0:
+        raise ValueError("Cannot compute percentile of empty list")
+    if p <= 0:
+        return sorted_values[0]
+    if p >= 100:
+        return sorted_values[-1]
+    idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
+    return sorted_values[idx]
 
 
 # ---------------------------------------------------------------------------
-# Shard loader
+# Shard loader with audit counters
 # ---------------------------------------------------------------------------
 
 
 def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
-    """Yield records from all .jsonl shard files in data_dir."""
+    """Yield valid records from all .jsonl shards. Silently skips blank lines only."""
+    for record, _ in _iter_shards_inner(data_dir):
+        yield record
+
+
+def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
+    """
+    Load all shards and return audit summary including per-shard parse error counts.
+    Use this when auditability of malformed lines is required.
+    """
+    shard_files = sorted(data_dir.glob("*.jsonl"))
+    if not shard_files:
+        raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
+
+    records: list[dict[str, Any]] = []
+    shard_errors: dict[str, int] = {}
+    total_parse_errors = 0
+    total_blank_lines = 0
+
+    for shard_path in shard_files:
+        errors = 0
+        with open(shard_path, encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    total_blank_lines += 1
+                    continue
+                try:
+                    records.append(json.loads(stripped))
+                except json.JSONDecodeError:
+                    errors += 1
+                    total_parse_errors += 1
+        if errors:
+            shard_errors[shard_path.name] = errors
+
+    return {
+        "records": records,
+        "total_parse_errors": total_parse_errors,
+        "total_blank_lines": total_blank_lines,
+        "shard_errors": shard_errors,
+        "shard_count": len(shard_files),
+    }
+
+
+def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], None, None]:
+    """Internal generator yielding (record, shard_name) tuples."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
     for shard_path in shard_files:
         with open(shard_path, encoding="utf-8") as fh:
             for line in fh:
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     continue
                 try:
-                    yield json.loads(line)
+                    yield json.loads(stripped), shard_path.name
                 except json.JSONDecodeError:
                     continue
 
@@ -115,15 +196,79 @@ def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Schema validation — presence + type + range checks
+# ---------------------------------------------------------------------------
+
+
+def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Check required field presence, type correctness, and value ranges.
+    Returns pass=False if any record fails any check.
+    """
+    if not records:
+        return {
+            "gate": "schema_validation",
+            "required_fields": sorted(REQUIRED_FIELDS),
+            "missing_counts": {},
+            "type_errors": {},
+            "range_errors": {},
+            "pass": True,
+            "note": "No records to validate.",
+        }
+
+    missing_by_field: dict[str, int] = {f: 0 for f in REQUIRED_FIELDS}
+    type_errors: dict[str, int] = {}
+    range_errors: dict[str, int] = {}
+
+    for r in records:
+        for f in REQUIRED_FIELDS:
+            if f not in r:
+                missing_by_field[f] += 1
+
+        # Type checks
+        text_len = r.get("text_length")
+        if text_len is not None and not isinstance(text_len, (int, float)):
+            type_errors["text_length"] = type_errors.get("text_length", 0) + 1
+
+        is_prec = r.get("is_precedential")
+        if is_prec is not None and not isinstance(is_prec, bool):
+            type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
+
+        # Range checks
+        cite_count = r.get("citation_count")
+        if cite_count is not None:
+            try:
+                if int(cite_count) < 0:
+                    range_errors["citation_count"] = range_errors.get("citation_count", 0) + 1
+            except (TypeError, ValueError):
+                type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
+
+    any_missing = any(v > 0 for v in missing_by_field.values())
+    passed = not any_missing and not type_errors and not range_errors
+    return {
+        "gate": "schema_validation",
+        "required_fields": sorted(REQUIRED_FIELDS),
+        "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
+        "type_errors": type_errors,
+        "range_errors": range_errors,
+        "pass": passed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Gate implementations
 # ---------------------------------------------------------------------------
 
 
-def gate_a7_text_source_breakdown(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    A7 — Full text_source breakdown including the unaccounted ~17.2%.
-    plain_text + html_with_citations = 82.8%; remainder is unknown format risk.
-    """
+def gate_a7_text_source_breakdown(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
+    """A7 — Full text_source breakdown including unaccounted ~17.2%."""
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A7_text_source_breakdown", "pass": False, "note": "No records."}
+
     counts: dict[str, int] = {}
     for r in records:
         src = str(r.get("text_source", "MISSING"))
@@ -133,14 +278,18 @@ def gate_a7_text_source_breakdown(records: list[dict[str, Any]]) -> dict[str, An
         src: {"count": cnt, "pct": round(100.0 * cnt / total, 2)}
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
-    known_pct = sum(v["pct"] for k, v in breakdown.items() if k in ("plain_text", "html_with_citations"))
+    known_pct = sum(
+        v["pct"]
+        for k, v in breakdown.items()
+        if k in ("plain_text", "html_with_citations")
+    )
     return {
         "gate": "A7_text_source_breakdown",
         "total_records": total,
         "breakdown": breakdown,
         "known_formats_pct": round(known_pct, 2),
         "unknown_formats_pct": round(100.0 - known_pct, 2),
-        "pass": known_pct >= 80.0,
+        "pass": known_pct >= cfg.a7_known_formats_pass_pct,
         "note": (
             "Inspect records from any source outside plain_text/html_with_citations "
             "to verify row_normalizer.py strips them cleanly before Stage 3."
@@ -148,38 +297,40 @@ def gate_a7_text_source_breakdown(records: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def gate_a8_text_length_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+def gate_a8_text_length_distribution(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
     """
     A8 — text_length distribution + RAG viability threshold.
     Pass condition: <25% below PROVISIONAL_MIN_TEXT_LENGTH.
-    ~20% short-doc tail is expected (summary dispositions filtered in Stage 3).
+    ~20% short-doc tail is expected; filtered in Stage 3.
     """
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A8_text_length_distribution", "pass": False, "note": "No records."}
+
     lengths = [int(r.get("text_length", 0)) for r in records]
     lengths_sorted = sorted(lengths)
-    n = len(lengths_sorted)
 
-    def pct(p: float) -> int:
-        idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
-        return lengths_sorted[idx]
-
-    below_provisional = sum(1 for length in lengths if length < PROVISIONAL_MIN_TEXT_LENGTH)
+    below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
     return {
         "gate": "A8_text_length_distribution",
-        "count": n,
+        "count": len(lengths),
         "mean": round(statistics.mean(lengths), 1),
         "median": statistics.median(lengths),
         "min": min(lengths),
         "max": max(lengths),
-        "p5": pct(5),
-        "p10": pct(10),
-        "p25": pct(25),
-        "p75": pct(75),
-        "p90": pct(90),
-        "p95": pct(95),
-        "provisional_min_chars": PROVISIONAL_MIN_TEXT_LENGTH,
+        "p5": _percentile(lengths_sorted, 5),
+        "p10": _percentile(lengths_sorted, 10),
+        "p25": _percentile(lengths_sorted, 25),
+        "p75": _percentile(lengths_sorted, 75),
+        "p90": _percentile(lengths_sorted, 90),
+        "p95": _percentile(lengths_sorted, 95),
+        "provisional_min_chars": cfg.min_text_length,
         "below_provisional_count": below_provisional,
-        "below_provisional_pct": round(100.0 * below_provisional / n, 2),
-        "pass": below_provisional / n < 0.25,
+        "below_provisional_pct": round(100.0 * below_provisional / len(lengths), 2),
+        "pass": below_provisional / len(lengths) < cfg.a8_below_threshold_pass_pct / 100.0,
         "note": (
             "~20% short-doc tail is expected (summary dispositions). "
             "Stage 3 applies text_length >= 1500 filter before chunking."
@@ -187,11 +338,15 @@ def gate_a8_text_length_distribution(records: list[dict[str, Any]]) -> dict[str,
     }
 
 
-def gate_a9_citation_count_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    A9 — citation_count distribution.
-    Zero-citation cases are procedural anomalies with no Tier C utility.
-    """
+def gate_a9_citation_count_distribution(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
+    """A9 — citation_count distribution."""
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A9_citation_count_distribution", "pass": False, "note": "No records."}
+
     counts = [int(r.get("citation_count", 0)) for r in records]
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
@@ -207,8 +362,11 @@ def gate_a9_citation_count_distribution(records: list[dict[str, Any]]) -> dict[s
         "zero_citation_pct": round(100.0 * zero / n, 2),
         "above_5_count": above_5,
         "above_5_pct": round(100.0 * above_5 / n, 2),
-        "pass": zero / n < 0.20,
-        "note": ("For ~150K fast-iteration subset, filter citation_count > 5 to maximise Tier C utility."),
+        "pass": zero / n < cfg.a9_zero_citation_pass_pct / 100.0,
+        "note": (
+            "For ~150K fast-iteration subset, filter citation_count > 5 "
+            "to maximise Tier C utility."
+        ),
     }
 
 
@@ -216,15 +374,21 @@ def gate_a11_tokenizer_chunk_count(
     records: list[dict[str, Any]],
     sample_n: int = 200,
     seed: int = 0,
+    config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
-    Verifies corpus supports multi-chunk splitting at 1024-subword budget.
+    Tokenizer revision is logged for reproducibility.
     """
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
+
     try:
         from transformers import AutoTokenizer  # type: ignore[import]
 
-        tok = AutoTokenizer.from_pretrained(ENCODER_MODEL)
+        tok = AutoTokenizer.from_pretrained(cfg.encoder_model)
+        tokenizer_revision = getattr(tok, "name_or_path", cfg.encoder_model)
     except Exception as exc:
         return {
             "gate": "A11_tokenizer_chunk_count",
@@ -245,24 +409,25 @@ def gate_a11_tokenizer_chunk_count(
         ids = tok(text, add_special_tokens=False)["input_ids"]
         total_tokens = len(ids)
         token_lengths.append(total_tokens)
-        stride = CHUNK_SIZE_SUBWORDS - CHUNK_OVERLAP_SUBWORDS
-        n_chunks = max(1, math.ceil(max(0, total_tokens - CHUNK_OVERLAP_SUBWORDS) / stride))
+        stride = cfg.chunk_size_subwords - cfg.chunk_overlap_subwords
+        n_chunks = max(1, math.ceil(max(0, total_tokens - cfg.chunk_overlap_subwords) / stride))
         chunk_counts.append(n_chunks)
         if n_chunks > 1:
             multi_chunk += 1
 
     return {
         "gate": "A11_tokenizer_chunk_count",
-        "encoder_model": ENCODER_MODEL,
-        "chunk_size_subwords": CHUNK_SIZE_SUBWORDS,
-        "overlap_subwords": CHUNK_OVERLAP_SUBWORDS,
+        "encoder_model": cfg.encoder_model,
+        "tokenizer_revision": tokenizer_revision,
+        "chunk_size_subwords": cfg.chunk_size_subwords,
+        "overlap_subwords": cfg.chunk_overlap_subwords,
         "subsample_n": len(subsample),
         "mean_token_length": round(statistics.mean(token_lengths), 1),
         "median_token_length": statistics.median(token_lengths),
         "mean_chunks_per_doc": round(statistics.mean(chunk_counts), 2),
         "median_chunks_per_doc": statistics.median(chunk_counts),
         "multi_chunk_pct": round(100.0 * multi_chunk / len(subsample), 2),
-        "pass": statistics.median(chunk_counts) >= 2,
+        "pass": statistics.median(chunk_counts) >= cfg.a11_min_median_chunks,
         "note": "median_chunks_per_doc >= 2 confirms corpus supports multi-chunk splitting.",
     }
 
@@ -271,11 +436,16 @@ def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     sample_n: int = 500,
     seed: int = 0,
+    config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival in normalized text field.
-    Checks reporter citations, case-name citations, SCOTUS, and Federal reporter.
+    NOTE: regex-based detection is a heuristic approximation, not a precision extractor.
     """
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A12_citation_anchor_survival", "pass": False, "note": "No records."}
+
     CITATION_RE = re.compile(
         r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
         r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
@@ -302,8 +472,12 @@ def gate_a12_citation_anchor_survival(
         "records_with_citation_anchor": has_anchor,
         "pct_with_citation_anchor": round(pct_with_anchor, 2),
         "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
-        "pass": pct_with_anchor >= 60.0,
-        "note": (">=60% of records must contain extractable citation anchors for Tier C SQLite lookup to be viable."),
+        "pass": pct_with_anchor >= cfg.a12_min_pct_with_anchor,
+        "note": (
+            "Heuristic approximation via regex — not a precision extractor. "
+            ">=60% of records must contain extractable citation anchors "
+            "for Tier C SQLite lookup to be viable."
+        ),
     }
 
 
@@ -311,37 +485,39 @@ def gate_a13_sentence_density(
     records: list[dict[str, Any]],
     sample_n: int = 200,
     seed: int = 0,
+    config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
     """
-    A13 — Sentence density check via repo-certified spaCy pipeline (not NLTK).
-    Only evaluates records that pass the A8 length filter (text_length >= 1500)
-    so short summary dispositions do not pollute the NLI density gate.
-    sentencizer added because parser is excluded (avoids spaCy E030).
-    nlp.max_length set high to handle full federal appellate opinions safely.
+    A13 — Sentence density on A8-filtered records only (text_length >= min_text_length).
+    Uses repo-certified spaCy pipeline with sentencizer (not NLTK, not parser).
     """
+    cfg = config or ProbeConfig()
+    if not records:
+        return {"gate": "A13_sentence_density", "pass": False, "note": "No records."}
+
     try:
         import spacy  # type: ignore[import]
 
-        nlp = spacy.load(SPACY_MODEL, exclude=SPACY_EXCLUDE)
+        nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
         if "sentencizer" not in nlp.pipe_names:
             nlp.add_pipe("sentencizer")
         nlp.max_length = 2_000_000
+        spacy_version = spacy.__version__
     except Exception as exc:
         return {
             "gate": "A13_sentence_density",
             "pass": False,
             "error": str(exc),
-            "note": "spaCy model load failed — run: python -m spacy download en_core_web_sm",
+            "note": f"spaCy model load failed: {exc}",
         }
 
-    # Filter to records that pass A8 length floor before sentence density check
-    substantive = [r for r in records if int(r.get("text_length", 0)) >= PROVISIONAL_MIN_TEXT_LENGTH]
+    substantive = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
     if not substantive:
         return {
             "gate": "A13_sentence_density",
             "pass": False,
-            "error": "No records pass A8 length filter — run A8 gate first.",
-            "note": "Ensure text_length >= 1500 records exist in sample.",
+            "records_after_a8_filter": 0,
+            "note": "No records pass A8 length filter.",
         }
 
     rng = random.Random(seed)
@@ -350,17 +526,18 @@ def gate_a13_sentence_density(
     sent_counts: list[int] = []
     below_threshold = 0
     for r in subsample:
-        text = str(r.get("text", ""))[:50_000]  # cap per-doc cost for probe
+        text = str(r.get("text", ""))[:50_000]
         doc = nlp(text)
         n_sents = sum(1 for _ in doc.sents)
         sent_counts.append(n_sents)
-        if n_sents < MIN_SENTENCE_COUNT:
+        if n_sents < cfg.min_sentence_count:
             below_threshold += 1
 
     return {
         "gate": "A13_sentence_density",
-        "spacy_model": SPACY_MODEL,
-        "min_sentence_threshold": MIN_SENTENCE_COUNT,
+        "spacy_model": cfg.spacy_model,
+        "spacy_version": spacy_version,
+        "min_sentence_threshold": cfg.min_sentence_count,
         "subsample_n": len(subsample),
         "records_after_a8_filter": len(substantive),
         "mean_sentences": round(statistics.mean(sent_counts), 1),
@@ -368,7 +545,7 @@ def gate_a13_sentence_density(
         "min_sentences": min(sent_counts),
         "below_threshold_count": below_threshold,
         "below_threshold_pct": round(100.0 * below_threshold / len(subsample), 2),
-        "pass": below_threshold / len(subsample) < 0.10,
+        "pass": below_threshold / len(subsample) < cfg.a13_max_below_threshold_pct / 100.0,
         "note": (
             "Evaluated on text_length >= 1500 records only (A8-filtered). "
             ">=90% must have >20 sentences for Tier B NLI atomic-claim density."
@@ -376,71 +553,47 @@ def gate_a13_sentence_density(
     }
 
 
-def gate_b6_text_entropy_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    B6 — text_entropy empirical distribution.
-    Threshold must be derived from data — not hardcoded.
-    """
+def gate_b6_text_entropy_distribution(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
+    """B6 — text_entropy distribution. Pass always — threshold is data-derived."""
+    if not records:
+        return {"gate": "B6_text_entropy_distribution", "pass": True, "note": "No records."}
+
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
-    n = len(entropies_sorted)
-
-    def pct(p: float) -> float:
-        idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
-        return round(entropies_sorted[idx], 4)
-
     zero_entropy = sum(1 for e in entropies if e == 0.0)
     return {
         "gate": "B6_text_entropy_distribution",
-        "count": n,
+        "count": len(entropies),
         "mean": round(statistics.mean(entropies), 4),
         "median": round(float(statistics.median(entropies)), 4),
         "min": round(min(entropies), 4),
         "max": round(max(entropies), 4),
-        "p5": pct(5),
-        "p10": pct(10),
-        "p25": pct(25),
-        "p75": pct(75),
-        "p90": pct(90),
-        "p95": pct(95),
+        "p5": _percentile(entropies_sorted, 5),
+        "p10": _percentile(entropies_sorted, 10),
+        "p25": _percentile(entropies_sorted, 25),
+        "p75": _percentile(entropies_sorted, 75),
+        "p90": _percentile(entropies_sorted, 90),
+        "p95": _percentile(entropies_sorted, 95),
         "zero_entropy_count": zero_entropy,
-        "zero_entropy_pct": round(100.0 * zero_entropy / n, 2),
-        "pass": True,  # distribution-only gate — no hardcoded threshold
-        "note": ("Use p10 as provisional low-entropy filter cutoff for Stage 3. Adjust after reviewing distribution."),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Schema validation
-# ---------------------------------------------------------------------------
-
-
-def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Check all required fields are present across sampled records."""
-    missing_by_field: dict[str, int] = {f: 0 for f in REQUIRED_FIELDS}
-    for r in records:
-        for f in REQUIRED_FIELDS:
-            if f not in r:
-                missing_by_field[f] += 1
-    any_missing = any(v > 0 for v in missing_by_field.values())
-    return {
-        "gate": "schema_validation",
-        "required_fields": sorted(REQUIRED_FIELDS),
-        "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
-        "pass": not any_missing,
+        "zero_entropy_pct": round(100.0 * zero_entropy / len(entropies), 2),
+        "pass": True,
+        "note": "Use p10 as provisional low-entropy filter cutoff for Stage 3.",
     }
 
 
 # ---------------------------------------------------------------------------
 # Model-relevant quality signals (advisory — not schema violations)
-# Used by src/wandb_logger.py to log quality signal distributions to W&B.
 # ---------------------------------------------------------------------------
 
 
 class ModelQualitySignals:
     """
-    Model-relevant quality signals for RAG pipeline rows.
-    Soft warnings returned as (signal_name, detail) tuples. Empty = clean.
+    Soft quality warnings for RAG pipeline rows.
+    Returns (signal_name, detail) tuples. Empty = clean.
+    Used by wandb_logger.py and integrated into run_probe() report.
     """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
@@ -455,7 +608,6 @@ class ModelQualitySignals:
 
     @classmethod
     def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
-        """Return quality signals for a row. Empty = clean."""
         signals: list[tuple[str, str]] = []
         text: str = row.get(text_field, "")
         token_count = len(text.split())
@@ -484,20 +636,47 @@ class ModelQualitySignals:
 
         return signals
 
+    @classmethod
+    def summarize(
+        cls,
+        records: list[dict[str, Any]],
+        sample_n: int = 500,
+        seed: int = 0,
+    ) -> dict[str, Any]:
+        """Return signal frequency counts and pct_clean for a record sample."""
+        rng = random.Random(seed)
+        subsample = rng.sample(records, min(sample_n, len(records)))
+        signal_counts: dict[str, int] = {}
+        clean = 0
+        for row in subsample:
+            sigs = cls.check(row)
+            if not sigs:
+                clean += 1
+            for name, _ in sigs:
+                signal_counts[name] = signal_counts.get(name, 0) + 1
+        return {
+            "subsample_n": len(subsample),
+            "signal_counts": signal_counts,
+            "pct_clean": round(100.0 * clean / len(subsample), 2) if subsample else 0.0,
+        }
+
 
 # ---------------------------------------------------------------------------
-# Top-level probe class and run_probe function
+# Top-level probe class
 # ---------------------------------------------------------------------------
 
 
 class CourtListenerDatasetProbe:
     """
     Orchestrates all dataset-readiness gates for the local CourtListener corpus.
-    Replaces the dropped pile-of-law/pile-of-law HuggingFace probe.
+    Accepts injected ProbeConfig for reproducible, versioned experiment settings.
     """
 
+    def __init__(self, config: ProbeConfig | None = None) -> None:
+        self.config = config or ProbeConfig()
+
     def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """Return validation errors for a single row. Empty list = valid."""
+        """Lite single-row text check. Full batch checks via validate_schema()."""
         errors: list[str] = []
         text = row.get("text", "")
         if not isinstance(text, str) or len(text) < 50:
@@ -520,7 +699,13 @@ class CourtListenerDatasetProbe:
             seed=seed,
             skip_tokenizer=skip_tokenizer,
             skip_spacy=skip_spacy,
+            config=self.config,
         )
+
+
+# ---------------------------------------------------------------------------
+# run_probe
+# ---------------------------------------------------------------------------
 
 
 def run_probe(
@@ -530,15 +715,48 @@ def run_probe(
     seed: int = 0,
     skip_tokenizer: bool = False,
     skip_spacy: bool = False,
+    config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
+    cfg = config or ProbeConfig()
+
     print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
-    records = sample_records(data_dir, subset, seed=seed)
+    audit = iter_shards_with_audit(data_dir)
+    all_records = audit["records"]
+
+    # Reservoir-sample from already-loaded records
+    rng = random.Random(seed)
+    if len(all_records) > subset:
+        records = rng.sample(all_records, subset)
+    else:
+        records = all_records
+
     print(f"[dataset_probe] Loaded {len(records)} records.")
+
+    import spacy  # type: ignore[import]
+
+    try:
+        spacy_version = spacy.__version__
+        spacy_model_version = spacy.load(cfg.spacy_model).meta.get("version", "unknown")
+    except Exception:
+        spacy_version = "unknown"
+        spacy_model_version = "unknown"
 
     report: dict[str, Any] = {
         "data_dir": str(data_dir),
         "subset_n": len(records),
         "seed": seed,
+        "shard_audit": {
+            "shard_count": audit["shard_count"],
+            "total_parse_errors": audit["total_parse_errors"],
+            "total_blank_lines": audit["total_blank_lines"],
+            "shard_errors": audit["shard_errors"],
+        },
+        "provenance": {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "spacy_version": spacy_version,
+            "spacy_model_version": spacy_model_version,
+            "probe_config": dataclasses.asdict(cfg),
+        },
         "gates": {},
     }
 
@@ -546,31 +764,36 @@ def run_probe(
     report["gates"]["schema"] = validate_schema(records)
 
     print("[dataset_probe] Gate A7: text_source breakdown ...")
-    report["gates"]["A7"] = gate_a7_text_source_breakdown(records)
+    report["gates"]["A7"] = gate_a7_text_source_breakdown(records, cfg)
 
     print("[dataset_probe] Gate A8: text_length distribution ...")
-    report["gates"]["A8"] = gate_a8_text_length_distribution(records)
+    report["gates"]["A8"] = gate_a8_text_length_distribution(records, cfg)
 
     print("[dataset_probe] Gate A9: citation_count distribution ...")
-    report["gates"]["A9"] = gate_a9_citation_count_distribution(records)
+    report["gates"]["A9"] = gate_a9_citation_count_distribution(records, cfg)
 
     print("[dataset_probe] Gate A12: citation anchor survival ...")
-    report["gates"]["A12"] = gate_a12_citation_anchor_survival(records)
+    report["gates"]["A12"] = gate_a12_citation_anchor_survival(records, config=cfg)
 
     print("[dataset_probe] Gate B6: text_entropy distribution ...")
-    report["gates"]["B6"] = gate_b6_text_entropy_distribution(records)
+    report["gates"]["B6"] = gate_b6_text_entropy_distribution(records, cfg)
 
     if not skip_tokenizer:
         print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
-        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(records)
+        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(records, config=cfg)
     else:
         report["gates"]["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(records)
+        report["gates"]["A13"] = gate_a13_sentence_density(records, config=cfg)
     else:
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
+
+    print("[dataset_probe] Quality signals ...")
+    report["quality_signals"] = ModelQualitySignals.summarize(
+        records, sample_n=cfg.quality_signals_sample_n
+    )
 
     passed = [k for k, v in report["gates"].items() if v.get("pass") is True]
     failed = [k for k, v in report["gates"].items() if v.get("pass") is False]
@@ -591,46 +814,20 @@ def run_probe(
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=Path("data/raw/cl_federal_appellate_bulk"),
-        help="Directory containing .jsonl shard files.",
+    parser = argparse.ArgumentParser(
+        description="CourtListener dataset readiness probe (Category A + B6 gates)."
     )
-    parser.add_argument(
-        "--subset",
-        type=int,
-        default=10_000,
-        help="Number of records to reservoir-sample (default: 10000).",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("logs/dataset_probe_report.json"),
-        help="Output path for JSON report.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Random seed for reservoir sampling (default: 0).",
-    )
-    parser.add_argument(
-        "--skip-tokenizer",
-        action="store_true",
-        help="Skip Gate A11 (tokenizer chunk count) — requires HF model download.",
-    )
-    parser.add_argument(
-        "--skip-spacy",
-        action="store_true",
-        help="Skip Gate A13 (spaCy sentence density).",
-    )
+    parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
+    parser.add_argument("--subset", type=int, default=10_000)
+    parser.add_argument("--output", type=Path, default=Path("logs/dataset_probe_report.json"))
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--skip-tokenizer", action="store_true")
+    parser.add_argument("--skip-spacy", action="store_true")
     args = parser.parse_args()
     run_probe(
         data_dir=args.data_dir,
