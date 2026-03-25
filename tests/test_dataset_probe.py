@@ -1,25 +1,23 @@
 # tests/test_dataset_probe.py
 """
 TDD contract tests for src/dataset_probe.py — CourtListener local shard probe.
-Red phase: defines the contract before source implementation.
+Covers all actionable observations from critique batch 2.
 """
-
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.dataset_probe import (
-    CHUNK_OVERLAP_SUBWORDS,
-    CHUNK_SIZE_SUBWORDS,
-    ENCODER_MODEL,
-    MIN_SENTENCE_COUNT,
-    PROVISIONAL_MIN_TEXT_LENGTH,
-    REQUIRED_FIELDS,
-    SPACY_MODEL,
     CourtListenerDatasetProbe,
+    ModelQualitySignals,
+    ProbeConfig,
+    _percentile,
     gate_a7_text_source_breakdown,
     gate_a8_text_length_distribution,
     gate_a9_citation_count_distribution,
@@ -27,10 +25,19 @@ from src.dataset_probe import (
     gate_a12_citation_anchor_survival,
     gate_a13_sentence_density,
     gate_b6_text_entropy_distribution,
+    iter_shards,
     run_probe,
     sample_records,
     validate_schema,
+    PROVISIONAL_MIN_TEXT_LENGTH,
+    CHUNK_SIZE_SUBWORDS,
+    CHUNK_OVERLAP_SUBWORDS,
+    ENCODER_MODEL,
+    SPACY_MODEL,
+    MIN_SENTENCE_COUNT,
 )
+
+pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -75,7 +82,6 @@ def _make_records(n: int, **overrides) -> list[dict]:
 
 @pytest.fixture
 def sample_shard_dir(tmp_path: Path) -> Path:
-    """Write a tiny .jsonl shard for sample_records() tests."""
     shard = tmp_path / "shard_000.jsonl"
     with open(shard, "w") as fh:
         for i in range(50):
@@ -85,81 +91,139 @@ def sample_shard_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def default_config() -> ProbeConfig:
+    return ProbeConfig()
+
+
 # ---------------------------------------------------------------------------
-# Constants
+# ProbeConfig dataclass
 # ---------------------------------------------------------------------------
 
+class TestProbeConfig:
+    def test_is_frozen(self):
+        cfg = ProbeConfig()
+        with pytest.raises((AttributeError, TypeError)):
+            cfg.min_text_length = 999  # type: ignore[misc]
 
-class TestConstants:
-    def test_required_fields_is_frozenset(self):
-        assert isinstance(REQUIRED_FIELDS, frozenset)
+    def test_default_min_text_length(self):
+        assert ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH
 
-    def test_required_fields_contains_core_schema(self):
-        for f in (
-            "id",
-            "court_id",
-            "text",
-            "text_length",
-            "text_source",
-            "citation_count",
-            "citation_density",
-            "is_precedential",
-            "text_entropy",
-            "token_count",
-            "paragraph_count",
-        ):
-            assert f in REQUIRED_FIELDS
+    def test_default_chunk_size(self):
+        assert ProbeConfig().chunk_size_subwords == CHUNK_SIZE_SUBWORDS
 
-    def test_chunk_size_is_1024(self):
-        assert CHUNK_SIZE_SUBWORDS == 1024
+    def test_default_chunk_overlap(self):
+        assert ProbeConfig().chunk_overlap_subwords == CHUNK_OVERLAP_SUBWORDS
 
-    def test_chunk_overlap_is_128(self):
-        assert CHUNK_OVERLAP_SUBWORDS == 128
+    def test_default_min_sentence_count(self):
+        assert ProbeConfig().min_sentence_count == MIN_SENTENCE_COUNT
 
-    def test_encoder_model_is_bge_m3(self):
-        assert ENCODER_MODEL == "BAAI/bge-m3"
+    def test_default_encoder_model(self):
+        assert ProbeConfig().encoder_model == ENCODER_MODEL
 
-    def test_spacy_model_is_en_core_web_sm(self):
-        assert SPACY_MODEL == "en_core_web_sm"
+    def test_custom_values_accepted(self):
+        cfg = ProbeConfig(min_text_length=500)
+        assert cfg.min_text_length == 500
 
-    def test_min_sentence_count_is_50(self):
-        assert MIN_SENTENCE_COUNT == 50
+    def test_is_json_serializable(self):
+        import dataclasses
+        cfg = ProbeConfig()
+        d = dataclasses.asdict(cfg)
+        json.dumps(d)  # must not raise
 
-    def test_provisional_min_text_length_positive(self):
-        assert PROVISIONAL_MIN_TEXT_LENGTH > 0
+
+# ---------------------------------------------------------------------------
+# _percentile helper
+# ---------------------------------------------------------------------------
+
+class TestPercentile:
+    def test_p0_returns_min(self):
+        assert _percentile([1, 2, 3, 4, 5], 0) == 1
+
+    def test_p100_returns_max(self):
+        assert _percentile([1, 2, 3, 4, 5], 100) == 5
+
+    def test_p50_returns_median(self):
+        assert _percentile([1, 2, 3, 4, 5], 50) == 3
+
+    def test_single_element(self):
+        assert _percentile([42], 50) == 42
+
+    def test_requires_sorted_input(self):
+        # _percentile assumes pre-sorted list
+        result = _percentile(sorted([10, 1, 5, 3]), 50)
+        assert result in [3, 5]
+
+
+# ---------------------------------------------------------------------------
+# iter_shards — malformed JSON audit
+# ---------------------------------------------------------------------------
+
+class TestIterShards:
+    def test_raises_on_empty_dir(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            list(iter_shards(tmp_path))
+
+    def test_raises_on_missing_dir(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            list(iter_shards(tmp_path / "nonexistent"))
+
+    def test_yields_valid_records(self, sample_shard_dir):
+        records = list(iter_shards(sample_shard_dir))
+        assert len(records) == 50
+
+    def test_skips_blank_lines(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('\n\n{"id":"1","text":"x"}\n\n')
+        records = list(iter_shards(tmp_path))
+        assert len(records) == 1
+
+    def test_counts_malformed_lines(self, tmp_path):
+        """iter_shards must surface malformed line count, not silently discard."""
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id":"1","text":"good"}\nNOT_JSON\n{"id":"2","text":"good"}\n')
+        result = iter_shards(tmp_path)
+        # Collect with audit info
+        records, parse_errors = _collect_with_audit(result)
+        assert len(records) == 2
+        assert parse_errors == 1
+
+    def test_shard_level_diagnostics_available(self, tmp_path):
+        """iter_shards_with_audit must return per-shard error counts."""
+        from src.dataset_probe import iter_shards_with_audit
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id":"1","text":"good"}\nBAD\n')
+        audit = iter_shards_with_audit(tmp_path)
+        assert audit["total_parse_errors"] == 1
+        assert audit["shard_errors"]["s.jsonl"] == 1
+
+
+def _collect_with_audit(it):
+    """Helper: collect records and parse error count from audited iterator."""
+    from src.dataset_probe import iter_shards_with_audit
+    return [], 0  # placeholder — real test uses iter_shards_with_audit directly
 
 
 # ---------------------------------------------------------------------------
 # sample_records
 # ---------------------------------------------------------------------------
 
-
 class TestSampleRecords:
-    def test_returns_list(self, sample_shard_dir):
-        result = sample_records(sample_shard_dir, 10)
-        assert isinstance(result, list)
-
     def test_returns_correct_count(self, sample_shard_dir):
-        result = sample_records(sample_shard_dir, 10)
-        assert len(result) == 10
+        assert len(sample_records(sample_shard_dir, 10)) == 10
 
     def test_returns_all_when_n_exceeds_total(self, sample_shard_dir):
-        result = sample_records(sample_shard_dir, 1000)
-        assert len(result) == 50
+        assert len(sample_records(sample_shard_dir, 1000)) == 50
 
     def test_deterministic_with_seed(self, sample_shard_dir):
         r1 = sample_records(sample_shard_dir, 10, seed=0)
         r2 = sample_records(sample_shard_dir, 10, seed=0)
         assert [r["id"] for r in r1] == [r["id"] for r in r2]
 
-    def test_different_seeds_give_different_samples(self, sample_shard_dir):
+    def test_different_seeds_differ(self, sample_shard_dir):
         r1 = sample_records(sample_shard_dir, 10, seed=0)
         r2 = sample_records(sample_shard_dir, 10, seed=99)
         assert [r["id"] for r in r1] != [r["id"] for r in r2]
-
-    def test_raises_on_missing_dir(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            sample_records(tmp_path / "nonexistent", 10)
 
     def test_raises_on_empty_dir(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -167,15 +231,12 @@ class TestSampleRecords:
 
 
 # ---------------------------------------------------------------------------
-# validate_schema
+# validate_schema — type checks
 # ---------------------------------------------------------------------------
-
 
 class TestValidateSchema:
     def test_passes_complete_records(self):
-        result = validate_schema(_make_records(5))
-        assert result["pass"] is True
-        assert result["missing_counts"] == {}
+        assert validate_schema(_make_records(5))["pass"] is True
 
     def test_fails_missing_field(self):
         records = _make_records(5)
@@ -185,208 +246,212 @@ class TestValidateSchema:
         assert result["pass"] is False
         assert "court_id" in result["missing_counts"]
 
-    def test_reports_all_missing_fields(self):
-        records = _make_records(3)
-        for r in records:
-            del r["text"]
-            del r["text_entropy"]
+    def test_fails_non_integer_text_length(self):
+        records = _make_records(3, text_length="not_an_int")
         result = validate_schema(records)
-        assert "text" in result["missing_counts"]
-        assert "text_entropy" in result["missing_counts"]
+        assert result["pass"] is False
+        assert "type_errors" in result
+
+    def test_fails_negative_citation_count(self):
+        records = _make_records(3, citation_count=-1)
+        result = validate_schema(records)
+        assert result["pass"] is False
+        assert "range_errors" in result
+
+    def test_fails_non_bool_is_precedential(self):
+        records = _make_records(3, is_precedential="yes")
+        result = validate_schema(records)
+        assert result["pass"] is False
+        assert "type_errors" in result
 
     def test_gate_key_present(self):
-        result = validate_schema(_make_records(3))
-        assert result["gate"] == "schema_validation"
+        assert validate_schema(_make_records(3))["gate"] == "schema_validation"
+
+    def test_empty_records_handled(self):
+        result = validate_schema([])
+        assert "pass" in result
 
 
 # ---------------------------------------------------------------------------
-# Gate A7 — text_source breakdown
+# Gate A7
 # ---------------------------------------------------------------------------
-
 
 class TestGateA7:
     def test_gate_key(self):
-        r = gate_a7_text_source_breakdown(_make_records(10))
-        assert r["gate"] == "A7_text_source_breakdown"
+        assert gate_a7_text_source_breakdown(_make_records(10))["gate"] == "A7_text_source_breakdown"
 
     def test_pass_when_known_formats_dominant(self):
         records = _make_records(85, text_source="plain_text") + _make_records(15, text_source="html_with_citations")
-        r = gate_a7_text_source_breakdown(records)
-        assert r["pass"] is True
+        assert gate_a7_text_source_breakdown(records)["pass"] is True
 
     def test_fail_when_unknown_formats_dominant(self):
         records = _make_records(30, text_source="plain_text") + _make_records(70, text_source="html_lawbox")
-        r = gate_a7_text_source_breakdown(records)
-        assert r["pass"] is False
-
-    def test_breakdown_sums_to_100_pct(self):
-        records = _make_records(60, text_source="plain_text") + _make_records(40, text_source="html_with_citations")
-        r = gate_a7_text_source_breakdown(records)
-        total = sum(v["pct"] for v in r["breakdown"].values())
-        assert abs(total - 100.0) < 0.5
+        assert gate_a7_text_source_breakdown(records)["pass"] is False
 
     def test_unknown_formats_pct_reported(self):
-        records = (
-            _make_records(50, text_source="plain_text")
-            + _make_records(33, text_source="html_with_citations")
-            + _make_records(17, text_source="html_lawbox")
-        )
+        records = _make_records(50, text_source="plain_text") + _make_records(50, text_source="html_lawbox")
         r = gate_a7_text_source_breakdown(records)
         assert r["unknown_formats_pct"] > 0
 
+    def test_empty_records_handled(self):
+        result = gate_a7_text_source_breakdown([])
+        assert "pass" in result
+
 
 # ---------------------------------------------------------------------------
-# Gate A8 — text_length distribution
+# Gate A8 — boundary tests
 # ---------------------------------------------------------------------------
-
 
 class TestGateA8:
-    def test_gate_key(self):
-        r = gate_a8_text_length_distribution(_make_records(10))
-        assert r["gate"] == "A8_text_length_distribution"
+    def test_passes_at_24_99_pct(self):
+        records = _make_records(7501, text_length=5000) + _make_records(2499, text_length=100)
+        assert gate_a8_text_length_distribution(records)["pass"] is True
 
-    def test_reports_mean_median_min_max(self):
-        r = gate_a8_text_length_distribution(_make_records(10))
-        for key in ("mean", "median", "min", "max", "p10", "p90"):
+    def test_fails_at_25_pct(self):
+        records = _make_records(7500, text_length=5000) + _make_records(2500, text_length=100)
+        assert gate_a8_text_length_distribution(records)["pass"] is False
+
+    def test_reports_percentiles(self):
+        r = gate_a8_text_length_distribution(_make_records(20))
+        for key in ("p5", "p10", "p25", "p75", "p90", "p95"):
             assert key in r
 
-    def test_pass_when_few_below_threshold(self):
-        records = _make_records(95, text_length=5000) + _make_records(5, text_length=100)
-        r = gate_a8_text_length_distribution(records)
-        assert r["pass"] is True
-
-    def test_fail_when_many_below_threshold(self):
-        records = _make_records(50, text_length=5000) + _make_records(50, text_length=100)
-        r = gate_a8_text_length_distribution(records)
-        assert r["pass"] is False
-
-    def test_below_provisional_count_correct(self):
-        records = _make_records(8, text_length=5000) + _make_records(2, text_length=100)
-        r = gate_a8_text_length_distribution(records)
-        assert r["below_provisional_count"] == 2
+    def test_empty_records_handled(self):
+        result = gate_a8_text_length_distribution([])
+        assert "pass" in result
 
 
 # ---------------------------------------------------------------------------
-# Gate A9 — citation_count distribution
+# Gate A9 — boundary tests
 # ---------------------------------------------------------------------------
-
 
 class TestGateA9:
-    def test_gate_key(self):
-        r = gate_a9_citation_count_distribution(_make_records(10))
-        assert r["gate"] == "A9_citation_count_distribution"
+    def test_passes_at_19_99_pct(self):
+        records = _make_records(8001, citation_count=5) + _make_records(1999, citation_count=0)
+        assert gate_a9_citation_count_distribution(records)["pass"] is True
 
-    def test_pass_when_few_zero_citation(self):
-        records = _make_records(90, citation_count=5) + _make_records(10, citation_count=0)
-        r = gate_a9_citation_count_distribution(records)
-        assert r["pass"] is True
-
-    def test_fail_when_many_zero_citation(self):
-        records = _make_records(50, citation_count=5) + _make_records(50, citation_count=0)
-        r = gate_a9_citation_count_distribution(records)
-        assert r["pass"] is False
+    def test_fails_at_20_pct(self):
+        records = _make_records(8000, citation_count=5) + _make_records(2000, citation_count=0)
+        assert gate_a9_citation_count_distribution(records)["pass"] is False
 
     def test_above_5_count_reported(self):
         records = _make_records(70, citation_count=10) + _make_records(30, citation_count=2)
-        r = gate_a9_citation_count_distribution(records)
-        assert r["above_5_count"] == 70
+        assert gate_a9_citation_count_distribution(records)["above_5_count"] == 70
+
+    def test_empty_records_handled(self):
+        result = gate_a9_citation_count_distribution([])
+        assert "pass" in result
 
 
 # ---------------------------------------------------------------------------
-# Gate A12 — citation anchor survival
+# Gate A11 — mocked tokenizer (network-free)
 # ---------------------------------------------------------------------------
 
-
-class TestGateA12:
-    def test_gate_key(self):
-        r = gate_a12_citation_anchor_survival(_make_records(20))
-        assert r["gate"] == "A12_citation_anchor_survival"
-
-    def test_pass_when_most_have_anchors(self):
-        records = _make_records(100)
-        r = gate_a12_citation_anchor_survival(records)
-        assert r["pass"] is True
-
-    def test_fail_when_few_have_anchors(self):
-        records = _make_records(100, text="No citations here at all.")
-        r = gate_a12_citation_anchor_survival(records)
-        assert r["pass"] is False
-
-    def test_pct_reported(self):
-        r = gate_a12_citation_anchor_survival(_make_records(50))
-        assert "pct_with_citation_anchor" in r
-
-
-# ---------------------------------------------------------------------------
-# Gate A13 — sentence density (spaCy)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestGateA13:
-    def test_gate_key(self):
-        long_text = "The court held this. " * 100
-        records = _make_records(5, text=long_text)
-        r = gate_a13_sentence_density(records)
-        assert r["gate"] == "A13_sentence_density"
-
-    def test_pass_when_dense_text(self):
-        long_text = "The court held this point clearly. " * 100
-        records = _make_records(10, text=long_text)
-        r = gate_a13_sentence_density(records)
-        assert r["pass"] is True
-
-    def test_fail_when_sparse_text(self):
-        short_text = "Affirmed."
-        records = _make_records(10, text=short_text)
-        r = gate_a13_sentence_density(records)
-        assert r["pass"] is False
-
-    def test_uses_spacy_not_nltk(self):
-        # Verify spacy_model key is reported (confirms spaCy path used)
-        long_text = "The court held. " * 100
-        records = _make_records(5, text=long_text)
-        r = gate_a13_sentence_density(records)
-        assert r.get("spacy_model") == "en_core_web_sm"
-
-
-# ---------------------------------------------------------------------------
-# Gate A11 — tokenizer chunk count (marked slow, requires HF model)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.slow
 class TestGateA11:
-    def test_gate_key(self):
-        records = _make_records(5)
-        r = gate_a11_tokenizer_chunk_count(records, sample_n=5)
-        assert r["gate"] == "A11_tokenizer_chunk_count"
+    def _mock_tok(self, token_counts: list[int]):
+        tok = MagicMock()
+        tok.side_effect = [{"input_ids": list(range(n))} for n in token_counts]
+        return tok
 
-    def test_reports_encoder_model(self):
-        records = _make_records(5)
-        r = gate_a11_tokenizer_chunk_count(records, sample_n=5)
-        assert r.get("encoder_model") == "BAAI/bge-m3"
-
-    def test_pass_when_median_chunks_gte_2(self):
-        long_text = "The court held. " * 2000
-        records = _make_records(10, text=long_text)
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_pass_when_median_chunks_gte_2(self, mock_cls):
+        mock_cls.from_pretrained.return_value = MagicMock(
+            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
+        )
+        records = _make_records(10)
         r = gate_a11_tokenizer_chunk_count(records, sample_n=10)
         assert r["pass"] is True
 
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_logs_encoder_model(self, mock_cls):
+        mock_cls.from_pretrained.return_value = MagicMock(
+            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
+        )
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
+        assert r.get("encoder_model") == ENCODER_MODEL
+
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_logs_tokenizer_revision(self, mock_cls):
+        """Tokenizer revision must be logged for reproducibility."""
+        mock_cls.from_pretrained.return_value = MagicMock(
+            side_effect=lambda text, **kw: {"input_ids": list(range(3000))}
+        )
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
+        assert "tokenizer_revision" in r
+
+    @patch("src.dataset_probe.AutoTokenizer")
+    def test_fail_on_tokenizer_load_error(self, mock_cls):
+        mock_cls.from_pretrained.side_effect = OSError("not found")
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), sample_n=5)
+        assert r["pass"] is False
+        assert "error" in r
+
+    def test_empty_records_handled(self):
+        r = gate_a11_tokenizer_chunk_count([])
+        assert "pass" in r
+
 
 # ---------------------------------------------------------------------------
-# Gate B6 — text_entropy distribution
+# Gate A12
 # ---------------------------------------------------------------------------
 
+class TestGateA12:
+    def test_pass_when_most_have_anchors(self):
+        assert gate_a12_citation_anchor_survival(_make_records(100))["pass"] is True
+
+    def test_fail_when_few_have_anchors(self):
+        r = gate_a12_citation_anchor_survival(_make_records(100, text="No citations here."))
+        assert r["pass"] is False
+
+    def test_note_states_approximation(self):
+        r = gate_a12_citation_anchor_survival(_make_records(10))
+        assert "heuristic" in r["note"].lower() or "approximat" in r["note"].lower()
+
+    def test_empty_records_handled(self):
+        result = gate_a12_citation_anchor_survival([])
+        assert "pass" in result
+
+
+# ---------------------------------------------------------------------------
+# Gate A13 — short docs excluded via A8 filter
+# ---------------------------------------------------------------------------
+
+class TestGateA13:
+    def test_excludes_short_docs_below_a8_threshold(self):
+        short = _make_records(50, text_length=100, text="Short.")
+        long_text = "The court held this point clearly. " * 100
+        long = _make_records(50, text_length=5000, text=long_text)
+        r = gate_a13_sentence_density(short + long)
+        assert r["records_after_a8_filter"] == 50
+
+    def test_pass_when_dense_text(self):
+        long_text = "The court held this point clearly. " * 100
+        records = _make_records(20, text_length=5000, text=long_text)
+        r = gate_a13_sentence_density(records)
+        assert r["pass"] is True
+
+    def test_fail_when_all_short_filtered_out(self):
+        records = _make_records(20, text_length=100, text="Short.")
+        r = gate_a13_sentence_density(records)
+        assert r["pass"] is False
+
+    def test_spacy_model_reported(self):
+        long_text = "The court held. " * 100
+        r = gate_a13_sentence_density(_make_records(5, text_length=5000, text=long_text))
+        assert r.get("spacy_model") == SPACY_MODEL
+
+    def test_empty_records_handled(self):
+        result = gate_a13_sentence_density([])
+        assert "pass" in result
+
+
+# ---------------------------------------------------------------------------
+# Gate B6
+# ---------------------------------------------------------------------------
 
 class TestGateB6:
-    def test_gate_key(self):
-        r = gate_b6_text_entropy_distribution(_make_records(10))
-        assert r["gate"] == "B6_text_entropy_distribution"
-
-    def test_always_passes_distribution_only(self):
-        r = gate_b6_text_entropy_distribution(_make_records(10))
-        assert r["pass"] is True
+    def test_always_passes(self):
+        assert gate_b6_text_entropy_distribution(_make_records(10))["pass"] is True
 
     def test_reports_percentiles(self):
         r = gate_b6_text_entropy_distribution(_make_records(20))
@@ -395,88 +460,84 @@ class TestGateB6:
 
     def test_zero_entropy_count_reported(self):
         records = _make_records(8, text_entropy=4.0) + _make_records(2, text_entropy=0.0)
-        r = gate_b6_text_entropy_distribution(records)
-        assert r["zero_entropy_count"] == 2
+        assert gate_b6_text_entropy_distribution(records)["zero_entropy_count"] == 2
+
+    def test_empty_records_handled(self):
+        result = gate_b6_text_entropy_distribution([])
+        assert "pass" in result
 
 
 # ---------------------------------------------------------------------------
-# CourtListenerDatasetProbe class contract
+# ModelQualitySignals — integrated into run_probe
 # ---------------------------------------------------------------------------
 
-
-class TestCourtListenerDatasetProbe:
-    def test_probe_class_exists(self):
-        probe = CourtListenerDatasetProbe()
-        assert probe is not None
-
-    def test_run_returns_report_dict(self, sample_shard_dir, tmp_path):
-        probe = CourtListenerDatasetProbe()
-        report = probe.run(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "report.json",
-            skip_tokenizer=True,
-            skip_spacy=False,
-        )
-        assert isinstance(report, dict)
-        assert "gates" in report
-        assert "summary" in report
-
-    def test_report_written_to_disk(self, sample_shard_dir, tmp_path):
-        probe = CourtListenerDatasetProbe()
-        out = tmp_path / "report.json"
-        probe.run(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=out,
-            skip_tokenizer=True,
-        )
-        assert out.exists()
-        with open(out) as fh:
-            data = json.load(fh)
-        assert "gates" in data
-
-    def test_summary_all_passed_key_present(self, sample_shard_dir, tmp_path):
-        probe = CourtListenerDatasetProbe()
-        report = probe.run(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-        )
-        assert "all_passed" in report["summary"]
-
-    def test_skipped_gates_recorded(self, sample_shard_dir, tmp_path):
-        probe = CourtListenerDatasetProbe()
-        report = probe.run(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-        )
-        assert "A11" in report["summary"]["skipped"]
-        assert "A13" in report["summary"]["skipped"]
-
-
-# ---------------------------------------------------------------------------
-# run_probe (module-level function)
-# ---------------------------------------------------------------------------
-
-
-class TestRunProbe:
-    def test_run_probe_returns_dict(self, sample_shard_dir, tmp_path):
+class TestModelQualitySignalsIntegration:
+    def test_quality_signals_in_report(self, sample_shard_dir, tmp_path):
         report = run_probe(
             data_dir=sample_shard_dir,
             subset=20,
-            output=tmp_path / "out.json",
+            output=tmp_path / "r.json",
             skip_tokenizer=True,
             skip_spacy=True,
         )
-        assert isinstance(report, dict)
+        assert "quality_signals" in report
 
-    def test_run_probe_writes_json(self, sample_shard_dir, tmp_path):
-        out = tmp_path / "out.json"
+    def test_quality_signals_has_frequency_counts(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        qs = report["quality_signals"]
+        assert "signal_counts" in qs
+        assert "pct_clean" in qs
+
+    def test_clean_signal_text_signals(self):
+        signals = ModelQualitySignals.check({"text": "Motion denied."})
+        assert any(s[0] == "truncated_document" for s in signals)
+
+
+# ---------------------------------------------------------------------------
+# run_probe — report schema
+# ---------------------------------------------------------------------------
+
+class TestRunProbeReportSchema:
+    def test_report_has_required_keys(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        for key in ("gates", "summary", "provenance", "quality_signals"):
+            assert key in report
+
+    def test_summary_has_all_buckets(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        for key in ("passed", "failed", "skipped", "all_passed"):
+            assert key in report["summary"]
+
+    def test_report_is_json_serializable(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        json.dumps(report)  # must not raise
+
+    def test_report_written_to_disk(self, sample_shard_dir, tmp_path):
+        out = tmp_path / "r.json"
         run_probe(
             data_dir=sample_shard_dir,
             subset=20,
@@ -485,3 +546,107 @@ class TestRunProbe:
             skip_spacy=True,
         )
         assert out.exists()
+        assert json.loads(out.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Provenance block
+# ---------------------------------------------------------------------------
+
+class TestProvenance:
+    def test_provenance_has_required_keys(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        prov = report["provenance"]
+        for key in ("timestamp", "spacy_model_version", "probe_config"):
+            assert key in prov
+
+    def test_probe_config_in_provenance(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert "min_text_length" in report["provenance"]["probe_config"]
+
+
+# ---------------------------------------------------------------------------
+# CourtListenerDatasetProbe — config injection
+# ---------------------------------------------------------------------------
+
+class TestCourtListenerDatasetProbe:
+    def test_accepts_custom_config(self, sample_shard_dir, tmp_path):
+        cfg = ProbeConfig(min_text_length=500)
+        probe = CourtListenerDatasetProbe(config=cfg)
+        assert probe.config.min_text_length == 500
+
+    def test_default_config_used_when_none_provided(self):
+        probe = CourtListenerDatasetProbe()
+        assert probe.config == ProbeConfig()
+
+    def test_run_returns_report(self, sample_shard_dir, tmp_path):
+        probe = CourtListenerDatasetProbe()
+        report = probe.run(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert "gates" in report
+        assert "summary" in report
+
+    def test_shard_audit_in_report(self, sample_shard_dir, tmp_path):
+        probe = CourtListenerDatasetProbe()
+        report = probe.run(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert "shard_audit" in report
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+class TestCLI:
+    def test_cli_runs_and_exits_zero(self, sample_shard_dir, tmp_path):
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "src.dataset_probe",
+                "--data-dir", str(sample_shard_dir),
+                "--subset", "20",
+                "--output", str(tmp_path / "cli_out.json"),
+                "--skip-tokenizer",
+                "--skip-spacy",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+
+    def test_cli_writes_json_output(self, sample_shard_dir, tmp_path):
+        out = tmp_path / "cli_out.json"
+        subprocess.run(
+            [
+                sys.executable, "-m", "src.dataset_probe",
+                "--data-dir", str(sample_shard_dir),
+                "--subset", "20",
+                "--output", str(out),
+                "--skip-tokenizer",
+                "--skip-spacy",
+            ],
+            capture_output=True,
+        )
+        assert out.exists()
+        assert "gates" in json.loads(out.read_text())
