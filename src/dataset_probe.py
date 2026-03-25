@@ -36,9 +36,12 @@ import math
 import random
 import re
 import statistics
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterator
+
+from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
@@ -76,19 +79,22 @@ SPACY_MODEL = ProbeConfig().spacy_model
 SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
 MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 
-REQUIRED_FIELDS: frozenset[str] = frozenset({
-    "id",
-    "court_id",
-    "text",
-    "text_length",
-    "text_source",
-    "citation_count",
-    "citation_density",
-    "is_precedential",
-    "text_entropy",
-    "token_count",
-    "paragraph_count",
-})
+REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "court_id",
+        "text",
+        "text_length",
+        "text_source",
+        "citation_count",
+        "citation_density",
+        "is_precedential",
+        "text_entropy",
+        "token_count",
+        "paragraph_count",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Percentile helper — single reusable implementation
@@ -225,7 +231,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_by_field[f] += 1
 
-        # Type checks
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
@@ -234,7 +239,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
-        # Range checks
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -278,11 +282,7 @@ def gate_a7_text_source_breakdown(
         src: {"count": cnt, "pct": round(100.0 * cnt / total, 2)}
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
-    known_pct = sum(
-        v["pct"]
-        for k, v in breakdown.items()
-        if k in ("plain_text", "html_with_citations")
-    )
+    known_pct = sum(v["pct"] for k, v in breakdown.items() if k in ("plain_text", "html_with_citations"))
     return {
         "gate": "A7_text_source_breakdown",
         "total_records": total,
@@ -303,8 +303,7 @@ def gate_a8_text_length_distribution(
 ) -> dict[str, Any]:
     """
     A8 — text_length distribution + RAG viability threshold.
-    Pass condition: <25% below PROVISIONAL_MIN_TEXT_LENGTH.
-    ~20% short-doc tail is expected; filtered in Stage 3.
+    Pass condition: <25% below min_text_length. ~20% short-doc tail is expected.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -312,7 +311,6 @@ def gate_a8_text_length_distribution(
 
     lengths = [int(r.get("text_length", 0)) for r in records]
     lengths_sorted = sorted(lengths)
-
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
     return {
         "gate": "A8_text_length_distribution",
@@ -363,10 +361,7 @@ def gate_a9_citation_count_distribution(
         "above_5_count": above_5,
         "above_5_pct": round(100.0 * above_5 / n, 2),
         "pass": zero / n < cfg.a9_zero_citation_pass_pct / 100.0,
-        "note": (
-            "For ~150K fast-iteration subset, filter citation_count > 5 "
-            "to maximise Tier C utility."
-        ),
+        "note": ("For ~150K fast-iteration subset, filter citation_count > 5 to maximise Tier C utility."),
     }
 
 
@@ -378,15 +373,14 @@ def gate_a11_tokenizer_chunk_count(
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
-    Tokenizer revision is logged for reproducibility.
+    AutoTokenizer imported at module level so tests can patch it network-free.
+    Tokenizer revision logged for reproducibility.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
 
     try:
-        from transformers import AutoTokenizer  # type: ignore[import]
-
         tok = AutoTokenizer.from_pretrained(cfg.encoder_model)
         tokenizer_revision = getattr(tok, "name_or_path", cfg.encoder_model)
     except Exception as exc:
@@ -618,9 +612,6 @@ class ModelQualitySignals:
             signals.append(("gigantic_document", f"~{token_count} tokens — may exceed model context"))
         if cls.HTML_RE.search(text):
             signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
-
-        import unicodedata
-
         if unicodedata.normalize("NFC", text) != text:
             signals.append(("unicode_not_nfc", "Text is not NFC-normalized"))
 
@@ -723,13 +714,8 @@ def run_probe(
     audit = iter_shards_with_audit(data_dir)
     all_records = audit["records"]
 
-    # Reservoir-sample from already-loaded records
     rng = random.Random(seed)
-    if len(all_records) > subset:
-        records = rng.sample(all_records, subset)
-    else:
-        records = all_records
-
+    records = rng.sample(all_records, subset) if len(all_records) > subset else all_records
     print(f"[dataset_probe] Loaded {len(records)} records.")
 
     import spacy  # type: ignore[import]
@@ -791,9 +777,7 @@ def run_probe(
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
     print("[dataset_probe] Quality signals ...")
-    report["quality_signals"] = ModelQualitySignals.summarize(
-        records, sample_n=cfg.quality_signals_sample_n
-    )
+    report["quality_signals"] = ModelQualitySignals.summarize(records, sample_n=cfg.quality_signals_sample_n)
 
     passed = [k for k, v in report["gates"].items() if v.get("pass") is True]
     failed = [k for k, v in report["gates"].items() if v.get("pass") is False]
@@ -819,9 +803,7 @@ def run_probe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="CourtListener dataset readiness probe (Category A + B6 gates)."
-    )
+    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
     parser.add_argument("--subset", type=int, default=10_000)
     parser.add_argument("--output", type=Path, default=Path("logs/dataset_probe_report.json"))

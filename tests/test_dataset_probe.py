@@ -3,6 +3,7 @@
 TDD contract tests for src/dataset_probe.py — CourtListener local shard probe.
 Covers all actionable observations from critique batch 2.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,6 +15,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.dataset_probe import (
+    CHUNK_OVERLAP_SUBWORDS,
+    CHUNK_SIZE_SUBWORDS,
+    ENCODER_MODEL,
+    MIN_SENTENCE_COUNT,
+    PROVISIONAL_MIN_TEXT_LENGTH,
+    SPACY_MODEL,
     CourtListenerDatasetProbe,
     ModelQualitySignals,
     ProbeConfig,
@@ -30,12 +37,6 @@ from src.dataset_probe import (
     run_probe,
     sample_records,
     validate_schema,
-    PROVISIONAL_MIN_TEXT_LENGTH,
-    CHUNK_SIZE_SUBWORDS,
-    CHUNK_OVERLAP_SUBWORDS,
-    ENCODER_MODEL,
-    SPACY_MODEL,
-    MIN_SENTENCE_COUNT,
 )
 
 pytestmark = pytest.mark.unit
