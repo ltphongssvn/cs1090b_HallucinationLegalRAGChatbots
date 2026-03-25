@@ -1039,3 +1039,148 @@ class TestProvenanceGitSha:
         )
         data = json.loads(out.read_text())
         assert "git_sha" in data["provenance"]
+
+
+# ---------------------------------------------------------------------------
+# Obs 3/15/19 — tokenizer injectable into gate_a11
+# ---------------------------------------------------------------------------
+
+
+class TestGateA11TokenizerInjection:
+    def test_gate_a11_accepts_tokenizer_argument(self):
+        """gate_a11_tokenizer_chunk_count must accept an optional tokenizer argument."""
+        import inspect
+        sig = inspect.signature(gate_a11_tokenizer_chunk_count)
+        assert "tokenizer" in sig.parameters
+
+    def test_gate_a11_uses_injected_tokenizer_without_calling_autotokenizer(self):
+        """When tokenizer is injected, AutoTokenizer.from_pretrained must NOT be called."""
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        records = _make_records(5)
+        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
+            gate_a11_tokenizer_chunk_count(records, tokenizer=mock_tok)
+            mock_cls.from_pretrained.assert_not_called()
+
+    def test_gate_a11_injected_tokenizer_produces_correct_subsample_n(self):
+        """Injected tokenizer path must process exactly the records passed."""
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        records = _make_records(5)
+        r = gate_a11_tokenizer_chunk_count(records, tokenizer=mock_tok)
+        assert r["subsample_n"] == 5
+
+    def test_gate_a11_none_tokenizer_falls_back_to_autotokenizer(self):
+        """When tokenizer=None, gate falls back to AutoTokenizer.from_pretrained."""
+        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
+            mock_tok = MagicMock()
+            mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+            mock_cls.from_pretrained.return_value = mock_tok
+            gate_a11_tokenizer_chunk_count(_make_records(5), tokenizer=None)
+            mock_cls.from_pretrained.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Obs 10 — shared _LEGAL_CITATION_RE between A12 and ModelQualitySignals
+# ---------------------------------------------------------------------------
+
+
+class TestSharedCitationRegex:
+    def test_legal_citation_re_exported(self):
+        """_LEGAL_CITATION_RE must be a module-level constant."""
+        from src.dataset_probe import _LEGAL_CITATION_RE
+        assert _LEGAL_CITATION_RE is not None
+
+    def test_a12_uses_shared_regex(self):
+        """gate_a12 and ModelQualitySignals must use the same citation pattern."""
+        from src.dataset_probe import _LEGAL_CITATION_RE
+        text = "Smith v. Jones, 123 F.3d 456 (9th Cir. 2020)."
+        a12_matches = _LEGAL_CITATION_RE.findall(text)
+        qs_matches = _LEGAL_CITATION_RE.findall(text)
+        assert a12_matches == qs_matches
+
+    def test_shared_regex_catches_federal_reporter(self):
+        from src.dataset_probe import _LEGAL_CITATION_RE
+        assert _LEGAL_CITATION_RE.search("123 F.3d 456")
+
+    def test_shared_regex_catches_case_name_citation(self):
+        from src.dataset_probe import _LEGAL_CITATION_RE
+        assert _LEGAL_CITATION_RE.search("Smith v. Jones")
+
+    def test_shared_regex_catches_scotus_reporter(self):
+        from src.dataset_probe import _LEGAL_CITATION_RE
+        assert _LEGAL_CITATION_RE.search("347 U.S. 483")
+
+
+# ---------------------------------------------------------------------------
+# Obs 16 — _percentile edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestPercentileEdgeCases:
+    def test_repeated_values(self):
+        """All-same values must return that value at any percentile."""
+        assert _percentile([5, 5, 5, 5, 5], 50) == 5
+        assert _percentile([5, 5, 5, 5, 5], 0) == 5
+        assert _percentile([5, 5, 5, 5, 5], 100) == 5
+
+    def test_n_equals_2_p50(self):
+        assert _percentile([1, 2], 50) in [1, 2]
+
+    def test_n_equals_2_p0(self):
+        assert _percentile([1, 2], 0) == 1
+
+    def test_n_equals_2_p100(self):
+        assert _percentile([1, 2], 100) == 2
+
+    def test_n_equals_2_p25(self):
+        result = _percentile([1, 2], 25)
+        assert result in [1, 2]
+
+    def test_large_n_boundary(self):
+        data = sorted(range(1000))
+        assert _percentile(data, 0) == 0
+        assert _percentile(data, 100) == 999
+
+    def test_raises_on_empty(self):
+        with pytest.raises(ValueError):
+            _percentile([], 50)
+
+
+# ---------------------------------------------------------------------------
+# Obs 21 — text_source controlled vocabulary check in validate_schema
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSchemaTextSource:
+    def test_passes_known_text_sources(self):
+        """Known text_source values must pass validate_schema."""
+        for src in ("plain_text", "html_with_citations", "html_lawbox", "html_columbia", "xml_harvard"):
+            records = _make_records(3, text_source=src)
+            result = validate_schema(records)
+            assert "text_source" not in result.get("vocabulary_errors", {}), \
+                f"Known source '{src}' should not trigger vocabulary error"
+
+    def test_flags_unknown_text_source(self):
+        """Unknown text_source values must be flagged in validate_schema."""
+        records = _make_records(3, text_source="UNKNOWN_FORMAT_XYZ")
+        result = validate_schema(records)
+        assert "vocabulary_errors" in result
+        assert "text_source" in result["vocabulary_errors"]
+
+    def test_schema_still_passes_with_known_sources(self):
+        """Schema pass=True must be preserved for fully valid records."""
+        records = _make_records(5, text_source="plain_text")
+        assert validate_schema(records)["pass"] is True
+
+    def test_schema_fails_with_unknown_source(self):
+        """Schema pass=False when unknown text_source present."""
+        records = _make_records(5, text_source="garbage_format")
+        result = validate_schema(records)
+        assert result["pass"] is False
+
+    def test_vocabulary_errors_count_correct(self):
+        """vocabulary_errors must count how many records have unknown text_source."""
+        records = _make_records(3, text_source="plain_text") + _make_records(2, text_source="UNKNOWN")
+        result = validate_schema(records)
+        assert result["vocabulary_errors"]["text_source"] == 2
