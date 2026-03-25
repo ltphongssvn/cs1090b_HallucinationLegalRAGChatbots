@@ -2,7 +2,7 @@
 # Model-relevant quality signal tests for RAG pipeline.
 import pytest
 
-from src.dataset_probe import ModelQualitySignals
+from src.dataset_probe import ModelQualitySignals, validate_schema
 
 pytestmark = pytest.mark.unit
 
@@ -13,6 +13,20 @@ CLEAN_ROW = {
         "See also Brown v. Board, 55 F.3d 200. The motion for summary judgment "
         "is GRANTED pursuant to Federal Rule of Civil Procedure 56(c)."
     )
+}
+
+_VALID_ROW: dict = {
+    "id": "1",
+    "court_id": "ca9",
+    "text": "placeholder",
+    "text_length": 500,
+    "text_source": "plain_text",
+    "citation_count": 3,
+    "citation_density": 0.05,
+    "is_precedential": True,
+    "text_entropy": 4.2,
+    "token_count": 100,
+    "paragraph_count": 5,
 }
 
 
@@ -41,7 +55,6 @@ class TestModelQualitySignals:
         assert any(s[0] == "boilerplate" for s in signals)
 
     def test_no_citations_flagged_for_long_noncitation_text(self) -> None:
-        # Must exceed token_count > 100 threshold to trigger citation check
         row = {"text": "The court considered the matter and issued its ruling. " * 12}
         signals = ModelQualitySignals.check(row)
         assert any(s[0] == "no_citations" for s in signals)
@@ -71,19 +84,14 @@ class TestModelQualitySignals:
         assert not any(s[0] == "unicode_not_nfc" for s in signals)
 
     def test_signals_are_soft_not_schema_violations(self) -> None:
-        """Quality signals must not affect validate_row() — they are advisory only."""
-        from src.dataset_probe import CourtListenerDatasetProbe
-
-        probe = CourtListenerDatasetProbe()
-        row = {
-            "text": "<p>Not for publication.</p> " * 5,
-            "created_timestamp": "",
-            "downloaded_timestamp": "",
-            "url": "x",
-        }
-        assert probe.validate_row(row) == []
+        """Quality signals must not affect validate_schema() — they are advisory only."""
+        row = dict(_VALID_ROW)
+        row["text"] = "<p>Not for publication.</p> " * 10  # triggers HTML + boilerplate signals
+        row["text_length"] = len(row["text"])
+        result = validate_schema([row])
+        assert result["pass"] is True  # schema passes despite quality issues
         signals = ModelQualitySignals.check(row)
-        assert len(signals) > 0
+        assert len(signals) > 0  # but signals fire
 
     def test_multiple_signals_can_fire_simultaneously(self) -> None:
         row = {"text": "<div>Not for publication. Motion denied.</div>"}

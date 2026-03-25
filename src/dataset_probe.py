@@ -1,232 +1,425 @@
 # src/dataset_probe.py
-# Path: cs1090b_HallucinationLegalRAGChatbots/src/dataset_probe.py
+"""
+Dataset readiness probe for local CourtListener federal appellate JSONL shards.
+
+Implements Category A dataset-readiness gates required before Stage 3:
+  A7  — text_source breakdown (missing 17.2% audit)
+  A8  — text_length distribution + RAG viability threshold derivation
+  A9  — citation_count distribution (zero-citation filter for fast-iteration subset)
+  A11 — tokenizer-aware chunk count verification (BAAI/bge-m3, 1024-subword budget)
+  A12 — citation anchor survival check in normalized text
+  A13 — sentence density check via repo-certified spaCy pipeline (not NLTK)
+  B6  — text_entropy empirical distribution (threshold must be data-derived)
+
+Expected schema (23 fields):
+  id, cluster_id, docket_id, court_id, court_name, case_name, date_filed,
+  precedential_status, opinion_type, extracted_by_ocr, raw_text, text,
+  text_length, text_source, cleaning_flags, source, token_count,
+  paragraph_count, citation_count, text_hash, citation_density,
+  is_precedential, text_entropy
+
+CLI usage:
+  uv run python -m src.dataset_probe \\
+      --data-dir data/raw/cl_federal_appellate_bulk \\
+      --subset 10000 \\
+      --output logs/dataset_probe_report.json
+
+All output written to --output as JSON. No side effects on corpus shards.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
 import re
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator
+import statistics
+from pathlib import Path
+from typing import Any, Iterator
 
-HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
-_MUTABLE_REFS = {"main", "master", "latest", "HEAD", ""}
-
-_TS_FORMATS: list[tuple[str, bool, bool]] = [
-    ("%Y-%m-%dT%H:%M:%S%z", True, True),
-    ("%Y-%m-%dT%H:%M:%S", True, False),
-    ("%Y-%m-%d", False, False),
-]
-
-_TS_EXTRACT_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}"
-    r"(?:T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}|[+-]\d{4}|\.\d+Z?)?)?"
+REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "court_id",
+        "text",
+        "text_length",
+        "text_source",
+        "citation_count",
+        "citation_density",
+        "is_precedential",
+        "text_entropy",
+        "token_count",
+        "paragraph_count",
+    }
 )
 
-# Pinned to HEAD commit of pile-of-law/pile-of-law as of 2026-03-18.
-# Update with:
-#   from huggingface_hub import list_repo_commits
-#   list(list_repo_commits('pile-of-law/pile-of-law', repo_type='dataset'))[0].commit_id
-PINNED_REVISION = "0dc9f2c26b42af4cb6330f36d6146e82f9117a3b"  # pragma: allowlist secret
+# RAG viability floor: cases below this are likely summary dispositions
+# (e.g. "AFFIRMED. See Local Rule 36.") with no reasoning for retrieval.
+# Provisional — probe reports distribution so caller can adjust empirically.
+PROVISIONAL_MIN_TEXT_LENGTH = 1500
+
+# Tokenizer chunk budget from README Stage 3 controlled design choice.
+CHUNK_SIZE_SUBWORDS = 1024
+CHUNK_OVERLAP_SUBWORDS = 128
+
+# Encoder model for A11 tokenizer-aware chunk count check (README-certified).
+ENCODER_MODEL = "BAAI/bge-m3"
+
+# spaCy model for A13 sentence density check (repo-certified pipeline).
+SPACY_MODEL = "en_core_web_sm"
+SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
+
+# Minimum sentence count for Tier B NLI atomic-claim density.
+MIN_SENTENCE_COUNT = 50
 
 
-class CourtListenerDatasetProbe:
+# ---------------------------------------------------------------------------
+# Shard loader
+# ---------------------------------------------------------------------------
+
+
+def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
+    """Yield records from all .jsonl shard files in data_dir."""
+    shard_files = sorted(data_dir.glob("*.jsonl"))
+    if not shard_files:
+        raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
+    for shard_path in shard_files:
+        with open(shard_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+
+def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]]:
     """
-    Schema contract and access layer for pile-of-law/pile-of-law
-    subset r_courtlistener_opinions.
-
-    Reproducibility contract:
-      - REPRODUCIBLE=True (default) enforces a pinned 40-char SHA at load() time.
-        Set REPRODUCIBLE=False only for fast exploration — never for training runs.
-      - trust_remote_code is never passed.
-      - Provenance is probe-level — call get_provenance() once at training start.
-
-    validate_row / normalize_row contract:
-      - validate_row() returns all errors; empty list means valid.
-      - normalize_row() requires a pre-validated row. Raises ValueError if
-        validation fails — callers cannot accidentally normalize invalid rows.
-      - iter_valid_rows() is the preferred pipeline entry point.
-
-    TODO(architecture): this class is becoming a God object — consider splitting into:
-      - CourtListenerDatasetLoader (load, REVISION, REPRODUCIBLE)
-      - CourtListenerRowValidator (validate_row, REQUIRED_FIELDS, MIN_TEXT_LENGTH)
-      - CourtListenerRowNormalizer (normalize_row, _normalize_timestamp)
-      - CourtListenerProvenanceProvider (get_provenance, PROBE_VERSION)
-    TODO(config): DATASET_ID, REVISION, REPRODUCIBLE should be injectable via config
-      to support multi-dataset pipelines without subclassing.
-
-    REQUIRED_FIELDS intentionally excludes text-variant keys ('text', 'contents').
-    Text field presence and type are enforced separately via resolve_text_field().
+    Reservoir-sample n records from all shards without loading full corpus.
+    Uses Vitter's Algorithm R for memory-efficient streaming reservoir sampling.
     """
+    reservoir: list[dict[str, Any]] = []
+    rng = random.Random(seed)
+    for i, record in enumerate(iter_shards(data_dir)):
+        if i < n:
+            reservoir.append(record)
+        else:
+            j = rng.randint(0, i)
+            if j < n:
+                reservoir[j] = record
+    return reservoir
 
-    DATASET_ID = "pile-of-law/pile-of-law"
-    SUBSET = "r_courtlistener_opinions"
-    SPLIT = "train"
-    REVISION = PINNED_REVISION
-    PROBE_VERSION = "1.0"
-    REPRODUCIBLE = True
-    REQUIRED_FIELDS: frozenset[str] = frozenset({"created_timestamp", "downloaded_timestamp", "url"})
-    TEXT_FIELDS: tuple[str, ...] = ("text", "contents")
-    MIN_TEXT_LENGTH = 50
 
-    def load(self, streaming: bool = True) -> Iterable[dict[str, Any]]:
-        """Load dataset at pinned revision. trust_remote_code never passed.
+# ---------------------------------------------------------------------------
+# Gate implementations
+# ---------------------------------------------------------------------------
 
-        Raises RuntimeError if REPRODUCIBLE=True and REVISION is a mutable ref.
-        Single-pass semantics: wrap in iter() to enforce single-pass explicitly.
-        """
-        if self.REPRODUCIBLE and (self.REVISION in _MUTABLE_REFS or HEX_REVISION_RE.fullmatch(self.REVISION) is None):
-            raise RuntimeError(
-                f"Reproducibility violation: REVISION={self.REVISION!r} is mutable. "
-                "Set REVISION to a 40-char commit SHA, or set REPRODUCIBLE=False "
-                "to explicitly opt into non-deterministic exploration mode."
-            )
 
-        from datasets import load_dataset
+def gate_a7_text_source_breakdown(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    A7 — Full text_source breakdown including the unaccounted ~17.2%.
+    plain_text + html_with_citations = 82.8%; remainder is unknown format risk.
+    """
+    counts: dict[str, int] = {}
+    for r in records:
+        src = str(r.get("text_source", "MISSING"))
+        counts[src] = counts.get(src, 0) + 1
+    total = len(records)
+    breakdown = {
+        src: {"count": cnt, "pct": round(100.0 * cnt / total, 2)}
+        for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
+    }
+    known_pct = sum(v["pct"] for k, v in breakdown.items() if k in ("plain_text", "html_with_citations"))
+    return {
+        "gate": "A7_text_source_breakdown",
+        "total_records": total,
+        "breakdown": breakdown,
+        "known_formats_pct": round(known_pct, 2),
+        "unknown_formats_pct": round(100.0 - known_pct, 2),
+        "pass": known_pct >= 80.0,
+        "note": (
+            "Inspect records from any source outside plain_text/html_with_citations "
+            "to verify row_normalizer.py strips them cleanly before Stage 3."
+        ),
+    }
 
-        return load_dataset(  # type: ignore[return-value]
-            self.DATASET_ID,
-            self.SUBSET,
-            split=self.SPLIT,
-            streaming=streaming,
-            revision=self.REVISION,
-        )
 
-    def get_provenance(self) -> dict[str, Any]:
-        """Return full provenance dict for W&B / experiment logging.
-        Provenance is probe-level — log once at training start, not per-row.
-        """
-        import datasets
+def gate_a8_text_length_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    A8 — text_length distribution + RAG viability threshold.
+    Threshold is data-derived (percentiles), not hardcoded.
+    """
+    lengths = [int(r.get("text_length", 0)) for r in records]
+    lengths_sorted = sorted(lengths)
+    n = len(lengths_sorted)
 
+    def pct(p: float) -> int:
+        idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
+        return lengths_sorted[idx]
+
+    below_provisional = sum(1 for length in lengths if length < PROVISIONAL_MIN_TEXT_LENGTH)
+    return {
+        "gate": "A8_text_length_distribution",
+        "count": n,
+        "mean": round(statistics.mean(lengths), 1),
+        "median": statistics.median(lengths),
+        "min": min(lengths),
+        "max": max(lengths),
+        "p5": pct(5),
+        "p10": pct(10),
+        "p25": pct(25),
+        "p75": pct(75),
+        "p90": pct(90),
+        "p95": pct(95),
+        "provisional_min_chars": PROVISIONAL_MIN_TEXT_LENGTH,
+        "below_provisional_count": below_provisional,
+        "below_provisional_pct": round(100.0 * below_provisional / n, 2),
+        "pass": below_provisional / n < 0.10,
+        "note": "Adjust provisional_min_chars based on p10/p25 before Stage 3 filtering.",
+    }
+
+
+def gate_a9_citation_count_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    A9 — citation_count distribution.
+    Zero-citation cases are procedural anomalies with no Tier C utility.
+    Fast-iteration subset should preferentially sample citation_count > 5.
+    """
+    counts = [int(r.get("citation_count", 0)) for r in records]
+    n = len(counts)
+    zero = sum(1 for c in counts if c == 0)
+    above_5 = sum(1 for c in counts if c > 5)
+    return {
+        "gate": "A9_citation_count_distribution",
+        "count": n,
+        "mean": round(statistics.mean(counts), 2),
+        "median": statistics.median(counts),
+        "min": min(counts),
+        "max": max(counts),
+        "zero_citation_count": zero,
+        "zero_citation_pct": round(100.0 * zero / n, 2),
+        "above_5_count": above_5,
+        "above_5_pct": round(100.0 * above_5 / n, 2),
+        "pass": zero / n < 0.20,
+        "note": ("For ~150K fast-iteration subset, filter citation_count > 5 to maximise Tier C utility."),
+    }
+
+
+def gate_a11_tokenizer_chunk_count(
+    records: list[dict[str, Any]],
+    sample_n: int = 200,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """
+    A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
+    Verifies corpus supports multi-chunk splitting at 1024-subword budget.
+    Runs on a subsample to avoid long tokenizer load times.
+    """
+    try:
+        from transformers import AutoTokenizer  # type: ignore[import]
+
+        tok = AutoTokenizer.from_pretrained(ENCODER_MODEL)
+    except Exception as exc:
         return {
-            "dataset": self.DATASET_ID,
-            "subset": self.SUBSET,
-            "split": self.SPLIT,
-            "revision": self.REVISION,
-            "hf_datasets_version": datasets.__version__,
-            "probe_version": self.PROBE_VERSION,
-            "reproducible": self.REPRODUCIBLE,
+            "gate": "A11_tokenizer_chunk_count",
+            "pass": False,
+            "error": str(exc),
+            "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
         }
 
-    def iter_valid_rows(self, source: Iterable[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
-        """Yield only validated, normalized rows. Invalid rows are skipped.
-        Invariant: downstream code never sees invalid rows.
-        Preferred pipeline entry point — enforces validate-then-normalize automatically.
-        """
-        rows = source if source is not None else self.load()
-        for row in rows:
-            if self.validate_row(row) == []:
-                yield self.normalize_row(row)
+    rng = random.Random(seed)
+    subsample = rng.sample(records, min(sample_n, len(records)))
 
-    def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """Return all validation errors. Empty list = valid."""
-        errors: list[str] = []
+    chunk_counts: list[int] = []
+    token_lengths: list[int] = []
+    multi_chunk = 0
 
-        missing = self.REQUIRED_FIELDS - set(row.keys())
-        if missing:
-            errors.append(f"Missing required fields: {sorted(missing)}")
+    for r in subsample:
+        text = str(r.get("text", ""))
+        ids = tok(text, add_special_tokens=False)["input_ids"]
+        total_tokens = len(ids)
+        token_lengths.append(total_tokens)
+        stride = CHUNK_SIZE_SUBWORDS - CHUNK_OVERLAP_SUBWORDS
+        n_chunks = max(1, math.ceil(max(0, total_tokens - CHUNK_OVERLAP_SUBWORDS) / stride))
+        chunk_counts.append(n_chunks)
+        if n_chunks > 1:
+            multi_chunk += 1
 
-        text_field = self.resolve_text_field(row)
-        if text_field is None:
-            errors.append(f"No text field found in {sorted(row.keys())}")
-            return errors
+    return {
+        "gate": "A11_tokenizer_chunk_count",
+        "encoder_model": ENCODER_MODEL,
+        "chunk_size_subwords": CHUNK_SIZE_SUBWORDS,
+        "overlap_subwords": CHUNK_OVERLAP_SUBWORDS,
+        "subsample_n": len(subsample),
+        "mean_token_length": round(statistics.mean(token_lengths), 1),
+        "median_token_length": statistics.median(token_lengths),
+        "mean_chunks_per_doc": round(statistics.mean(chunk_counts), 2),
+        "median_chunks_per_doc": statistics.median(chunk_counts),
+        "multi_chunk_pct": round(100.0 * multi_chunk / len(subsample), 2),
+        "pass": statistics.median(chunk_counts) >= 2,
+        "note": "median_chunks_per_doc >= 2 confirms corpus supports multi-chunk splitting.",
+    }
 
-        value = row[text_field]
-        if not isinstance(value, str):
-            errors.append(f"{text_field} must be str, got {type(value).__name__!r}: {value!r}")
-            return errors
 
-        if len(value) < self.MIN_TEXT_LENGTH:
-            errors.append(f"{text_field} too short: {len(value)} < {self.MIN_TEXT_LENGTH}")
-        return errors
+def gate_a12_citation_anchor_survival(
+    records: list[dict[str, Any]],
+    sample_n: int = 500,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """
+    A12 — Citation anchor survival in normalized text field.
+    Checks reporter citations, case-name citations, SCOTUS, and Federal reporter.
+    """
+    CITATION_RE = re.compile(
+        r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
+        r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
+        r"|U\.S\.\s+\d+"
+        r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
+        re.MULTILINE,
+    )
+    rng = random.Random(seed)
+    subsample = rng.sample(records, min(sample_n, len(records)))
 
-    def normalize_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Normalize a pre-validated row into canonical form.
+    has_anchor = 0
+    citation_counts_found: list[int] = []
+    for r in subsample:
+        text = str(r.get("text", ""))
+        matches = CITATION_RE.findall(text)
+        citation_counts_found.append(len(matches))
+        if matches:
+            has_anchor += 1
 
-        Precondition: row must pass validate_row() with no errors.
-        Raises ValueError if precondition is violated — programming error, not data error.
-        Use iter_valid_rows() to enforce the contract automatically in pipelines.
+    pct_with_anchor = 100.0 * has_anchor / len(subsample)
+    return {
+        "gate": "A12_citation_anchor_survival",
+        "subsample_n": len(subsample),
+        "records_with_citation_anchor": has_anchor,
+        "pct_with_citation_anchor": round(pct_with_anchor, 2),
+        "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
+        "pass": pct_with_anchor >= 60.0,
+        "note": (">=60% of records must contain extractable citation anchors for Tier C SQLite lookup to be viable."),
+    }
 
-        Shallow copy preserves all upstream fields (jurisdiction, court, judge).
-        Old text field removed if renamed to avoid RAM duplication.
-        Provenance NOT embedded — call get_provenance() at training start.
 
-        Invariants after validate_row() passes:
-          - resolve_text_field() always returns non-None (text_field guaranteed present)
-          - 'url' always present (in REQUIRED_FIELDS) so source_url assigned unconditionally
-        """
-        errors = self.validate_row(row)
-        if errors:
-            raise ValueError(
-                f"normalize_row() called on invalid row — validate first.\n"
-                f"Errors: {errors}\n"
-                f"Use iter_valid_rows() to enforce validate-then-normalize automatically."
-            )
+def gate_a13_sentence_density(
+    records: list[dict[str, Any]],
+    sample_n: int = 200,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """
+    A13 — Sentence density check via repo-certified spaCy pipeline (not NLTK).
+    exclude=['ner','parser','lemmatizer'] matches repo setup.sh NLP config.
+    sentencizer added explicitly because parser is excluded — without it
+    spaCy raises E030 (sentence boundaries unset).
+    nlp.max_length set high to handle full federal appellate opinions safely.
+    """
+    try:
+        import spacy  # type: ignore[import]
 
-        normalized = dict(row)
+        nlp = spacy.load(SPACY_MODEL, exclude=SPACY_EXCLUDE)
+        # parser is excluded so sentence boundaries must be set via sentencizer
+        if "sentencizer" not in nlp.pipe_names:
+            nlp.add_pipe("sentencizer")
+        nlp.max_length = 2_000_000
+    except Exception as exc:
+        return {
+            "gate": "A13_sentence_density",
+            "pass": False,
+            "error": str(exc),
+            "note": "spaCy model load failed — run: python -m spacy download en_core_web_sm",
+        }
 
-        text_field = self.resolve_text_field(row)
-        # Guaranteed non-None: validate_row() ensures a TEXT_FIELDS key is present.
-        assert text_field is not None
-        text = str(row[text_field]).strip()
+    rng = random.Random(seed)
+    subsample = rng.sample(records, min(sample_n, len(records)))
 
-        # Record which field the text came from — downstream models may need this
-        # to distinguish scraping-variant schemas across pile-of-law subsets.
-        normalized["_source_text_field"] = text_field
-        if text_field != "text":
-            normalized.pop(text_field, None)
+    sent_counts: list[int] = []
+    below_threshold = 0
+    for r in subsample:
+        text = str(r.get("text", ""))[:50_000]  # cap per-doc cost for probe
+        doc = nlp(text)
+        n_sents = sum(1 for _ in doc.sents)
+        sent_counts.append(n_sents)
+        if n_sents < MIN_SENTENCE_COUNT:
+            below_threshold += 1
 
-        normalized["text"] = text
-        normalized["created_timestamp"] = self._normalize_timestamp(str(row.get("created_timestamp", "")))
-        normalized["downloaded_timestamp"] = self._normalize_timestamp(str(row.get("downloaded_timestamp", "")))
-        # source_url is an intentional pipeline alias for url.
-        # Downstream RAG components reference source_url consistently,
-        # decoupling them from the raw field name which varies across
-        # pile-of-law subsets (some use url, others use href or link).
-        # 'url' is always present: it is in REQUIRED_FIELDS, enforced by validate_row().
-        normalized["source_url"] = str(row["url"])
+    return {
+        "gate": "A13_sentence_density",
+        "spacy_model": SPACY_MODEL,
+        "min_sentence_threshold": MIN_SENTENCE_COUNT,
+        "subsample_n": len(subsample),
+        "mean_sentences": round(statistics.mean(sent_counts), 1),
+        "median_sentences": statistics.median(sent_counts),
+        "min_sentences": min(sent_counts),
+        "below_threshold_count": below_threshold,
+        "below_threshold_pct": round(100.0 * below_threshold / len(subsample), 2),
+        "pass": below_threshold / len(subsample) < 0.10,
+        "note": (">=90% of records must have >50 sentences for sufficient Tier B NLI atomic-claim density."),
+    }
 
-        return normalized
 
-    def _normalize_timestamp(self, ts: str) -> str:
-        """Parse and normalize timestamp using datetime — not just regex extraction.
+def gate_b6_text_entropy_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    B6 — text_entropy empirical distribution.
+    Threshold must be derived from data — not hardcoded.
+    Reports distribution so caller can set evidence-based filter cutoff.
+    """
+    entropies = [float(r.get("text_entropy", 0.0)) for r in records]
+    entropies_sorted = sorted(entropies)
+    n = len(entropies_sorted)
 
-        Validates actual date semantics (rejects '9999-99-99', '2022-13-45', etc.).
-        Preserves the most precise valid format found:
-          datetime+tz > datetime > date > '' (unparseable or invalid).
+    def pct(p: float) -> float:
+        idx = max(0, min(n - 1, int(math.ceil(p / 100.0 * n)) - 1))
+        return round(entropies_sorted[idx], 4)
 
-        Non-UTC offsets (e.g. +05:00) are preserved via isoformat() to retain
-        the original timezone context — legal filing times are jurisdiction-local.
-        """
-        candidate = _TS_EXTRACT_RE.search(ts)
-        if not candidate:
-            return ""
-        raw = candidate.group(0)
-        normalized_raw = raw.replace("Z", "+00:00")
+    zero_entropy = sum(1 for e in entropies if e == 0.0)
+    return {
+        "gate": "B6_text_entropy_distribution",
+        "count": n,
+        "mean": round(statistics.mean(entropies), 4),
+        "median": round(float(statistics.median(entropies)), 4),
+        "min": round(min(entropies), 4),
+        "max": round(max(entropies), 4),
+        "p5": pct(5),
+        "p10": pct(10),
+        "p25": pct(25),
+        "p75": pct(75),
+        "p90": pct(90),
+        "p95": pct(95),
+        "zero_entropy_count": zero_entropy,
+        "zero_entropy_pct": round(100.0 * zero_entropy / n, 2),
+        "pass": True,  # distribution-only gate — no hardcoded threshold
+        "note": ("Use p10 as provisional low-entropy filter cutoff for Stage 3. Adjust after reviewing distribution."),
+    }
 
-        for fmt, preserves_time, preserves_tz in _TS_FORMATS:
-            try:
-                parsed = datetime.strptime(normalized_raw, fmt)
-                if preserves_tz and parsed.tzinfo is not None:
-                    if parsed.tzinfo == timezone.utc:
-                        return parsed.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-                    # Non-UTC: preserve original offset via isoformat()
-                    return parsed.isoformat()
-                if preserves_time:
-                    return parsed.strftime("%Y-%m-%dT%H:%M:%S")
-                return parsed.strftime("%Y-%m-%d")
-            except ValueError:
-                continue
 
-        return ""
+# ---------------------------------------------------------------------------
+# Schema validation
+# ---------------------------------------------------------------------------
 
-    def resolve_text_field(self, row: dict[str, Any]) -> str | None:
-        """Return the first available text field name, or None."""
-        return next((k for k in self.TEXT_FIELDS if k in row), None)
 
-    def get_text(self, row: dict[str, Any]) -> str:
-        """Extract text content. Raises ValueError if no text field found.
-        Strict accessor — callers never implement fallback logic themselves.
-        """
-        field = self.resolve_text_field(row)
-        if field is None:
-            raise ValueError(f"No text field in row keys: {sorted(row.keys())}")
-        return str(row[field])
+def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Check all required fields are present across sampled records."""
+    missing_by_field: dict[str, int] = {f: 0 for f in REQUIRED_FIELDS}
+    for r in records:
+        for f in REQUIRED_FIELDS:
+            if f not in r:
+                missing_by_field[f] += 1
+    any_missing = any(v > 0 for v in missing_by_field.values())
+    return {
+        "gate": "schema_validation",
+        "required_fields": sorted(REQUIRED_FIELDS),
+        "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
+        "pass": not any_missing,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Model-relevant quality signals (advisory — not schema violations)
+# Used by src/wandb_logger.py to log quality signal distributions to W&B.
+# ---------------------------------------------------------------------------
 
 
 class ModelQualitySignals:
@@ -249,37 +442,198 @@ class ModelQualitySignals:
 
     @classmethod
     def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
-        """Return quality signals for a normalized row. Empty = clean."""
+        """Return quality signals for a row. Empty = clean."""
         signals: list[tuple[str, str]] = []
         text: str = row.get(text_field, "")
-
-        # Approximate token length (whitespace-split — not tokenizer-specific)
         token_count = len(text.split())
+
         if token_count < 20:
             signals.append(("truncated_document", f"~{token_count} tokens — likely truncated"))
+
         if token_count > 100_000:
             signals.append(("gigantic_document", f"~{token_count} tokens — may exceed model context"))
 
-        # HTML remnants
         if cls.HTML_RE.search(text):
             signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
 
-        # Unicode normalization check (NFC vs raw)
         import unicodedata
 
         if unicodedata.normalize("NFC", text) != text:
             signals.append(("unicode_not_nfc", "Text is not NFC-normalized"))
 
-        # Boilerplate detection
         lower = text.lower()
         for phrase in cls.BOILERPLATE_PHRASES:
             if phrase in lower:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
 
-        # Citation density (very low = may not be a real opinion)
         citation_count = len(cls.CITATION_RE.findall(text))
         if token_count > 100 and citation_count == 0:
             signals.append(("no_citations", "No legal citations found — may be non-opinion text"))
 
         return signals
+
+
+# ---------------------------------------------------------------------------
+# Top-level probe class and run_probe function
+# ---------------------------------------------------------------------------
+
+
+class CourtListenerDatasetProbe:
+    """
+    Orchestrates all dataset-readiness gates for the local CourtListener corpus.
+    Replaces the dropped pile-of-law/pile-of-law HuggingFace probe.
+    """
+
+    def validate_row(self, row: dict[str, Any]) -> list[str]:
+        """
+        Return schema validation errors for a single CourtListener row.
+        Empty list = valid. Checks text presence and minimum length only —
+        full field checks are done via validate_schema() over batches.
+        """
+        errors: list[str] = []
+        text = row.get("text", "")
+        if not isinstance(text, str) or len(text) < 50:
+            errors.append(f"text too short or missing: {len(str(text))} chars")
+        return errors
+
+    def run(
+        self,
+        data_dir: Path,
+        subset: int,
+        output: Path,
+        seed: int = 0,
+        skip_tokenizer: bool = False,
+        skip_spacy: bool = False,
+    ) -> dict[str, Any]:
+        return run_probe(
+            data_dir=data_dir,
+            subset=subset,
+            output=output,
+            seed=seed,
+            skip_tokenizer=skip_tokenizer,
+            skip_spacy=skip_spacy,
+        )
+
+
+def run_probe(
+    data_dir: Path,
+    subset: int,
+    output: Path,
+    seed: int = 0,
+    skip_tokenizer: bool = False,
+    skip_spacy: bool = False,
+) -> dict[str, Any]:
+    print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
+    records = sample_records(data_dir, subset, seed=seed)
+    print(f"[dataset_probe] Loaded {len(records)} records.")
+
+    report: dict[str, Any] = {
+        "data_dir": str(data_dir),
+        "subset_n": len(records),
+        "seed": seed,
+        "gates": {},
+    }
+
+    print("[dataset_probe] Gate: schema validation ...")
+    report["gates"]["schema"] = validate_schema(records)
+
+    print("[dataset_probe] Gate A7: text_source breakdown ...")
+    report["gates"]["A7"] = gate_a7_text_source_breakdown(records)
+
+    print("[dataset_probe] Gate A8: text_length distribution ...")
+    report["gates"]["A8"] = gate_a8_text_length_distribution(records)
+
+    print("[dataset_probe] Gate A9: citation_count distribution ...")
+    report["gates"]["A9"] = gate_a9_citation_count_distribution(records)
+
+    print("[dataset_probe] Gate A12: citation anchor survival ...")
+    report["gates"]["A12"] = gate_a12_citation_anchor_survival(records)
+
+    print("[dataset_probe] Gate B6: text_entropy distribution ...")
+    report["gates"]["B6"] = gate_b6_text_entropy_distribution(records)
+
+    if not skip_tokenizer:
+        print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
+        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(records)
+    else:
+        report["gates"]["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
+
+    if not skip_spacy:
+        print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
+        report["gates"]["A13"] = gate_a13_sentence_density(records)
+    else:
+        report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
+
+    passed = [k for k, v in report["gates"].items() if v.get("pass") is True]
+    failed = [k for k, v in report["gates"].items() if v.get("pass") is False]
+    skipped = [k for k, v in report["gates"].items() if v.get("skipped")]
+    report["summary"] = {
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "all_passed": len(failed) == 0,
+    }
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2)
+    print(f"[dataset_probe] Report written → {output}")
+    print(f"[dataset_probe] PASSED: {passed} | FAILED: {failed} | SKIPPED: {skipped}")
+    return report
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/raw/cl_federal_appellate_bulk"),
+        help="Directory containing .jsonl shard files.",
+    )
+    parser.add_argument(
+        "--subset",
+        type=int,
+        default=10_000,
+        help="Number of records to reservoir-sample (default: 10000).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("logs/dataset_probe_report.json"),
+        help="Output path for JSON report.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for reservoir sampling (default: 0).",
+    )
+    parser.add_argument(
+        "--skip-tokenizer",
+        action="store_true",
+        help="Skip Gate A11 (tokenizer chunk count) — requires HF model download.",
+    )
+    parser.add_argument(
+        "--skip-spacy",
+        action="store_true",
+        help="Skip Gate A13 (spaCy sentence density).",
+    )
+    args = parser.parse_args()
+    run_probe(
+        data_dir=args.data_dir,
+        subset=args.subset,
+        output=args.output,
+        seed=args.seed,
+        skip_tokenizer=args.skip_tokenizer,
+        skip_spacy=args.skip_spacy,
+    )
+
+
+if __name__ == "__main__":
+    main()
