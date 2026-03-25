@@ -54,10 +54,8 @@ REQUIRED_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# RAG viability floor: cases below this are likely summary dispositions.
-# Probe reports distribution; Stage 3 applies this as a hard filter.
-# Pass condition: <25% below threshold (corpus has known ~20% short-doc tail;
-# these are filtered in Stage 3 before chunking/embedding).
+# RAG viability floor — Stage 3 applies this as a hard filter before chunking.
+# Pass condition: <25% below threshold (corpus has known ~20% short-doc tail).
 PROVISIONAL_MIN_TEXT_LENGTH = 1500
 
 # Tokenizer chunk budget from README Stage 3 controlled design choice.
@@ -72,8 +70,8 @@ SPACY_MODEL = "en_core_web_sm"
 SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
 
 # Minimum sentence count for Tier B NLI atomic-claim density.
-# Set to 20 (not 50): spaCy sentencizer on legal text is conservative, and
-# short opinions caught by A8 length filter are not the target population here.
+# A13 only evaluates records that pass the A8 length filter (text_length >= 1500)
+# so short summary dispositions do not pollute this gate.
 MIN_SENTENCE_COUNT = 20
 
 
@@ -153,10 +151,8 @@ def gate_a7_text_source_breakdown(records: list[dict[str, Any]]) -> dict[str, An
 def gate_a8_text_length_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     A8 — text_length distribution + RAG viability threshold.
-    Threshold is data-derived (percentiles), not hardcoded.
     Pass condition: <25% below PROVISIONAL_MIN_TEXT_LENGTH.
-    Corpus has a known ~20% short-doc tail (summary dispositions); these are
-    filtered in Stage 3 before chunking — so <25% is the correct gate.
+    ~20% short-doc tail is expected (summary dispositions filtered in Stage 3).
     """
     lengths = [int(r.get("text_length", 0)) for r in records]
     lengths_sorted = sorted(lengths)
@@ -186,8 +182,7 @@ def gate_a8_text_length_distribution(records: list[dict[str, Any]]) -> dict[str,
         "pass": below_provisional / n < 0.25,
         "note": (
             "~20% short-doc tail is expected (summary dispositions). "
-            "Stage 3 applies text_length >= 1500 filter before chunking. "
-            "Adjust provisional_min_chars based on p10/p25 if needed."
+            "Stage 3 applies text_length >= 1500 filter before chunking."
         ),
     }
 
@@ -196,7 +191,6 @@ def gate_a9_citation_count_distribution(records: list[dict[str, Any]]) -> dict[s
     """
     A9 — citation_count distribution.
     Zero-citation cases are procedural anomalies with no Tier C utility.
-    Fast-iteration subset should preferentially sample citation_count > 5.
     """
     counts = [int(r.get("citation_count", 0)) for r in records]
     n = len(counts)
@@ -226,7 +220,6 @@ def gate_a11_tokenizer_chunk_count(
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
     Verifies corpus supports multi-chunk splitting at 1024-subword budget.
-    Runs on a subsample to avoid long tokenizer load times.
     """
     try:
         from transformers import AutoTokenizer  # type: ignore[import]
@@ -321,18 +314,15 @@ def gate_a13_sentence_density(
 ) -> dict[str, Any]:
     """
     A13 — Sentence density check via repo-certified spaCy pipeline (not NLTK).
-    exclude=['ner','parser','lemmatizer'] matches repo setup.sh NLP config.
-    sentencizer added explicitly because parser is excluded — without it
-    spaCy raises E030 (sentence boundaries unset).
+    Only evaluates records that pass the A8 length filter (text_length >= 1500)
+    so short summary dispositions do not pollute the NLI density gate.
+    sentencizer added because parser is excluded (avoids spaCy E030).
     nlp.max_length set high to handle full federal appellate opinions safely.
-    MIN_SENTENCE_COUNT=20: spaCy sentencizer is conservative on legal text;
-    short opinions are caught by A8 length filter, not this gate.
     """
     try:
         import spacy  # type: ignore[import]
 
         nlp = spacy.load(SPACY_MODEL, exclude=SPACY_EXCLUDE)
-        # parser is excluded so sentence boundaries must be set via sentencizer
         if "sentencizer" not in nlp.pipe_names:
             nlp.add_pipe("sentencizer")
         nlp.max_length = 2_000_000
@@ -344,8 +334,18 @@ def gate_a13_sentence_density(
             "note": "spaCy model load failed — run: python -m spacy download en_core_web_sm",
         }
 
+    # Filter to records that pass A8 length floor before sentence density check
+    substantive = [r for r in records if int(r.get("text_length", 0)) >= PROVISIONAL_MIN_TEXT_LENGTH]
+    if not substantive:
+        return {
+            "gate": "A13_sentence_density",
+            "pass": False,
+            "error": "No records pass A8 length filter — run A8 gate first.",
+            "note": "Ensure text_length >= 1500 records exist in sample.",
+        }
+
     rng = random.Random(seed)
-    subsample = rng.sample(records, min(sample_n, len(records)))
+    subsample = rng.sample(substantive, min(sample_n, len(substantive)))
 
     sent_counts: list[int] = []
     below_threshold = 0
@@ -362,6 +362,7 @@ def gate_a13_sentence_density(
         "spacy_model": SPACY_MODEL,
         "min_sentence_threshold": MIN_SENTENCE_COUNT,
         "subsample_n": len(subsample),
+        "records_after_a8_filter": len(substantive),
         "mean_sentences": round(statistics.mean(sent_counts), 1),
         "median_sentences": statistics.median(sent_counts),
         "min_sentences": min(sent_counts),
@@ -369,9 +370,8 @@ def gate_a13_sentence_density(
         "below_threshold_pct": round(100.0 * below_threshold / len(subsample), 2),
         "pass": below_threshold / len(subsample) < 0.10,
         "note": (
-            ">=90% of records must have >20 sentences for sufficient "
-            "Tier B NLI atomic-claim density. "
-            "Short opinions are filtered by A8 (text_length < 1500) before NLI."
+            "Evaluated on text_length >= 1500 records only (A8-filtered). "
+            ">=90% must have >20 sentences for Tier B NLI atomic-claim density."
         ),
     }
 
@@ -380,7 +380,6 @@ def gate_b6_text_entropy_distribution(records: list[dict[str, Any]]) -> dict[str
     """
     B6 — text_entropy empirical distribution.
     Threshold must be derived from data — not hardcoded.
-    Reports distribution so caller can set evidence-based filter cutoff.
     """
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
@@ -441,9 +440,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
 class ModelQualitySignals:
     """
     Model-relevant quality signals for RAG pipeline rows.
-    These are soft warnings — not schema violations — returned as a list of
-    (signal_name, detail) tuples. Empty list = no signals triggered.
-    Callers decide whether to filter, flag, or pass rows downstream.
+    Soft warnings returned as (signal_name, detail) tuples. Empty = clean.
     """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
@@ -465,10 +462,8 @@ class ModelQualitySignals:
 
         if token_count < 20:
             signals.append(("truncated_document", f"~{token_count} tokens — likely truncated"))
-
         if token_count > 100_000:
             signals.append(("gigantic_document", f"~{token_count} tokens — may exceed model context"))
-
         if cls.HTML_RE.search(text):
             signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
 
@@ -502,11 +497,7 @@ class CourtListenerDatasetProbe:
     """
 
     def validate_row(self, row: dict[str, Any]) -> list[str]:
-        """
-        Return schema validation errors for a single CourtListener row.
-        Empty list = valid. Checks text presence and minimum length only —
-        full field checks are done via validate_schema() over batches.
-        """
+        """Return validation errors for a single row. Empty list = valid."""
         errors: list[str] = []
         text = row.get("text", "")
         if not isinstance(text, str) or len(text) < 50:
