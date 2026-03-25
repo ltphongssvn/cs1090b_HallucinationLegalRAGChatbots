@@ -989,3 +989,53 @@ class TestCLI:
         )
         assert out.exists()
         assert "gates" in json.loads(out.read_text())
+
+
+# ---------------------------------------------------------------------------
+# git_sha in provenance block (observation 3/5)
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceGitSha:
+    def test_provenance_has_git_sha(self, sample_shard_dir, tmp_path):
+        """Probe report provenance must include git_sha to tie report to code version."""
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert "git_sha" in report["provenance"]
+
+    def test_git_sha_is_string(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert isinstance(report["provenance"]["git_sha"], str)
+
+    def test_git_sha_is_not_empty(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        assert len(report["provenance"]["git_sha"]) > 0
+
+    def test_git_sha_in_written_json(self, sample_shard_dir, tmp_path):
+        out = tmp_path / "r.json"
+        run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=out,
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        data = json.loads(out.read_text())
+        assert "git_sha" in data["provenance"]
