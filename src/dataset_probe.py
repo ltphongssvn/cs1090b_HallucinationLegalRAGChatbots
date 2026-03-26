@@ -44,7 +44,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.0_10k
+      --wandb-name dataset_probe_v2.5.2_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -67,9 +67,6 @@ from typing import Any, Generator, Iterator
 
 import spacy as spacy  # type: ignore[import]
 
-# CHANGED: wandb wrapped in try/except so the probe is importable and runnable
-# even in environments where wandb is not installed. When unavailable, wandb is
-# set to None and all wandb code paths are guarded with `if wandb is not None`.
 try:
     import wandb  # type: ignore[import]
 except ImportError:
@@ -79,9 +76,11 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
+# CHANGED: bumped to 2.5.2 — frozenset[str] annotation, _percentile docstring
+# fix, citation_density type/range check in validate_schema.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.1"
+PROBE_VERSION = "2.5.2"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -169,7 +168,10 @@ REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
 
 @dataclasses.dataclass(frozen=True)
 class ProbeConfig:
-    """All probe thresholds and sampling parameters."""
+    """
+    All probe thresholds and sampling parameters.
+    Explicit, versionable, injectable, and JSON-serializable for provenance.
+    """
 
     min_text_length: int = 1500
     chunk_size_subwords: int = 1024
@@ -178,7 +180,9 @@ class ProbeConfig:
     encoder_model: str = "BAAI/bge-m3"
     spacy_model: str = "en_core_web_sm"
     a7_known_formats_pass_pct: float = 80.0
-    a7_known_formats: frozenset = dataclasses.field(
+    # CHANGED: annotated as frozenset[str] instead of bare frozenset so mypy
+    # can catch non-string values being passed (e.g. frozenset({1, 2})).
+    a7_known_formats: frozenset[str] = dataclasses.field(
         default_factory=lambda: frozenset({"plain_text", "html_with_citations"})
     )
     a8_below_threshold_pass_pct: float = 25.0
@@ -238,8 +242,13 @@ def _get_text(row: dict[str, Any]) -> str:
 
 def _percentile(sorted_values: list[Any], p: float) -> Any:
     """
-    Return the p-th percentile of a pre-sorted list.
-    Uses ceiling-index method consistent with numpy default. p in [0, 100].
+    Return the p-th percentile of a pre-sorted list using the ceiling-index
+    empirical convention defined for this probe. p must be in [0, 100].
+
+    Convention: index = ceil(p/100 * n) - 1, clamped to [0, n-1].
+    This is a deterministic empirical percentile rule — it does not use
+    interpolation. Do not compare directly to other libraries' default
+    percentile methods which may differ. p=0 returns min, p=100 returns max.
     """
     n = len(sorted_values)
     if n == 0:
@@ -411,7 +420,11 @@ def _reservoir_sample_with_audit(
 
 
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Check required field presence, type, range, vocabulary, and documented coverage."""
+    """
+    Check required field presence, type, range, vocabulary, and documented coverage.
+    CHANGED: added citation_density type (must be numeric) and range (must be >= 0)
+    checks alongside existing text_entropy, paragraph_count, token_count checks.
+    """
     if not records:
         return {
             "gate": "schema_validation",
@@ -442,14 +455,17 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
 
+        # text_length: must be int or float
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
 
+        # is_precedential: must be bool
         is_prec = r.get("is_precedential")
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
+        # citation_count: must be int, non-negative
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -458,6 +474,18 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
+        # citation_density: must be numeric (int/float), non-negative.
+        # ADDED: closes gap in schema contract — citation_density is a computed
+        # field (citation_count / text_length) so negative values indicate
+        # upstream computation errors.
+        cite_density = r.get("citation_density")
+        if cite_density is not None:
+            if not isinstance(cite_density, (int, float)):
+                type_errors["citation_density"] = type_errors.get("citation_density", 0) + 1
+            elif float(cite_density) < 0:
+                range_errors["citation_density"] = range_errors.get("citation_density", 0) + 1
+
+        # text_entropy: must be numeric (int/float), non-negative
         text_entropy = r.get("text_entropy")
         if text_entropy is not None:
             if not isinstance(text_entropy, (int, float)):
@@ -465,6 +493,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(text_entropy) < 0:
                 range_errors["text_entropy"] = range_errors.get("text_entropy", 0) + 1
 
+        # paragraph_count: must be int, non-negative
         para_count = r.get("paragraph_count")
         if para_count is not None:
             if not isinstance(para_count, int):
@@ -472,6 +501,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif para_count < 0:
                 range_errors["paragraph_count"] = range_errors.get("paragraph_count", 0) + 1
 
+        # token_count: must be int, non-negative
         tok_count = r.get("token_count")
         if tok_count is not None:
             if not isinstance(tok_count, int):
@@ -479,6 +509,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
+        # text_source: must be in KNOWN_TEXT_SOURCES vocabulary
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
             vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
@@ -1202,9 +1233,6 @@ def run_probe(
         f"SKIPPED: {skipped}"
     )
 
-    # CHANGED: guard wandb.run access — wandb may be None if not installed.
-    # Previously `if log_to_wandb and wandb.run is not None` raised AttributeError
-    # when wandb=None. Now checks wandb is not None before accessing .run.
     if log_to_wandb and wandb is not None and wandb.run is not None:
         wandb.log(
             {
@@ -1243,7 +1271,7 @@ def main() -> None:
         "--wandb-entity",
         type=str,
         default="phl690-harvard-extension-schol",
-        help="W&B entity (team or username). Default: phl690-harvard-extension-schol",
+        help="W&B entity. Default: phl690-harvard-extension-schol",
     )
     parser.add_argument(
         "--wandb-project",
