@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.dataset_probe import (
+    _LEGAL_CITATION_RE,
     CHUNK_OVERLAP_SUBWORDS,
     CHUNK_SIZE_SUBWORDS,
     ENCODER_MODEL,
@@ -218,6 +219,57 @@ class TestPercentile:
         assert result in [3, 5]
 
 
+class TestPercentileEdgeCases:
+    def test_repeated_values(self):
+        assert _percentile([5, 5, 5, 5, 5], 50) == 5
+        assert _percentile([5, 5, 5, 5, 5], 0) == 5
+        assert _percentile([5, 5, 5, 5, 5], 100) == 5
+
+    def test_n_equals_2_p0(self):
+        assert _percentile([1, 2], 0) == 1
+
+    def test_n_equals_2_p100(self):
+        assert _percentile([1, 2], 100) == 2
+
+    def test_n_equals_2_p50(self):
+        assert _percentile([1, 2], 50) in [1, 2]
+
+    def test_n_equals_2_p25(self):
+        assert _percentile([1, 2], 25) in [1, 2]
+
+    def test_large_n_boundary(self):
+        data = sorted(range(1000))
+        assert _percentile(data, 0) == 0
+        assert _percentile(data, 100) == 999
+
+    def test_raises_on_empty(self):
+        with pytest.raises(ValueError):
+            _percentile([], 50)
+
+
+# ---------------------------------------------------------------------------
+# Shared citation regex
+# ---------------------------------------------------------------------------
+
+
+class TestSharedCitationRegex:
+    def test_legal_citation_re_exported(self):
+        assert _LEGAL_CITATION_RE is not None
+
+    def test_a12_uses_shared_regex(self):
+        text = "Smith v. Jones, 123 F.3d 456 (9th Cir. 2020)."
+        assert _LEGAL_CITATION_RE.findall(text) == _LEGAL_CITATION_RE.findall(text)
+
+    def test_shared_regex_catches_federal_reporter(self):
+        assert _LEGAL_CITATION_RE.search("123 F.3d 456")
+
+    def test_shared_regex_catches_case_name_citation(self):
+        assert _LEGAL_CITATION_RE.search("Smith v. Jones")
+
+    def test_shared_regex_catches_scotus_reporter(self):
+        assert _LEGAL_CITATION_RE.search("347 U.S. 483")
+
+
 # ---------------------------------------------------------------------------
 # iter_shards
 # ---------------------------------------------------------------------------
@@ -328,6 +380,34 @@ class TestValidateSchema:
         assert "pass" in validate_schema([])
 
 
+class TestValidateSchemaTextSource:
+    def test_passes_known_text_sources(self):
+        for src in ("plain_text", "html_with_citations", "html_lawbox", "html_columbia", "xml_harvard"):
+            records = _make_records(3, text_source=src)
+            result = validate_schema(records)
+            assert result.get("vocabulary_errors", {}).get("text_source", 0) == 0, (
+                f"Known source '{src}' should not trigger vocabulary error"
+            )
+
+    def test_flags_unknown_text_source(self):
+        records = _make_records(3, text_source="UNKNOWN_FORMAT_XYZ")
+        result = validate_schema(records)
+        assert "vocabulary_errors" in result
+        assert "text_source" in result["vocabulary_errors"]
+
+    def test_schema_still_passes_with_known_sources(self):
+        assert validate_schema(_make_records(5, text_source="plain_text"))["pass"] is True
+
+    def test_schema_fails_with_unknown_source(self):
+        result = validate_schema(_make_records(5, text_source="garbage_format"))
+        assert result["pass"] is False
+
+    def test_vocabulary_errors_count_correct(self):
+        records = _make_records(3, text_source="plain_text") + _make_records(2, text_source="UNKNOWN")
+        result = validate_schema(records)
+        assert result["vocabulary_errors"]["text_source"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Gate A7
 # ---------------------------------------------------------------------------
@@ -398,7 +478,6 @@ class TestGateA9:
         assert "pass" in gate_a9_citation_count_distribution([])
 
     def test_note_clarifies_advisory_role(self):
-        """A9 note must clarify it is advisory, not a hard corpus filter."""
         r = gate_a9_citation_count_distribution(_make_records(10))
         note = r["note"].lower()
         assert "advisory" in note or "probe" in note or "filter" in note
@@ -410,7 +489,7 @@ class TestGateA9:
 
 
 # ---------------------------------------------------------------------------
-# Gate A11 — mocked tokenizer + generative tokenizer check
+# Gate A11 — mocked tokenizer + tokenizer injection + generative check
 # ---------------------------------------------------------------------------
 
 
@@ -420,26 +499,30 @@ class TestGateA11:
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert gate_a11_tokenizer_chunk_count(_make_records(10))["pass"] is True
+        cfg = ProbeConfig(a11_generative_model="")
+        assert gate_a11_tokenizer_chunk_count(_make_records(10), config=cfg)["pass"] is True
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_encoder_model(self, mock_cls):
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert gate_a11_tokenizer_chunk_count(_make_records(5)).get("encoder_model") == ENCODER_MODEL
+        cfg = ProbeConfig(a11_generative_model="")
+        assert gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg).get("encoder_model") == ENCODER_MODEL
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_logs_tokenizer_revision(self, mock_cls):
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert "tokenizer_revision" in gate_a11_tokenizer_chunk_count(_make_records(5))
+        cfg = ProbeConfig(a11_generative_model="")
+        assert "tokenizer_revision" in gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_fail_on_tokenizer_load_error(self, mock_cls):
         mock_cls.from_pretrained.side_effect = OSError("not found")
-        r = gate_a11_tokenizer_chunk_count(_make_records(5))
+        cfg = ProbeConfig(a11_generative_model="")
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
         assert r["pass"] is False
         assert "error" in r
 
@@ -447,17 +530,16 @@ class TestGateA11:
         assert "pass" in gate_a11_tokenizer_chunk_count([])
 
     def test_uses_all_records_when_fewer_than_subsample_n(self):
-        """No internal subsampling — all 5 records must be processed."""
         with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
             mock_tok = MagicMock()
             mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
             mock_cls.from_pretrained.return_value = mock_tok
-            r = gate_a11_tokenizer_chunk_count(_make_records(5))
+            cfg = ProbeConfig(a11_generative_model="")
+            r = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
             assert r["subsample_n"] == 5
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_reports_generative_token_check_when_model_set(self, mock_cls):
-        """A11 must report generative_token_check when a11_generative_model is set."""
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
@@ -467,13 +549,47 @@ class TestGateA11:
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_skips_generative_check_when_model_empty(self, mock_cls):
-        """A11 must skip generative check when a11_generative_model is empty."""
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
         cfg = ProbeConfig(a11_generative_model="")
         r = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg)
         assert "generative_token_check" not in r
+
+
+class TestGateA11TokenizerInjection:
+    def test_gate_a11_accepts_tokenizer_argument(self):
+        import inspect
+
+        sig = inspect.signature(gate_a11_tokenizer_chunk_count)
+        assert "tokenizer" in sig.parameters
+
+    def test_gate_a11_uses_injected_tokenizer_without_calling_autotokenizer(self):
+        """When tokenizer injected and generative check disabled, AutoTokenizer not called."""
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        records = _make_records(5)
+        cfg = ProbeConfig(a11_generative_model="")
+        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
+            gate_a11_tokenizer_chunk_count(records, tokenizer=mock_tok, config=cfg)
+            mock_cls.from_pretrained.assert_not_called()
+
+    def test_gate_a11_injected_tokenizer_produces_correct_subsample_n(self):
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        cfg = ProbeConfig(a11_generative_model="")
+        r = gate_a11_tokenizer_chunk_count(_make_records(5), tokenizer=mock_tok, config=cfg)
+        assert r["subsample_n"] == 5
+
+    def test_gate_a11_none_tokenizer_falls_back_to_autotokenizer(self):
+        """When tokenizer=None and generative check disabled, from_pretrained called once."""
+        cfg = ProbeConfig(a11_generative_model="")
+        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
+            mock_tok = MagicMock()
+            mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+            mock_cls.from_pretrained.return_value = mock_tok
+            gate_a11_tokenizer_chunk_count(_make_records(5), tokenizer=None, config=cfg)
+            mock_cls.from_pretrained.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +612,6 @@ class TestGateA12:
         assert "pass" in gate_a12_citation_anchor_survival([])
 
     def test_uses_all_records_when_fewer_than_subsample_n(self):
-        """No internal subsampling — all 5 records must be processed."""
         r = gate_a12_citation_anchor_survival(_make_records(5))
         assert r["subsample_n"] == 5
 
@@ -530,21 +645,18 @@ class TestGateA13:
         assert "pass" in gate_a13_sentence_density([])
 
     def test_uses_all_substantive_records_when_fewer_than_subsample_n(self):
-        """No internal subsampling — all 5 substantive records must be processed."""
         long_text = "The court held this point clearly. " * 100
         records = _make_records(5, text_length=5000, text=long_text)
         r = gate_a13_sentence_density(records)
         assert r["subsample_n"] == 5
 
     def test_accepts_nlp_argument(self):
-        """gate_a13_sentence_density must accept an optional nlp argument."""
         import inspect
 
         sig = inspect.signature(gate_a13_sentence_density)
         assert "nlp" in sig.parameters
 
     def test_uses_injected_nlp_without_calling_spacy_load(self):
-        """When nlp is injected, gate_a13 must not call spacy.load."""
         mock_nlp = MagicMock()
         mock_doc = MagicMock()
         mock_doc.sents = iter([MagicMock() for _ in range(60)])
@@ -726,7 +838,7 @@ class TestRunProbeReportSchema:
 
 
 # ---------------------------------------------------------------------------
-# Provenance + probe_version
+# Provenance + probe_version + git_sha
 # ---------------------------------------------------------------------------
 
 
@@ -762,14 +874,39 @@ class TestProbeVersion:
         assert isinstance(PROBE_VERSION, str) and len(PROBE_VERSION) >= 3
 
 
+class TestProvenanceGitSha:
+    def test_provenance_has_git_sha(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
+        )
+        assert "git_sha" in report["provenance"]
+
+    def test_git_sha_is_string(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
+        )
+        assert isinstance(report["provenance"]["git_sha"], str)
+
+    def test_git_sha_is_not_empty(self, sample_shard_dir, tmp_path):
+        report = run_probe(
+            data_dir=sample_shard_dir, subset=20, output=tmp_path / "r.json", skip_tokenizer=True, skip_spacy=True
+        )
+        assert len(report["provenance"]["git_sha"]) > 0
+
+    def test_git_sha_in_written_json(self, sample_shard_dir, tmp_path):
+        out = tmp_path / "r.json"
+        run_probe(data_dir=sample_shard_dir, subset=20, output=out, skip_tokenizer=True, skip_spacy=True)
+        data = json.loads(out.read_text())
+        assert "git_sha" in data["provenance"]
+
+
 # ---------------------------------------------------------------------------
-# CourtListenerDatasetProbe — validate_row removed, orchestrator contract
+# CourtListenerDatasetProbe
 # ---------------------------------------------------------------------------
 
 
 class TestCourtListenerDatasetProbe:
     def test_probe_has_no_validate_row_method(self):
-        """validate_row is dead code — must not exist on CourtListenerDatasetProbe."""
         assert not hasattr(CourtListenerDatasetProbe(), "validate_row")
 
     def test_probe_still_has_run_method(self):
@@ -989,198 +1126,3 @@ class TestCLI:
         )
         assert out.exists()
         assert "gates" in json.loads(out.read_text())
-
-
-# ---------------------------------------------------------------------------
-# git_sha in provenance block (observation 3/5)
-# ---------------------------------------------------------------------------
-
-
-class TestProvenanceGitSha:
-    def test_provenance_has_git_sha(self, sample_shard_dir, tmp_path):
-        """Probe report provenance must include git_sha to tie report to code version."""
-        report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-        )
-        assert "git_sha" in report["provenance"]
-
-    def test_git_sha_is_string(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-        )
-        assert isinstance(report["provenance"]["git_sha"], str)
-
-    def test_git_sha_is_not_empty(self, sample_shard_dir, tmp_path):
-        report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
-        )
-        assert len(report["provenance"]["git_sha"]) > 0
-
-    def test_git_sha_in_written_json(self, sample_shard_dir, tmp_path):
-        out = tmp_path / "r.json"
-        run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
-            output=out,
-            skip_tokenizer=True,
-            skip_spacy=True,
-        )
-        data = json.loads(out.read_text())
-        assert "git_sha" in data["provenance"]
-
-
-# ---------------------------------------------------------------------------
-# Obs 3/15/19 — tokenizer injectable into gate_a11
-# ---------------------------------------------------------------------------
-
-
-class TestGateA11TokenizerInjection:
-    def test_gate_a11_accepts_tokenizer_argument(self):
-        """gate_a11_tokenizer_chunk_count must accept an optional tokenizer argument."""
-        import inspect
-        sig = inspect.signature(gate_a11_tokenizer_chunk_count)
-        assert "tokenizer" in sig.parameters
-
-    def test_gate_a11_uses_injected_tokenizer_without_calling_autotokenizer(self):
-        """When tokenizer is injected, AutoTokenizer.from_pretrained must NOT be called."""
-        mock_tok = MagicMock()
-        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
-        records = _make_records(5)
-        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
-            gate_a11_tokenizer_chunk_count(records, tokenizer=mock_tok)
-            mock_cls.from_pretrained.assert_not_called()
-
-    def test_gate_a11_injected_tokenizer_produces_correct_subsample_n(self):
-        """Injected tokenizer path must process exactly the records passed."""
-        mock_tok = MagicMock()
-        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
-        records = _make_records(5)
-        r = gate_a11_tokenizer_chunk_count(records, tokenizer=mock_tok)
-        assert r["subsample_n"] == 5
-
-    def test_gate_a11_none_tokenizer_falls_back_to_autotokenizer(self):
-        """When tokenizer=None, gate falls back to AutoTokenizer.from_pretrained."""
-        with patch("src.dataset_probe.AutoTokenizer") as mock_cls:
-            mock_tok = MagicMock()
-            mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
-            mock_cls.from_pretrained.return_value = mock_tok
-            gate_a11_tokenizer_chunk_count(_make_records(5), tokenizer=None)
-            mock_cls.from_pretrained.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Obs 10 — shared _LEGAL_CITATION_RE between A12 and ModelQualitySignals
-# ---------------------------------------------------------------------------
-
-
-class TestSharedCitationRegex:
-    def test_legal_citation_re_exported(self):
-        """_LEGAL_CITATION_RE must be a module-level constant."""
-        from src.dataset_probe import _LEGAL_CITATION_RE
-        assert _LEGAL_CITATION_RE is not None
-
-    def test_a12_uses_shared_regex(self):
-        """gate_a12 and ModelQualitySignals must use the same citation pattern."""
-        from src.dataset_probe import _LEGAL_CITATION_RE
-        text = "Smith v. Jones, 123 F.3d 456 (9th Cir. 2020)."
-        a12_matches = _LEGAL_CITATION_RE.findall(text)
-        qs_matches = _LEGAL_CITATION_RE.findall(text)
-        assert a12_matches == qs_matches
-
-    def test_shared_regex_catches_federal_reporter(self):
-        from src.dataset_probe import _LEGAL_CITATION_RE
-        assert _LEGAL_CITATION_RE.search("123 F.3d 456")
-
-    def test_shared_regex_catches_case_name_citation(self):
-        from src.dataset_probe import _LEGAL_CITATION_RE
-        assert _LEGAL_CITATION_RE.search("Smith v. Jones")
-
-    def test_shared_regex_catches_scotus_reporter(self):
-        from src.dataset_probe import _LEGAL_CITATION_RE
-        assert _LEGAL_CITATION_RE.search("347 U.S. 483")
-
-
-# ---------------------------------------------------------------------------
-# Obs 16 — _percentile edge cases
-# ---------------------------------------------------------------------------
-
-
-class TestPercentileEdgeCases:
-    def test_repeated_values(self):
-        """All-same values must return that value at any percentile."""
-        assert _percentile([5, 5, 5, 5, 5], 50) == 5
-        assert _percentile([5, 5, 5, 5, 5], 0) == 5
-        assert _percentile([5, 5, 5, 5, 5], 100) == 5
-
-    def test_n_equals_2_p50(self):
-        assert _percentile([1, 2], 50) in [1, 2]
-
-    def test_n_equals_2_p0(self):
-        assert _percentile([1, 2], 0) == 1
-
-    def test_n_equals_2_p100(self):
-        assert _percentile([1, 2], 100) == 2
-
-    def test_n_equals_2_p25(self):
-        result = _percentile([1, 2], 25)
-        assert result in [1, 2]
-
-    def test_large_n_boundary(self):
-        data = sorted(range(1000))
-        assert _percentile(data, 0) == 0
-        assert _percentile(data, 100) == 999
-
-    def test_raises_on_empty(self):
-        with pytest.raises(ValueError):
-            _percentile([], 50)
-
-
-# ---------------------------------------------------------------------------
-# Obs 21 — text_source controlled vocabulary check in validate_schema
-# ---------------------------------------------------------------------------
-
-
-class TestValidateSchemaTextSource:
-    def test_passes_known_text_sources(self):
-        """Known text_source values must pass validate_schema."""
-        for src in ("plain_text", "html_with_citations", "html_lawbox", "html_columbia", "xml_harvard"):
-            records = _make_records(3, text_source=src)
-            result = validate_schema(records)
-            assert "text_source" not in result.get("vocabulary_errors", {}), \
-                f"Known source '{src}' should not trigger vocabulary error"
-
-    def test_flags_unknown_text_source(self):
-        """Unknown text_source values must be flagged in validate_schema."""
-        records = _make_records(3, text_source="UNKNOWN_FORMAT_XYZ")
-        result = validate_schema(records)
-        assert "vocabulary_errors" in result
-        assert "text_source" in result["vocabulary_errors"]
-
-    def test_schema_still_passes_with_known_sources(self):
-        """Schema pass=True must be preserved for fully valid records."""
-        records = _make_records(5, text_source="plain_text")
-        assert validate_schema(records)["pass"] is True
-
-    def test_schema_fails_with_unknown_source(self):
-        """Schema pass=False when unknown text_source present."""
-        records = _make_records(5, text_source="garbage_format")
-        result = validate_schema(records)
-        assert result["pass"] is False
-
-    def test_vocabulary_errors_count_correct(self):
-        """vocabulary_errors must count how many records have unknown text_source."""
-        records = _make_records(3, text_source="plain_text") + _make_records(2, text_source="UNKNOWN")
-        result = validate_schema(records)
-        assert result["vocabulary_errors"]["text_source"] == 2

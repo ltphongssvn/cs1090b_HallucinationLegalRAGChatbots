@@ -52,7 +52,39 @@ from transformers import AutoTokenizer  # type: ignore[import]
 # Probe version — increment when report schema changes
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.1.0"
+PROBE_VERSION = "2.2.0"
+
+# ---------------------------------------------------------------------------
+# Shared legal citation regex — single source of truth used by A12 and
+# ModelQualitySignals to prevent drift between gating and advisory logic.
+# CHANGED: extracted from gate_a12 and ModelQualitySignals into module constant.
+# ---------------------------------------------------------------------------
+
+_LEGAL_CITATION_RE = re.compile(
+    r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"  # reporter citations
+    r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"  # case name citations
+    r"|U\.S\.\s+\d+"  # SCOTUS reporter
+    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",  # Federal reporter
+    re.MULTILINE,
+)
+
+# ---------------------------------------------------------------------------
+# Known text_source vocabulary — controlled vocabulary for semantic validation.
+# ADDED: supports validate_schema() vocabulary_errors check (observation 21).
+# ---------------------------------------------------------------------------
+
+KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
+    {
+        "plain_text",
+        "html_with_citations",
+        "html_lawbox",
+        "html_columbia",
+        "html_anon_2020",
+        "xml_harvard",
+        "direct_court_input",
+        "pdf",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
@@ -89,17 +121,14 @@ class ProbeConfig:
     a13_subsample_n: int = 200
 
     # A13 text cap — explicit and loggable (was magic number 50_000)
-    # Caps per-doc cost for spaCy processing in the probe (not in training)
     a13_text_cap_chars: int = 50_000
 
-    # B6 entropy spot-check tolerance — max allowed deviation between
-    # stored text_entropy and probe-computed Shannon entropy before flagging drift
+    # B6 entropy spot-check tolerance
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
 
     # Optional secondary generative tokenizer for A11.
     # README uses mistralai/Mistral-7B-Instruct-v0.2 for prompt length assertion.
-    # A chunk fitting 1024 BGE-M3 subwords may be larger under the Mistral tokenizer.
     # Set to "" to skip generative tokenizer check.
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
 
@@ -132,7 +161,6 @@ REQUIRED_FIELDS: frozenset[str] = frozenset(
 
 # ---------------------------------------------------------------------------
 # Git SHA helper — ties probe report to exact code version
-# Consistent with src/manifest_collector.py which uses git rev-parse HEAD
 # ---------------------------------------------------------------------------
 
 
@@ -273,14 +301,17 @@ def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Schema validation — presence + type + range checks
+# Schema validation — presence + type + range + vocabulary checks
+# CHANGED: added vocabulary_errors for text_source controlled vocabulary.
 # ---------------------------------------------------------------------------
 
 
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Check required field presence, type correctness, and value ranges.
+    Check required field presence, type correctness, value ranges, and vocabulary.
     Returns pass=False if any record fails any check.
+
+    vocabulary_errors: text_source must be in KNOWN_TEXT_SOURCES.
     """
     if not records:
         return {
@@ -289,6 +320,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             "missing_counts": {},
             "type_errors": {},
             "range_errors": {},
+            "vocabulary_errors": {},
             "pass": True,
             "note": "No records to validate.",
         }
@@ -296,6 +328,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     missing_by_field: dict[str, int] = {f: 0 for f in REQUIRED_FIELDS}
     type_errors: dict[str, int] = {}
     range_errors: dict[str, int] = {}
+    vocabulary_errors: dict[str, int] = {}
 
     for r in records:
         for f in REQUIRED_FIELDS:
@@ -318,14 +351,20 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
+        # Vocabulary check: text_source must be in known controlled vocabulary
+        text_source = r.get("text_source")
+        if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
+            vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
+
     any_missing = any(v > 0 for v in missing_by_field.values())
-    passed = not any_missing and not type_errors and not range_errors
+    passed = not any_missing and not type_errors and not range_errors and not vocabulary_errors
     return {
         "gate": "schema_validation",
         "required_fields": sorted(REQUIRED_FIELDS),
         "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
         "type_errors": type_errors,
         "range_errors": range_errors,
+        "vocabulary_errors": vocabulary_errors,
         "pass": passed,
     }
 
@@ -412,7 +451,6 @@ def gate_a9_citation_count_distribution(
     A9 — citation_count distribution.
     ADVISORY ONLY — this probe does not hard-filter the corpus.
     The full 1.46M-opinion corpus is used unfiltered for final runs.
-    Only the ~150K fast-iteration subset optionally filters citation_count > 5.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -448,18 +486,19 @@ def gate_a11_tokenizer_chunk_count(
     sample_n: int | None = None,
     seed: int = 0,
     config: ProbeConfig | None = None,
+    tokenizer: Any | None = None,
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3 (README-certified encoder).
-    AutoTokenizer imported at module level so tests can patch it network-free.
-    Tokenizer revision logged for reproducibility.
+
+    CHANGED: tokenizer is now injectable for hermetic unit testing — consistent
+    with nlp injection pattern in gate_a13_sentence_density.
+    When tokenizer=None, AutoTokenizer.from_pretrained() is called internally.
+    When tokenizer is provided, AutoTokenizer.from_pretrained() is NOT called.
 
     Subsampling is done by run_probe before calling this gate.
-    This gate processes the full records list passed to it.
-    sample_n retained for backward compatibility but subsampling is run_probe's job.
 
     Optional secondary check against a11_generative_model (Mistral by default):
-    A chunk fitting 1024 BGE-M3 subwords may exceed the Mistral context window.
     README asserts max(prompt_tokens) < 32768 using the Mistral tokenizer.
     Set a11_generative_model="" to skip this check.
     """
@@ -468,17 +507,21 @@ def gate_a11_tokenizer_chunk_count(
         return {"gate": "A11_tokenizer_chunk_count", "pass": False, "note": "No records."}
 
     subsample = records
+    tokenizer_revision = cfg.encoder_model
 
-    try:
-        tok = AutoTokenizer.from_pretrained(cfg.encoder_model)
-        tokenizer_revision = getattr(tok, "name_or_path", cfg.encoder_model)
-    except Exception as exc:
-        return {
-            "gate": "A11_tokenizer_chunk_count",
-            "pass": False,
-            "error": str(exc),
-            "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
-        }
+    if tokenizer is None:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(cfg.encoder_model)
+            tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
+        except Exception as exc:
+            return {
+                "gate": "A11_tokenizer_chunk_count",
+                "pass": False,
+                "error": str(exc),
+                "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
+            }
+    else:
+        tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
 
     chunk_counts: list[int] = []
     token_lengths: list[int] = []
@@ -486,7 +529,7 @@ def gate_a11_tokenizer_chunk_count(
 
     for r in subsample:
         text = str(r.get("text", ""))
-        ids = tok(text, add_special_tokens=False)["input_ids"]
+        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         total_tokens = len(ids)
         token_lengths.append(total_tokens)
         stride = cfg.chunk_size_subwords - cfg.chunk_overlap_subwords
@@ -512,7 +555,6 @@ def gate_a11_tokenizer_chunk_count(
     }
 
     # Optional secondary generative tokenizer check (Mistral by default)
-    # README: assert max(prompt_tokens) < 32768 using Mistral tokenizer
     if cfg.a11_generative_model:
         try:
             gen_tok = AutoTokenizer.from_pretrained(cfg.a11_generative_model)
@@ -555,6 +597,8 @@ def gate_a12_citation_anchor_survival(
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival in normalized text field.
+    CHANGED: uses shared _LEGAL_CITATION_RE module constant instead of
+    local regex definition — prevents drift with ModelQualitySignals.
     NOTE: regex-based detection is a heuristic approximation.
     Subsampling is done by run_probe before calling this gate.
     """
@@ -564,19 +608,11 @@ def gate_a12_citation_anchor_survival(
 
     subsample = records
 
-    CITATION_RE = re.compile(
-        r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
-        r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
-        r"|U\.S\.\s+\d+"
-        r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
-        re.MULTILINE,
-    )
-
     has_anchor = 0
     citation_counts_found: list[int] = []
     for r in subsample:
         text = str(r.get("text", ""))
-        matches = CITATION_RE.findall(text)
+        matches = _LEGAL_CITATION_RE.findall(text)
         citation_counts_found.append(len(matches))
         if matches:
             has_anchor += 1
@@ -681,8 +717,6 @@ def gate_b6_text_entropy_distribution(
 ) -> dict[str, Any]:
     """
     B6 — text_entropy distribution + spot-check for formula drift.
-    Spot-check computes Shannon entropy on a subsample and compares against
-    the stored text_entropy field to detect upstream formula changes.
     Pass always (distribution-only) — threshold is data-derived.
     """
     cfg = config or ProbeConfig()
@@ -731,6 +765,7 @@ def gate_b6_text_entropy_distribution(
 
 # ---------------------------------------------------------------------------
 # Model-relevant quality signals (advisory — not schema violations)
+# CHANGED: uses shared _LEGAL_CITATION_RE instead of local CITATION_RE.
 # ---------------------------------------------------------------------------
 
 
@@ -742,7 +777,6 @@ class ModelQualitySignals:
     """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
-    CITATION_RE = re.compile(r"\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)")
     BOILERPLATE_PHRASES = (
         "all rights reserved",
         "this page intentionally left blank",
@@ -772,7 +806,8 @@ class ModelQualitySignals:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
 
-        citation_count = len(cls.CITATION_RE.findall(text))
+        # CHANGED: uses shared _LEGAL_CITATION_RE — same pattern as gate_a12
+        citation_count = len(_LEGAL_CITATION_RE.findall(text))
         if token_count > 100 and citation_count == 0:
             signals.append(("no_citations", "No legal citations found — may be non-opinion text"))
 
@@ -864,12 +899,10 @@ def run_probe(
     audit = iter_shards_with_audit(data_dir)
     all_records = audit["records"]
 
-    # Subsampling happens here — gates receive pre-sampled lists
     rng = random.Random(seed)
     records = rng.sample(all_records, subset) if len(all_records) > subset else all_records
     print(f"[dataset_probe] Loaded {len(records)} records.")
 
-    # Subsample for A11/A12/A13 gates — controlled here, not inside gates
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
     a13_candidates = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
@@ -882,7 +915,6 @@ def run_probe(
         spacy_version = "unknown"
         spacy_model_version = "unknown"
 
-    # Load spaCy once for A13 if not skipped
     nlp_pipeline: Any | None = None
     if not skip_spacy:
         try:
