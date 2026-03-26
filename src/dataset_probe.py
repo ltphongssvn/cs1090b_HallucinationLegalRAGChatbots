@@ -40,7 +40,11 @@ CLI usage:
       --data-dir data/raw/cl_federal_appellate_bulk \\
       --subset 10000 \\
       --output logs/dataset_probe_report.json
-  uv run python -m src.dataset_probe ... --ci-mode  # exits 1 only if blocking gates fail
+  uv run python -m src.dataset_probe ... --ci-mode
+  uv run python -m src.dataset_probe ... --log-to-wandb \\
+      --wandb-entity phl690-harvard-extension-schol \\
+      --wandb-project cs1090b \\
+      --wandb-name dataset_probe_v2.5.0_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -62,46 +66,39 @@ from pathlib import Path
 from typing import Any, Generator, Iterator
 
 import spacy as spacy  # type: ignore[import]
-import wandb  # type: ignore[import]
 from transformers import AutoTokenizer  # type: ignore[import]
+
+import wandb  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.0 — MIN_REQUIRED_FIELDS rename, one-pass streaming,
-# stale param removal, severity field, extended schema validation, docstring
-# fix, single spaCy load.
 # ---------------------------------------------------------------------------
 
 PROBE_VERSION = "2.5.0"
 
 # ---------------------------------------------------------------------------
-# Shared legal citation regex — single source of truth for A12 and
-# ModelQualitySignals to prevent drift between gating and advisory logic.
+# Shared legal citation regex
 #
-# Match examples (inline for maintainability):
-#   "123 F.3d 456"     — federal reporter, third series (e.g. 9th Cir.)
+# Match examples:
+#   "123 F.3d 456"     — federal reporter, third series
 #   "456 F.2d 789"     — federal reporter, second series
 #   "123 F.Supp 456"   — federal supplement reporter
-#   "347 U.S. 483"     — United States Reports (Brown v. Board of Education)
+#   "347 U.S. 483"     — United States Reports
 #   "Smith v. Jones"   — case name citation anchor
 #   "Brown v. Board"   — landmark SCOTUS case name anchor
 #
 # Non-match examples:
-#   "The defendant argued the motion." — pure prose, no citation format
-#   "Section 42 of the statute"        — bare number, no reporter context
+#   "The defendant argued the motion." — pure prose
+#   "Section 42 of the statute"        — bare number
 # ---------------------------------------------------------------------------
 
 _LEGAL_CITATION_RE = re.compile(
-    r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"  # e.g. 123 F.3d 456, 123 F.Supp 456
-    r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"  # e.g. Smith v. Jones
-    r"|U\.S\.\s+\d+"  # e.g. U.S. 483
-    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",  # e.g. 123 F.3d 456
+    r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
+    r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
+    r"|U\.S\.\s+\d+"
+    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
     re.MULTILINE,
 )
-
-# ---------------------------------------------------------------------------
-# DOCUMENTED_FIELDS — all 23 fields declared in the module docstring schema.
-# ---------------------------------------------------------------------------
 
 DOCUMENTED_FIELDS: frozenset[str] = frozenset(
     {
@@ -131,10 +128,6 @@ DOCUMENTED_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# ---------------------------------------------------------------------------
-# Known text_source vocabulary
-# ---------------------------------------------------------------------------
-
 KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
     {
         "plain_text",
@@ -147,13 +140,6 @@ KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
         "pdf",
     }
 )
-
-# ---------------------------------------------------------------------------
-# MIN_REQUIRED_FIELDS — the 11 fields enforced as mandatory for gate pass/fail.
-# CHANGED: renamed from REQUIRED_FIELDS to MIN_REQUIRED_FIELDS to make clear
-# this is a minimum enforcement subset of DOCUMENTED_FIELDS (23 fields).
-# REQUIRED_FIELDS kept as backward-compat alias.
-# ---------------------------------------------------------------------------
 
 MIN_REQUIRED_FIELDS: frozenset[str] = frozenset(
     {
@@ -171,20 +157,12 @@ MIN_REQUIRED_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# Backward-compatible alias — do not remove until all callers migrated
 REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
-
-# ---------------------------------------------------------------------------
-# ProbeConfig
-# ---------------------------------------------------------------------------
 
 
 @dataclasses.dataclass(frozen=True)
 class ProbeConfig:
-    """
-    All probe thresholds and sampling parameters in one place.
-    Explicit, versionable, injectable, and JSON-serializable for provenance.
-    """
+    """All probe thresholds and sampling parameters."""
 
     min_text_length: int = 1500
     chunk_size_subwords: int = 1024
@@ -212,18 +190,13 @@ class ProbeConfig:
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
-    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists."""
     result: dict[str, Any] = {}
     for f in dataclasses.fields(cfg):
         val = getattr(cfg, f.name)
-        if isinstance(val, frozenset):
-            result[f.name] = sorted(val)
-        else:
-            result[f.name] = val
+        result[f.name] = sorted(val) if isinstance(val, frozenset) else val
     return result
 
 
-# Module-level defaults (backward-compatible imports)
 PROVISIONAL_MIN_TEXT_LENGTH = ProbeConfig().min_text_length
 CHUNK_SIZE_SUBWORDS = ProbeConfig().chunk_size_subwords
 CHUNK_OVERLAP_SUBWORDS = ProbeConfig().chunk_overlap_subwords
@@ -233,13 +206,7 @@ SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
 MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 
 
-# ---------------------------------------------------------------------------
-# Git SHA helper
-# ---------------------------------------------------------------------------
-
-
 def _get_git_sha() -> str:
-    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -252,22 +219,11 @@ def _get_git_sha() -> str:
         return "not-a-git-repo"
 
 
-# ---------------------------------------------------------------------------
-# _get_text helper
-# ---------------------------------------------------------------------------
-
-
 def _get_text(row: dict[str, Any]) -> str:
-    """Return the text field of a record as a string, or '' if missing/None."""
     val = row.get("text")
     if val is None:
         return ""
     return str(val)
-
-
-# ---------------------------------------------------------------------------
-# Percentile helper
-# ---------------------------------------------------------------------------
 
 
 def _percentile(sorted_values: list[Any], p: float) -> Any:
@@ -286,13 +242,7 @@ def _percentile(sorted_values: list[Any], p: float) -> Any:
     return sorted_values[idx]
 
 
-# ---------------------------------------------------------------------------
-# Shannon entropy helper
-# ---------------------------------------------------------------------------
-
-
 def _shannon_entropy(text: str) -> float:
-    """Compute word-level Shannon entropy (bits). Returns 0.0 for empty text."""
     words = text.split()
     if not words:
         return 0.0
@@ -301,14 +251,6 @@ def _shannon_entropy(text: str) -> float:
         freq[w] = freq.get(w, 0) + 1
     n = len(words)
     return -sum((c / n) * math.log2(c / n) for c in freq.values())
-
-
-# ---------------------------------------------------------------------------
-# Shard loader with audit counters
-# CHANGED: iter_shards docstring now accurately states that JSON parse errors
-# are also silently skipped (not only blank lines), fixing a docstring/code
-# mismatch that could mislead callers about data loss semantics.
-# ---------------------------------------------------------------------------
 
 
 def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
@@ -322,11 +264,7 @@ def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
 
 
 def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
-    """
-    Load all shards and return audit summary.
-    Returns total_records_decoded (successfully parsed), total_parse_errors,
-    total_blank_lines, per-shard shard_errors, and shard_count.
-    """
+    """Load all shards and return audit summary with total_records_decoded."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -363,7 +301,6 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
 
 def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], None, None]:
-    """Internal generator yielding (record, shard_name) tuples."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -398,13 +335,7 @@ def _reservoir_sample_with_audit(
     n: int,
     seed: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """
-    One-pass streaming: collect audit counters and reservoir sample simultaneously.
-    ADDED: restores Vitter's Algorithm R streaming design — avoids loading the
-    full corpus into memory before sampling. For a 1.46M-record corpus this
-    keeps memory bounded to n records rather than the full dataset.
-    Returns (reservoir, audit_dict).
-    """
+    """One-pass streaming: collect audit counters and reservoir sample simultaneously."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -430,7 +361,6 @@ def _reservoir_sample_with_audit(
                     errors += 1
                     total_parse_errors += 1
                     continue
-                # Vitter's Algorithm R reservoir sampling
                 i = total_records_decoded
                 if i < n:
                     reservoir.append(record)
@@ -452,22 +382,8 @@ def _reservoir_sample_with_audit(
     return reservoir, audit
 
 
-# ---------------------------------------------------------------------------
-# Schema validation
-# CHANGED: added type/range checks for text_entropy (numeric, non-negative),
-# paragraph_count (integer, non-negative), and token_count (integer,
-# non-negative) to close partial validation gaps identified in obs 5.
-# ---------------------------------------------------------------------------
-
-
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Check required field presence, type, range, vocabulary, and documented coverage.
-    missing_documented_fields: advisory — does not affect pass/fail.
-    vocabulary_errors: text_source must be in KNOWN_TEXT_SOURCES.
-    Type/range checks: text_length, is_precedential, citation_count,
-    text_entropy, paragraph_count, token_count.
-    """
+    """Check required field presence, type, range, vocabulary, and documented coverage."""
     if not records:
         return {
             "gate": "schema_validation",
@@ -498,17 +414,14 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
 
-        # text_length: must be int or float
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
 
-        # is_precedential: must be bool
         is_prec = r.get("is_precedential")
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
-        # citation_count: must be int, non-negative
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -517,7 +430,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
-        # text_entropy: must be numeric (int/float), non-negative
         text_entropy = r.get("text_entropy")
         if text_entropy is not None:
             if not isinstance(text_entropy, (int, float)):
@@ -525,7 +437,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(text_entropy) < 0:
                 range_errors["text_entropy"] = range_errors.get("text_entropy", 0) + 1
 
-        # paragraph_count: must be int, non-negative
         para_count = r.get("paragraph_count")
         if para_count is not None:
             if not isinstance(para_count, int):
@@ -533,7 +444,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif para_count < 0:
                 range_errors["paragraph_count"] = range_errors.get("paragraph_count", 0) + 1
 
-        # token_count: must be int, non-negative
         tok_count = r.get("token_count")
         if tok_count is not None:
             if not isinstance(tok_count, int):
@@ -541,7 +451,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
-        # text_source: must be in KNOWN_TEXT_SOURCES vocabulary
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
             vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
@@ -561,16 +470,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Gate implementations
-# CHANGED: all gates now include a "severity" field in their return dict.
-# Blocking gates: schema, A7, A8, A11, A12, A13.
-# Advisory gates: A9, B6.
-# CHANGED: removed stale sample_n and seed parameters from A11, A12, A13.
-# run_probe owns subsampling; gates receive pre-sampled lists.
-# ---------------------------------------------------------------------------
-
-
 def gate_a7_text_source_breakdown(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
@@ -578,12 +477,7 @@ def gate_a7_text_source_breakdown(
     """A7 — text_source breakdown. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A7_text_source_breakdown",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A7_text_source_breakdown", "severity": "blocking", "pass": False, "note": "No records."}
 
     counts: dict[str, int] = {}
     for r in records:
@@ -614,15 +508,10 @@ def gate_a8_text_length_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A8 — text_length distribution. severity=blocking. Pass: <25% below min_text_length."""
+    """A8 — text_length distribution. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A8_text_length_distribution",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A8_text_length_distribution", "severity": "blocking", "pass": False, "note": "No records."}
 
     lengths = [int(r.get("text_length", 0)) for r in records]
     lengths_sorted = sorted(lengths)
@@ -656,15 +545,10 @@ def gate_a9_citation_count_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A9 — citation_count distribution. severity=advisory — never blocks CI."""
+    """A9 — citation_count distribution. severity=advisory."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A9_citation_count_distribution",
-            "severity": "advisory",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A9_citation_count_distribution", "severity": "advisory", "pass": False, "note": "No records."}
 
     counts = [int(r.get("citation_count", 0)) for r in records]
     n = len(counts)
@@ -697,22 +581,12 @@ def gate_a11_tokenizer_chunk_count(
     config: ProbeConfig | None = None,
     tokenizer: Any | None = None,
 ) -> dict[str, Any]:
-    """
-    A11 — Tokenizer-aware chunk count using BAAI/bge-m3. severity=blocking.
-    tokenizer injectable — when provided, AutoTokenizer.from_pretrained not called.
-    CHANGED: removed stale sample_n and seed params — run_probe owns subsampling.
-    """
+    """A11 — Tokenizer-aware chunk count. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A11_tokenizer_chunk_count",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A11_tokenizer_chunk_count", "severity": "blocking", "pass": False, "note": "No records."}
 
     tokenizer_revision = cfg.encoder_model
-
     if tokenizer is None:
         try:
             tokenizer = AutoTokenizer.from_pretrained(cfg.encoder_model)
@@ -795,18 +669,10 @@ def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    A12 — Citation anchor survival. severity=blocking.
-    CHANGED: removed stale sample_n and seed params.
-    """
+    """A12 — Citation anchor survival. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A12_citation_anchor_survival",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A12_citation_anchor_survival", "severity": "blocking", "pass": False, "note": "No records."}
 
     has_anchor = 0
     citation_counts_found: list[int] = []
@@ -820,7 +686,6 @@ def gate_a12_citation_anchor_survival(
         citation_counts_found.append(n_matches)
         if matches:
             has_anchor += 1
-
         field_count = int(r.get("citation_count", 0))
         if field_count > 0:
             field_nonzero_total += 1
@@ -862,19 +727,10 @@ def gate_a13_sentence_density(
     config: ProbeConfig | None = None,
     nlp: Any | None = None,
 ) -> dict[str, Any]:
-    """
-    A13 — Sentence density on A8-filtered records. severity=blocking.
-    nlp injectable — when provided, spacy.load NOT called and max_length NOT mutated.
-    CHANGED: removed stale sample_n and seed params.
-    """
+    """A13 — Sentence density on A8-filtered records. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return {"gate": "A13_sentence_density", "severity": "blocking", "pass": False, "note": "No records."}
 
     spacy_version = "injected"
     if nlp is None:
@@ -928,9 +784,7 @@ def gate_a13_sentence_density(
         "below_threshold_pct": round(100.0 * below_threshold / len(substantive), 2),
         "pass": below_threshold / len(substantive) < cfg.a13_max_below_threshold_pct / 100.0,
         "note": (
-            "Evaluated on text_length >= 1500 records only (A8-filtered). "
-            "Pass threshold: <15% below 20 sentences — calibrated to corpus "
-            "(median=71.5 sentences, empirical below-rate=11%)."
+            "Evaluated on text_length >= 1500 records only (A8-filtered). Pass threshold: <15% below 20 sentences."
         ),
     }
 
@@ -939,15 +793,10 @@ def gate_b6_text_entropy_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """B6 — text_entropy distribution + spot-check. severity=advisory — always passes."""
+    """B6 — text_entropy distribution. severity=advisory — always passes."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "B6_text_entropy_distribution",
-            "severity": "advisory",
-            "pass": True,
-            "note": "No records.",
-        }
+        return {"gate": "B6_text_entropy_distribution", "severity": "advisory", "pass": True, "note": "No records."}
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
@@ -956,12 +805,10 @@ def gate_b6_text_entropy_distribution(
     spot_sample = records[: cfg.b6_entropy_spot_check_sample_n]
     deviations: list[float] = []
     for r in spot_sample:
-        text = _get_text(r)
-        computed = _shannon_entropy(text)
+        computed = _shannon_entropy(_get_text(r))
         stored = float(r.get("text_entropy", 0.0))
         deviations.append(abs(computed - stored))
     max_deviation = max(deviations) if deviations else 0.0
-    spot_consistent = max_deviation <= cfg.b6_entropy_spot_check_tolerance
 
     return {
         "gate": "B6_text_entropy_distribution",
@@ -980,7 +827,7 @@ def gate_b6_text_entropy_distribution(
         "zero_entropy_count": zero_entropy,
         "zero_entropy_pct": round(100.0 * zero_entropy / len(entropies), 2),
         "spot_check": {
-            "consistent": spot_consistent,
+            "consistent": max_deviation <= cfg.b6_entropy_spot_check_tolerance,
             "max_deviation": round(max_deviation, 4),
             "tolerance": cfg.b6_entropy_spot_check_tolerance,
             "sample_n": len(spot_sample),
@@ -990,21 +837,11 @@ def gate_b6_text_entropy_distribution(
     }
 
 
-# ---------------------------------------------------------------------------
-# Model-relevant quality signals
-# ---------------------------------------------------------------------------
-
-
 class ModelQualitySignals:
     """
     Soft quality warnings for RAG pipeline rows.
-    Uses shared _LEGAL_CITATION_RE for citation detection.
-
-    Token count terminology note:
-      schema field token_count: upstream integer, not recomputed here.
-      word_count_estimate: whitespace words — NOT HF subword token count.
-      HF subword tokens: computed by AutoTokenizer in gate_a11 only.
-      Never conflate these three.
+    word_count_estimate: whitespace-split word count — NOT HF subword token count.
+    HF subword tokens computed in gate_a11 via AutoTokenizer only.
     """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
@@ -1020,8 +857,6 @@ class ModelQualitySignals:
     def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
         signals: list[tuple[str, str]] = []
         text: str = _get_text(row) if text_field == "text" else str(row.get(text_field, ""))
-
-        # word_count_estimate: whitespace-split word count — NOT HF subword token count
         word_count_estimate = len(text.split())
 
         if word_count_estimate < 20:
@@ -1052,7 +887,6 @@ class ModelQualitySignals:
         sample_n: int = 500,
         seed: int = 0,
     ) -> dict[str, Any]:
-        """Return signal frequency counts and pct_clean for a record sample."""
         rng = random.Random(seed)
         subsample = rng.sample(records, min(sample_n, len(records)))
         signal_counts: dict[str, int] = {}
@@ -1070,16 +904,8 @@ class ModelQualitySignals:
         }
 
 
-# ---------------------------------------------------------------------------
-# Top-level probe class
-# ---------------------------------------------------------------------------
-
-
 class CourtListenerDatasetProbe:
-    """
-    Orchestrates all dataset-readiness gates.
-    validate_row removed — dead code. Full batch validation via validate_schema().
-    """
+    """Orchestrates all dataset-readiness gates."""
 
     def __init__(self, config: ProbeConfig | None = None) -> None:
         self.config = config or ProbeConfig()
@@ -1106,18 +932,115 @@ class CourtListenerDatasetProbe:
         )
 
 
-# ---------------------------------------------------------------------------
-# run_probe
-# CHANGED: restored one-pass streaming via _reservoir_sample_with_audit —
-# audit counters and reservoir sample collected in a single pass over shards.
-# Avoids loading the full 1.46M-record corpus into memory before sampling.
-# CHANGED: single spaCy load — extract metadata and pipeline from same object,
-# eliminating the double spacy.load(cfg.spacy_model) call that was present
-# (one for version metadata, one for the pipeline).
-# CHANGED: summary now splits failed into failed_blocking and failed_advisory
-# based on gate severity field. all_passed=True when only advisory gates fail.
-# --ci-mode exits 1 only when failed_blocking is non-empty.
-# ---------------------------------------------------------------------------
+def _log_report_to_wandb(
+    report: dict[str, Any],
+    entity: str,
+    project: str,
+    name: str,
+    output: Path,
+) -> None:
+    """
+    Initialize a W&B run, log all gate metrics and the full report artifact.
+    Called by main() when --log-to-wandb is set.
+    """
+    run = wandb.init(
+        project=project,
+        entity=entity,
+        job_type="dataset_probe",
+        name=name,
+        config=report["provenance"]["probe_config"],
+        tags=["data_readiness", "courtlistener"],
+    )
+
+    wandb.log(
+        {
+            "probe/all_passed": report["summary"]["all_passed"],
+            "probe/passed_count": len(report["summary"]["passed"]),
+            "probe/failed_blocking_count": len(report["summary"]["failed_blocking"]),
+            "probe/failed_advisory_count": len(report["summary"]["failed_advisory"]),
+            "probe/skipped_count": len(report["summary"]["skipped"]),
+            "probe/total_records_decoded": report["shard_audit"]["total_records_decoded"],
+            "probe/parse_errors": report["shard_audit"]["total_parse_errors"],
+            "probe/subset_n": report["subset_n"],
+            "probe/pct_clean": report["quality_signals"]["pct_clean"],
+        }
+    )
+
+    for gate_name, gate_result in report["gates"].items():
+        if "pass" in gate_result:
+            wandb.log({f"gate/{gate_name}/pass": int(gate_result["pass"])})
+
+    if "A8" in report["gates"]:
+        a8 = report["gates"]["A8"]
+        for key in (
+            "p5",
+            "p10",
+            "p25",
+            "p75",
+            "p90",
+            "p95",
+            "mean",
+            "median",
+            "below_provisional_pct",
+            "below_provisional_count",
+        ):
+            if key in a8:
+                wandb.log({f"gate/A8/{key}": a8[key]})
+
+    if "A12" in report["gates"]:
+        a12 = report["gates"]["A12"]
+        wandb.log(
+            {
+                "gate/A12/pct_with_citation_anchor": a12.get("pct_with_citation_anchor", 0),
+                "gate/A12/mean_anchors_per_doc": a12.get("mean_anchors_per_doc", 0),
+                "gate/A12/field_nonzero_regex_zero_pct": (
+                    a12["citation_field_vs_regex"]["field_nonzero_regex_zero_pct"]
+                ),
+            }
+        )
+
+    if "A11" in report["gates"] and "median_chunks_per_doc" in report["gates"]["A11"]:
+        a11 = report["gates"]["A11"]
+        wandb.log(
+            {
+                "gate/A11/median_chunks_per_doc": a11["median_chunks_per_doc"],
+                "gate/A11/mean_chunks_per_doc": a11["mean_chunks_per_doc"],
+                "gate/A11/multi_chunk_pct": a11["multi_chunk_pct"],
+                "gate/A11/mean_token_length": a11["mean_token_length"],
+            }
+        )
+
+    if "A13" in report["gates"] and "median_sentences" in report["gates"]["A13"]:
+        a13 = report["gates"]["A13"]
+        wandb.log(
+            {
+                "gate/A13/median_sentences": a13["median_sentences"],
+                "gate/A13/below_threshold_pct": a13["below_threshold_pct"],
+                "gate/A13/records_after_a8_filter": a13["records_after_a8_filter"],
+            }
+        )
+
+    if "B6" in report["gates"]:
+        b6 = report["gates"]["B6"]
+        for key in ("p5", "p10", "p25", "p75", "mean", "median", "zero_entropy_count"):
+            if key in b6:
+                wandb.log({f"gate/B6/{key}": b6[key]})
+
+    artifact = wandb.Artifact(
+        name="dataset_probe_report",
+        type="probe_report",
+        description="Full dataset readiness probe — CourtListener federal appellate corpus",
+        metadata={
+            "probe_version": report["provenance"]["probe_version"],
+            "git_sha": report["provenance"]["git_sha"],
+            "subset_n": report["subset_n"],
+            "all_passed": report["summary"]["all_passed"],
+        },
+    )
+    artifact.add_file(str(output))
+    run.log_artifact(artifact)
+    wandb.finish()
+    print(f"[dataset_probe] W&B run complete — https://wandb.ai/{entity}/{project}")
 
 
 def run_probe(
@@ -1130,29 +1053,19 @@ def run_probe(
     config: ProbeConfig | None = None,
     log_to_wandb: bool = False,
 ) -> dict[str, Any]:
-    """
-    Run all dataset-readiness gates on a reservoir-sampled subset of the corpus.
-    Writes a JSON report to output. No side effects on corpus shards.
-    Uses one-pass streaming (Vitter's Algorithm R) — bounded memory regardless
-    of corpus size.
-    """
+    """Run all gates on a reservoir-sampled subset. No side effects on corpus shards."""
     cfg = config or ProbeConfig()
 
     print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
-
-    # One-pass streaming: audit counters + reservoir sample simultaneously
     records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
     print(f"[dataset_probe] Loaded {len(records)} records.")
 
-    rng = random.Random(seed + 1)  # offset seed to avoid correlation with sampling
+    rng = random.Random(seed + 1)
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
     a13_candidates = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
     a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
 
-    # Single spaCy load — extract metadata and pipeline from the same object.
-    # CHANGED: previously called spacy.load() twice: once for version metadata
-    # and once for the pipeline. Now load once and extract both from same object.
     spacy_version = "unknown"
     spacy_model_version = "unknown"
     nlp_pipeline: Any | None = None
@@ -1163,13 +1076,11 @@ def run_probe(
             if "sentencizer" not in nlp_pipeline.pipe_names:
                 nlp_pipeline.add_pipe("sentencizer")
             nlp_pipeline.max_length = 2_000_000
-            # Extract metadata from the already-loaded pipeline object
             spacy_version = spacy.__version__
             spacy_model_version = nlp_pipeline.meta.get("version", "unknown")
         except Exception:
             nlp_pipeline = None
     else:
-        # skip_spacy=True: still try to read spaCy version without loading a model
         try:
             spacy_version = spacy.__version__
         except Exception:
@@ -1199,19 +1110,14 @@ def run_probe(
 
     print("[dataset_probe] Gate: schema validation ...")
     report["gates"]["schema"] = validate_schema(records)
-
     print("[dataset_probe] Gate A7: text_source breakdown ...")
     report["gates"]["A7"] = gate_a7_text_source_breakdown(records, cfg)
-
     print("[dataset_probe] Gate A8: text_length distribution ...")
     report["gates"]["A8"] = gate_a8_text_length_distribution(records, cfg)
-
     print("[dataset_probe] Gate A9: citation_count distribution ...")
     report["gates"]["A9"] = gate_a9_citation_count_distribution(records, cfg)
-
     print("[dataset_probe] Gate A12: citation anchor survival ...")
     report["gates"]["A12"] = gate_a12_citation_anchor_survival(a12_sample, config=cfg)
-
     print("[dataset_probe] Gate B6: text_entropy distribution ...")
     report["gates"]["B6"] = gate_b6_text_entropy_distribution(records, cfg)
 
@@ -1230,7 +1136,6 @@ def run_probe(
     print("[dataset_probe] Quality signals ...")
     report["quality_signals"] = ModelQualitySignals.summarize(records, sample_n=cfg.quality_signals_sample_n)
 
-    # Build summary — split by severity
     passed: list[str] = []
     failed_blocking: list[str] = []
     failed_advisory: list[str] = []
@@ -1251,10 +1156,8 @@ def run_probe(
         "passed": passed,
         "failed_blocking": failed_blocking,
         "failed_advisory": failed_advisory,
-        # Legacy "failed" key kept for backward compat — all failures combined
         "failed": failed_blocking + failed_advisory,
         "skipped": skipped,
-        # all_passed is True when no BLOCKING gates fail (advisory failures OK)
         "all_passed": len(failed_blocking) == 0,
     }
 
@@ -1285,11 +1188,6 @@ def run_probe(
     return report
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
@@ -1303,7 +1201,33 @@ def main() -> None:
         action="store_true",
         help="Exit 1 if any BLOCKING gate fails. Advisory failures do not trigger exit 1.",
     )
+    # ADDED: W&B CLI flags — enable automatic logging with a single flag
+    parser.add_argument(
+        "--log-to-wandb",
+        action="store_true",
+        help="Log gate metrics and report artifact to Weights & Biases.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default="phl690-harvard-extension-schol",
+        help="W&B entity (team or username). Default: phl690-harvard-extension-schol",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="cs1090b",
+        help="W&B project name. Default: cs1090b",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="W&B run name. Default: dataset_probe_v{PROBE_VERSION}_{subset}k",
+    )
+
     args = parser.parse_args()
+
     report = run_probe(
         data_dir=args.data_dir,
         subset=args.subset,
@@ -1312,6 +1236,18 @@ def main() -> None:
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
     )
+
+    # W&B logging — called after run_probe so report is fully written first
+    if args.log_to_wandb:
+        run_name = args.wandb_name or f"dataset_probe_v{PROBE_VERSION}_{args.subset // 1000}k"
+        _log_report_to_wandb(
+            report=report,
+            entity=args.wandb_entity,
+            project=args.wandb_project,
+            name=run_name,
+            output=args.output,
+        )
+
     if args.ci_mode and not report["summary"]["all_passed"]:
         print(f"[dataset_probe] CI mode: blocking gate failures — {report['summary']['failed_blocking']}")
         sys.exit(1)
