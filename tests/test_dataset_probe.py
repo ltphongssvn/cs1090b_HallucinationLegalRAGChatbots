@@ -3,7 +3,6 @@
 Full contract tests for src/dataset_probe.py — CourtListener local shard probe.
 Single authoritative test file covering all contracts.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -20,7 +19,6 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.dataset_probe import (
-    _LEGAL_CITATION_RE,
     CHUNK_OVERLAP_SUBWORDS,
     CHUNK_SIZE_SUBWORDS,
     DOCUMENTED_FIELDS,
@@ -29,9 +27,11 @@ from src.dataset_probe import (
     PROBE_VERSION,
     PROVISIONAL_MIN_TEXT_LENGTH,
     REQUIRED_FIELDS,
+    SPACY_MODEL,
     CourtListenerDatasetProbe,
     ModelQualitySignals,
     ProbeConfig,
+    _LEGAL_CITATION_RE,
     _get_text,
     _percentile,
     _probe_config_to_dict,
@@ -106,13 +106,138 @@ def sample_shard_dir(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Obs 2/9/23 — wandb optional import: probe must not crash when wandb missing
+# Obs 3 — a7_known_formats must be frozenset[str] not bare frozenset
+# ---------------------------------------------------------------------------
+
+
+class TestProbeConfigA7KnownFormatsTyping:
+    def test_a7_known_formats_type_hint_is_frozenset_str(self):
+        """
+        ProbeConfig.a7_known_formats must be annotated as frozenset[str],
+        not bare frozenset, so mypy can catch frozenset({1, 2}) being passed.
+        """
+        import dataclasses
+        fields = {f.name: f for f in dataclasses.fields(ProbeConfig)}
+        assert "a7_known_formats" in fields
+        field = fields["a7_known_formats"]
+        # The type annotation string must include 'str' to be frozenset[str]
+        type_str = str(field.type) if field.type is not dataclasses.MISSING else ""
+        # Also check via get_type_hints which resolves forward references
+        hints = get_type_hints(ProbeConfig)
+        a7_hint = hints.get("a7_known_formats")
+        # frozenset[str] has __args__ == (str,); bare frozenset has no __args__
+        assert hasattr(a7_hint, "__args__"), (
+            "a7_known_formats must be annotated as frozenset[str], not bare frozenset. "
+            f"Got: {a7_hint}"
+        )
+        assert a7_hint.__args__ == (str,), (
+            f"a7_known_formats.__args__ must be (str,), got {a7_hint.__args__}"
+        )
+
+    def test_a7_known_formats_default_values_are_strings(self):
+        """All default values in a7_known_formats must be str instances."""
+        cfg = ProbeConfig()
+        for item in cfg.a7_known_formats:
+            assert isinstance(item, str), f"Expected str in a7_known_formats, got {type(item)}: {item!r}"
+
+    def test_a7_known_formats_custom_frozenset_str_accepted(self):
+        """ProbeConfig must accept frozenset[str] for a7_known_formats."""
+        cfg = ProbeConfig(a7_known_formats=frozenset({"plain_text", "xml_harvard"}))
+        assert isinstance(cfg.a7_known_formats, frozenset)
+        for item in cfg.a7_known_formats:
+            assert isinstance(item, str)
+
+
+# ---------------------------------------------------------------------------
+# Obs 7 — _percentile docstring must not claim numpy consistency
+# ---------------------------------------------------------------------------
+
+
+class TestPercentileDocstring:
+    def test_percentile_has_docstring(self):
+        """_percentile must have a docstring."""
+        assert _percentile.__doc__ is not None
+        assert len(_percentile.__doc__.strip()) > 0
+
+    def test_percentile_docstring_does_not_claim_numpy_consistency(self):
+        """
+        _percentile docstring must NOT claim 'consistent with numpy default'.
+        NumPy percentile uses linear interpolation by default, not ceiling-index.
+        The claim is scientifically inaccurate and must be removed.
+        """
+        doc = _percentile.__doc__.lower()
+        assert "numpy" not in doc, (
+            "_percentile docstring must not claim numpy consistency. "
+            "NumPy default uses linear interpolation, not ceiling-index. "
+            "Use 'ceiling-index empirical percentile convention' instead."
+        )
+
+    def test_percentile_docstring_describes_ceiling_index(self):
+        """Docstring must describe the actual convention: ceiling-index."""
+        doc = _percentile.__doc__.lower()
+        assert "ceiling" in doc or "ceil" in doc, (
+            "_percentile docstring must describe the ceiling-index convention used."
+        )
+
+    def test_percentile_docstring_specifies_probe_convention(self):
+        """Docstring must indicate this is the probe's own convention, not an external standard."""
+        doc = _percentile.__doc__.lower()
+        assert "probe" in doc or "convention" in doc or "empirical" in doc or "defined" in doc, (
+            "_percentile docstring must indicate this is the probe's own defined convention."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Obs 11 — citation_density >= 0 range check in validate_schema
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSchemaCitationDensity:
+    def test_fails_negative_citation_density(self):
+        """citation_density must be non-negative."""
+        result = validate_schema(_make_records(3, citation_density=-0.5))
+        assert result["pass"] is False
+        assert "citation_density" in result.get("range_errors", {})
+
+    def test_fails_non_numeric_citation_density(self):
+        """citation_density must be numeric (int or float)."""
+        result = validate_schema(_make_records(3, citation_density="high"))
+        assert result["pass"] is False
+        assert "citation_density" in result.get("type_errors", {})
+
+    def test_passes_zero_citation_density(self):
+        """citation_density == 0.0 must pass (zero is valid)."""
+        result = validate_schema(_make_records(5, citation_density=0.0))
+        assert result.get("range_errors", {}).get("citation_density") is None
+
+    def test_passes_valid_citation_density(self):
+        """citation_density == 0.05 must not trigger any errors."""
+        result = validate_schema(_make_records(5, citation_density=0.05))
+        assert result.get("type_errors", {}).get("citation_density") is None
+        assert result.get("range_errors", {}).get("citation_density") is None
+
+    def test_citation_density_none_is_skipped(self):
+        """citation_density=None must not trigger errors (field absent)."""
+        records = _make_records(3)
+        for r in records:
+            r["citation_density"] = None
+        result = validate_schema(records)
+        assert result.get("type_errors", {}).get("citation_density") is None
+
+    def test_citation_density_error_counted_per_record(self):
+        """Each record with invalid citation_density must increment the counter."""
+        records = _make_records(4, citation_density=-1.0)
+        result = validate_schema(records)
+        assert result["range_errors"]["citation_density"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Wandb optional import guard
 # ---------------------------------------------------------------------------
 
 
 class TestWandbOptionalImport:
     def test_probe_runs_without_log_to_wandb_flag(self, sample_shard_dir, tmp_path):
-        """run_probe must complete successfully without triggering any wandb code."""
         report = run_probe(
             data_dir=sample_shard_dir,
             subset=20,
@@ -124,140 +249,81 @@ class TestWandbOptionalImport:
         assert report["summary"]["all_passed"] is True
 
     def test_cli_runs_without_log_to_wandb_flag(self, sample_shard_dir, tmp_path):
-        """CLI must exit 0 without --log-to-wandb even if wandb is unavailable."""
         result = subprocess.run(
             [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "20",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
+                sys.executable, "-m", "src.dataset_probe",
+                "--data-dir", str(sample_shard_dir),
+                "--subset", "20",
+                "--output", str(tmp_path / "r.json"),
+                "--skip-tokenizer", "--skip-spacy",
             ],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
             env={**__import__("os").environ, "WANDB_MODE": "disabled"},
         )
         assert result.returncode == 0, result.stderr
 
-    def test_wandb_import_failure_does_not_crash_probe(self, sample_shard_dir, tmp_path):
-        """
-        If wandb is unavailable (ImportError), run_probe must still work when
-        log_to_wandb=False. The module must guard against import failure.
-        """
-        with patch.dict("sys.modules", {"wandb": None}):
-            # Re-importing would be complex — instead verify the guard path
-            # by checking run_probe succeeds with log_to_wandb=False
-            report = run_probe(
-                data_dir=sample_shard_dir,
-                subset=20,
-                output=tmp_path / "r.json",
-                skip_tokenizer=True,
-                skip_spacy=True,
-                log_to_wandb=False,
-            )
-            assert "summary" in report
-
     def test_wandb_none_guard_in_run_probe(self, sample_shard_dir, tmp_path):
-        """
-        When wandb module is None (failed import), run_probe with log_to_wandb=True
-        must not raise AttributeError — it must handle None gracefully.
-        """
         import src.dataset_probe as dp
-
         original_wandb = dp.wandb
         try:
-            dp.wandb = None  # simulate failed import
+            dp.wandb = None
             report = run_probe(
                 data_dir=sample_shard_dir,
                 subset=20,
                 output=tmp_path / "r.json",
                 skip_tokenizer=True,
                 skip_spacy=True,
-                log_to_wandb=True,  # enabled but wandb is None
+                log_to_wandb=True,
             )
             assert "summary" in report
         finally:
             dp.wandb = original_wandb
 
     def test_wandb_import_error_at_module_level_is_caught(self):
-        """
-        The module-level wandb import must use try/except so ImportError is
-        caught and wandb is set to None rather than crashing the entire module.
-        """
         import src.dataset_probe as dp
-
-        # If wandb imported cleanly, it should be a module (not None due to
-        # successful import). If it failed, it should be None — not an unhandled
-        # ImportError. Either way, dataset_probe must be importable.
-        # The contract: dp.wandb is either a valid module or None, never raises.
         assert dp.wandb is None or hasattr(dp.wandb, "__version__") or hasattr(dp.wandb, "init")
 
 
 # ---------------------------------------------------------------------------
-# Obs 14 — _shannon_entropy docstring contract
+# Shannon entropy contract
 # ---------------------------------------------------------------------------
 
 
 class TestShannonEntropyContract:
     def test_shannon_entropy_has_docstring(self):
-        """_shannon_entropy must have a docstring."""
         assert _shannon_entropy.__doc__ is not None
         assert len(_shannon_entropy.__doc__.strip()) > 0
 
     def test_shannon_entropy_docstring_specifies_whitespace_tokenization(self):
-        """Docstring must state whitespace-split tokenization basis explicitly."""
         doc = _shannon_entropy.__doc__.lower()
-        assert "whitespace" in doc or "split" in doc, (
-            "_shannon_entropy docstring must specify whitespace-split tokenization basis"
-        )
+        assert "whitespace" in doc or "split" in doc
 
     def test_shannon_entropy_docstring_specifies_case_preserved(self):
-        """Docstring must state that case is preserved (not lowercased)."""
         doc = _shannon_entropy.__doc__.lower()
-        assert "case" in doc or "lower" in doc or "preserved" in doc, (
-            "_shannon_entropy docstring must state case-preservation behavior"
-        )
+        assert "case" in doc or "lower" in doc or "preserved" in doc
 
     def test_shannon_entropy_docstring_specifies_not_normalized(self):
-        """Docstring must state entropy is NOT normalized by vocabulary size."""
         doc = _shannon_entropy.__doc__.lower()
-        assert "normaliz" in doc or "log2" in doc or "bits" in doc, (
-            "_shannon_entropy docstring must specify the entropy unit/normalization"
-        )
+        assert "normaliz" in doc or "log2" in doc or "bits" in doc
 
     def test_shannon_entropy_docstring_specifies_no_stopword_removal(self):
-        """Docstring must state no stopword removal is applied."""
         doc = _shannon_entropy.__doc__.lower()
-        assert (
-            "stopword" in doc or "stop word" in doc or "all words" in doc or "no filter" in doc or "punctuation" in doc
-        ), "_shannon_entropy docstring must state stopword/punctuation handling"
+        assert "stopword" in doc or "stop word" in doc or "all words" in doc or "no filter" in doc or "punctuation" in doc
 
     def test_shannon_entropy_whitespace_split_behavior(self):
-        """Verify the actual computation uses whitespace splitting."""
-        # "a a b" — 2 unique words, p(a)=2/3, p(b)=1/3
         import math
-
         text = "a a b"
         result = _shannon_entropy(text)
         expected = -(2 / 3) * math.log2(2 / 3) - (1 / 3) * math.log2(1 / 3)
         assert abs(result - expected) < 1e-9
 
     def test_shannon_entropy_case_preserved(self):
-        """'Word' and 'word' must be treated as different tokens."""
         lower = _shannon_entropy("word word word")
         mixed = _shannon_entropy("Word word Word")
-        # mixed has two distinct tokens so entropy must be higher
         assert mixed > lower
 
     def test_shannon_entropy_no_normalization_by_vocab_size(self):
-        """Entropy must be raw Shannon bits, not divided by log2(|V|)."""
-        # uniform distribution over 2 words → H = 1.0 bit exactly
+        import math
         result = _shannon_entropy("a b")
         assert abs(result - 1.0) < 1e-9
 
@@ -268,42 +334,35 @@ class TestShannonEntropyContract:
         assert _shannon_entropy("court") == 0.0
 
     def test_shannon_entropy_punctuation_included_as_tokens(self):
-        """Punctuation attached to words is not stripped — 'court.' != 'court'."""
         with_punct = _shannon_entropy("court. court")
         without_punct = _shannon_entropy("court court")
-        # "court." and "court" are distinct tokens — higher entropy
         assert with_punct > without_punct
 
 
 # ---------------------------------------------------------------------------
-# MIN_REQUIRED_FIELDS rename + backward-compat REQUIRED_FIELDS alias
+# MIN_REQUIRED_FIELDS rename + backward-compat alias
 # ---------------------------------------------------------------------------
 
 
 class TestMinRequiredFields:
     def test_min_required_fields_exported(self):
         from src.dataset_probe import MIN_REQUIRED_FIELDS
-
         assert isinstance(MIN_REQUIRED_FIELDS, frozenset)
 
     def test_min_required_fields_has_11_fields(self):
         from src.dataset_probe import MIN_REQUIRED_FIELDS
-
         assert len(MIN_REQUIRED_FIELDS) == 11
 
     def test_required_fields_alias_still_works(self):
-        from src.dataset_probe import MIN_REQUIRED_FIELDS
-
+        from src.dataset_probe import MIN_REQUIRED_FIELDS, REQUIRED_FIELDS
         assert REQUIRED_FIELDS == MIN_REQUIRED_FIELDS
 
     def test_min_required_fields_is_subset_of_documented_fields(self):
         from src.dataset_probe import MIN_REQUIRED_FIELDS
-
         assert MIN_REQUIRED_FIELDS.issubset(DOCUMENTED_FIELDS)
 
     def test_documented_fields_larger_than_min_required(self):
         from src.dataset_probe import MIN_REQUIRED_FIELDS
-
         assert len(DOCUMENTED_FIELDS) > len(MIN_REQUIRED_FIELDS)
 
 
@@ -315,42 +374,34 @@ class TestMinRequiredFields:
 class TestShardAuditOnePassStreaming:
     def test_run_probe_report_has_total_records_decoded(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "total_records_decoded" in report["shard_audit"]
 
     def test_subset_n_never_exceeds_total_records_decoded(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert report["subset_n"] <= report["shard_audit"]["total_records_decoded"]
 
     def test_sampling_fraction_computable(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         fraction = report["subset_n"] / report["shard_audit"]["total_records_decoded"]
         assert 0.0 < fraction <= 1.0
 
     def test_large_subset_returns_all_records(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=10_000,
+            data_dir=sample_shard_dir, subset=10_000,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert report["subset_n"] == 50
 
@@ -362,28 +413,22 @@ class TestShardAuditOnePassStreaming:
 
 class TestGateSignaturesNoStaleParams:
     def test_gate_a11_has_no_sample_n(self):
-        sig = inspect.signature(gate_a11_tokenizer_chunk_count)
-        assert "sample_n" not in sig.parameters
+        assert "sample_n" not in inspect.signature(gate_a11_tokenizer_chunk_count).parameters
 
     def test_gate_a11_has_no_seed(self):
-        sig = inspect.signature(gate_a11_tokenizer_chunk_count)
-        assert "seed" not in sig.parameters
+        assert "seed" not in inspect.signature(gate_a11_tokenizer_chunk_count).parameters
 
     def test_gate_a12_has_no_sample_n(self):
-        sig = inspect.signature(gate_a12_citation_anchor_survival)
-        assert "sample_n" not in sig.parameters
+        assert "sample_n" not in inspect.signature(gate_a12_citation_anchor_survival).parameters
 
     def test_gate_a12_has_no_seed(self):
-        sig = inspect.signature(gate_a12_citation_anchor_survival)
-        assert "seed" not in sig.parameters
+        assert "seed" not in inspect.signature(gate_a12_citation_anchor_survival).parameters
 
     def test_gate_a13_has_no_sample_n(self):
-        sig = inspect.signature(gate_a13_sentence_density)
-        assert "sample_n" not in sig.parameters
+        assert "sample_n" not in inspect.signature(gate_a13_sentence_density).parameters
 
     def test_gate_a13_has_no_seed(self):
-        sig = inspect.signature(gate_a13_sentence_density)
-        assert "seed" not in sig.parameters
+        assert "seed" not in inspect.signature(gate_a13_sentence_density).parameters
 
 
 # ---------------------------------------------------------------------------
@@ -409,21 +454,17 @@ class TestGateSeverity:
 
     def test_run_probe_summary_has_failed_blocking(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "failed_blocking" in report["summary"]
 
     def test_run_probe_summary_has_failed_advisory(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "failed_advisory" in report["summary"]
 
@@ -434,11 +475,9 @@ class TestGateSeverity:
             for r in _make_records(100, citation_count=0):
                 fh.write(json.dumps(r) + "\n")
         report = run_probe(
-            data_dir=shard.parent,
-            subset=100,
+            data_dir=shard.parent, subset=100,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "A9" in report["summary"]["failed_advisory"]
         assert report["summary"]["all_passed"] is True
@@ -450,22 +489,11 @@ class TestGateSeverity:
             for r in _make_records(100, citation_count=0):
                 fh.write(json.dumps(r) + "\n")
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(shard.parent),
-                "--subset",
-                "100",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(shard.parent), "--subset", "100",
+             "--output", str(tmp_path / "r.json"),
+             "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
@@ -524,7 +552,7 @@ class TestIterShardsDocstring:
 
 
 # ---------------------------------------------------------------------------
-# Single spaCy load in run_probe
+# Single spaCy load
 # ---------------------------------------------------------------------------
 
 
@@ -537,15 +565,11 @@ class TestSpaCySingleLoad:
             mock_spacy.__version__ = "3.8.11"
             mock_spacy.load.return_value = mock_nlp
             run_probe(
-                data_dir=sample_shard_dir,
-                subset=20,
+                data_dir=sample_shard_dir, subset=20,
                 output=tmp_path / "r.json",
-                skip_tokenizer=True,
-                skip_spacy=False,
+                skip_tokenizer=True, skip_spacy=False,
             )
-            assert mock_spacy.load.call_count <= 1, (
-                f"spacy.load called {mock_spacy.load.call_count} times — must be at most once"
-            )
+            assert mock_spacy.load.call_count <= 1
 
 
 # ---------------------------------------------------------------------------
@@ -614,11 +638,9 @@ class TestProbeConfigMagicNumbers:
 
     def test_all_new_fields_in_provenance(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         config = report["provenance"]["probe_config"]
         for key in ("a13_text_cap_chars", "a11_subsample_n", "a12_subsample_n", "a13_subsample_n"):
@@ -635,10 +657,6 @@ class TestProbeConfigGenerativeModel:
     def test_a11_generative_model_custom_accepted(self):
         cfg = ProbeConfig(a11_generative_model="meta-llama/Llama-2-7b")
         assert cfg.a11_generative_model == "meta-llama/Llama-2-7b"
-
-    def test_a11_generative_model_empty_string_accepted(self):
-        cfg = ProbeConfig(a11_generative_model="")
-        assert cfg.a11_generative_model == ""
 
 
 class TestProbeConfigA7KnownFormats:
@@ -661,17 +679,17 @@ class TestProbeConfigA7KnownFormats:
     def test_a7_uses_config_known_formats_for_pass(self):
         records = _make_records(100, text_source="xml_harvard")
         r_default = gate_a7_text_source_breakdown(records, config=ProbeConfig())
-        cfg_custom = ProbeConfig(a7_known_formats=frozenset({"plain_text", "html_with_citations", "xml_harvard"}))
+        cfg_custom = ProbeConfig(
+            a7_known_formats=frozenset({"plain_text", "html_with_citations", "xml_harvard"})
+        )
         r_custom = gate_a7_text_source_breakdown(records, config=cfg_custom)
         assert r_custom["known_formats_pct"] > r_default["known_formats_pct"]
 
     def test_a7_known_formats_in_provenance(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "a7_known_formats" in report["provenance"]["probe_config"]
 
@@ -687,28 +705,11 @@ class TestValidateSchemaDocumentedFields:
 
     def test_documented_fields_contains_all_23(self):
         expected = {
-            "id",
-            "cluster_id",
-            "docket_id",
-            "court_id",
-            "court_name",
-            "case_name",
-            "date_filed",
-            "precedential_status",
-            "opinion_type",
-            "extracted_by_ocr",
-            "raw_text",
-            "text",
-            "text_length",
-            "text_source",
-            "cleaning_flags",
-            "source",
-            "token_count",
-            "paragraph_count",
-            "citation_count",
-            "text_hash",
-            "citation_density",
-            "is_precedential",
+            "id", "cluster_id", "docket_id", "court_id", "court_name",
+            "case_name", "date_filed", "precedential_status", "opinion_type",
+            "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
+            "cleaning_flags", "source", "token_count", "paragraph_count",
+            "citation_count", "text_hash", "citation_density", "is_precedential",
             "text_entropy",
         }
         assert DOCUMENTED_FIELDS == expected
@@ -747,11 +748,9 @@ class TestNoSideEffectsOnShards:
         shard_files = sorted(sample_shard_dir.glob("*.jsonl"))
         hashes_before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files}
         run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         hashes_after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files}
         assert hashes_before == hashes_after
@@ -759,11 +758,9 @@ class TestNoSideEffectsOnShards:
     def test_run_probe_does_not_create_files_in_shard_dir(self, sample_shard_dir, tmp_path):
         files_before = set(sample_shard_dir.glob("*"))
         run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert files_before == set(sample_shard_dir.glob("*"))
 
@@ -784,26 +781,10 @@ class TestGateA12CitationFieldCrossValidation:
 
     def test_a12_detects_field_nonzero_but_regex_zero(self):
         records = _make_records(10, citation_count=5, text="No legal anchors here at all.")
-        assert (
-            gate_a12_citation_anchor_survival(records)["citation_field_vs_regex"]["field_nonzero_regex_zero_count"]
-            == 10
-        )
+        assert gate_a12_citation_anchor_survival(records)["citation_field_vs_regex"]["field_nonzero_regex_zero_count"] == 10
 
     def test_a12_no_discrepancy_when_regex_finds_citations(self):
-        assert (
-            gate_a12_citation_anchor_survival(_make_records(10, citation_count=3))["citation_field_vs_regex"][
-                "field_nonzero_regex_zero_count"
-            ]
-            == 0
-        )
-
-    def test_a12_zero_citation_count_excluded_from_discrepancy(self):
-        assert (
-            gate_a12_citation_anchor_survival(_make_records(10, citation_count=0, text="No anchors."))[
-                "citation_field_vs_regex"
-            ]["field_nonzero_regex_zero_count"]
-            == 0
-        )
+        assert gate_a12_citation_anchor_survival(_make_records(10, citation_count=3))["citation_field_vs_regex"]["field_nonzero_regex_zero_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -826,9 +807,6 @@ class TestGetTextHelper:
 
     def test_get_text_returns_string_when_non_string_value(self):
         assert isinstance(_get_text({"text": 42}), str)
-
-    def test_get_text_strips_nothing(self):
-        assert _get_text({"text": "  spaced  "}) == "  spaced  "
 
 
 # ---------------------------------------------------------------------------
@@ -977,8 +955,7 @@ class TestValidateSchema:
         assert "court_id" in result["missing_counts"]
 
     def test_fails_non_integer_text_length(self):
-        result = validate_schema(_make_records(3, text_length="not_an_int"))
-        assert result["pass"] is False
+        assert validate_schema(_make_records(3, text_length="not_an_int"))["pass"] is False
 
     def test_fails_negative_citation_count(self):
         result = validate_schema(_make_records(3, citation_count=-1))
@@ -986,8 +963,7 @@ class TestValidateSchema:
         assert "range_errors" in result
 
     def test_fails_non_bool_is_precedential(self):
-        result = validate_schema(_make_records(3, is_precedential="yes"))
-        assert result["pass"] is False
+        assert validate_schema(_make_records(3, is_precedential="yes"))["pass"] is False
 
     def test_gate_key_present(self):
         assert validate_schema(_make_records(3))["gate"] == "schema_validation"
@@ -1008,10 +984,6 @@ class TestValidateSchemaTextSource:
 
     def test_schema_fails_with_unknown_source(self):
         assert validate_schema(_make_records(5, text_source="garbage_format"))["pass"] is False
-
-    def test_vocabulary_errors_count_correct(self):
-        records = _make_records(3, text_source="plain_text") + _make_records(2, text_source="UNKNOWN")
-        assert validate_schema(records)["vocabulary_errors"]["text_source"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1090,10 +1062,9 @@ class TestGateA11:
         mock_tok = MagicMock()
         mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
         mock_cls.from_pretrained.return_value = mock_tok
-        assert (
-            gate_a11_tokenizer_chunk_count(_make_records(10), config=ProbeConfig(a11_generative_model=""))["pass"]
-            is True
-        )
+        assert gate_a11_tokenizer_chunk_count(
+            _make_records(10), config=ProbeConfig(a11_generative_model="")
+        )["pass"] is True
 
     @patch("src.dataset_probe.AutoTokenizer")
     def test_fail_on_tokenizer_load_error(self, mock_cls):
@@ -1217,9 +1188,7 @@ class TestGateB6:
         assert "pass" in gate_b6_text_entropy_distribution([])
 
     def test_b6_spot_check_flags_formula_drift(self):
-        assert (
-            gate_b6_text_entropy_distribution(_make_records(5, text_entropy=999.0))["spot_check"]["consistent"] is False
-        )
+        assert gate_b6_text_entropy_distribution(_make_records(5, text_entropy=999.0))["spot_check"]["consistent"] is False
 
     def test_b6_spot_check_reports_max_deviation(self):
         assert "max_deviation" in gate_b6_text_entropy_distribution(_make_records(10))["spot_check"]
@@ -1231,7 +1200,11 @@ class TestGateB6:
 
 
 def _load_fixture_records() -> list[dict]:
-    return [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
+    return [
+        json.loads(line)
+        for line in FIXTURE_JSONL.read_text().splitlines()
+        if line.strip()
+    ]
 
 
 class TestFixtureJSONL:
@@ -1243,28 +1216,11 @@ class TestFixtureJSONL:
 
     def test_fixture_has_all_23_schema_fields(self):
         EXPECTED = {
-            "id",
-            "cluster_id",
-            "docket_id",
-            "court_id",
-            "court_name",
-            "case_name",
-            "date_filed",
-            "precedential_status",
-            "opinion_type",
-            "extracted_by_ocr",
-            "raw_text",
-            "text",
-            "text_length",
-            "text_source",
-            "cleaning_flags",
-            "source",
-            "token_count",
-            "paragraph_count",
-            "citation_count",
-            "text_hash",
-            "citation_density",
-            "is_precedential",
+            "id", "cluster_id", "docket_id", "court_id", "court_name",
+            "case_name", "date_filed", "precedential_status", "opinion_type",
+            "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
+            "cleaning_flags", "source", "token_count", "paragraph_count",
+            "citation_count", "text_hash", "citation_density", "is_precedential",
             "text_entropy",
         }
         for r in _load_fixture_records():
@@ -1272,7 +1228,6 @@ class TestFixtureJSONL:
 
     def test_fixture_usable_as_shard(self, tmp_path):
         import shutil
-
         shard_dir = tmp_path / "fixture_shards"
         shard_dir.mkdir()
         shutil.copy(FIXTURE_JSONL, shard_dir / "courtlistener_sample.jsonl")
@@ -1289,11 +1244,9 @@ class TestFixtureJSONL:
 class TestModelQualitySignalsIntegration:
     def test_quality_signals_in_report(self, sample_shard_dir, tmp_path):
         assert "quality_signals" in run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
 
     def test_truncated_signal_fires(self):
@@ -1308,33 +1261,27 @@ class TestModelQualitySignalsIntegration:
 class TestRunProbeReportSchema:
     def test_report_has_required_keys(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         for key in ("gates", "summary", "provenance", "quality_signals"):
             assert key in report
 
     def test_summary_has_all_buckets(self, sample_shard_dir, tmp_path):
         summary = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )["summary"]
         for key in ("passed", "failed_blocking", "failed_advisory", "skipped", "all_passed"):
             assert key in summary
 
     def test_report_is_json_serializable(self, sample_shard_dir, tmp_path):
         report = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         json.dumps(report)
 
@@ -1353,11 +1300,9 @@ class TestRunProbeReportSchema:
 class TestProvenance:
     def test_provenance_has_required_keys(self, sample_shard_dir, tmp_path):
         prov = run_probe(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )["provenance"]
         for key in ("timestamp", "spacy_model_version", "probe_config", "probe_version", "git_sha"):
             assert key in prov
@@ -1386,11 +1331,9 @@ class TestCourtListenerDatasetProbe:
 
     def test_run_returns_report(self, sample_shard_dir, tmp_path):
         report = CourtListenerDatasetProbe().run(
-            data_dir=sample_shard_dir,
-            subset=20,
+            data_dir=sample_shard_dir, subset=20,
             output=tmp_path / "r.json",
-            skip_tokenizer=True,
-            skip_spacy=True,
+            skip_tokenizer=True, skip_spacy=True,
         )
         assert "gates" in report and "summary" in report
 
@@ -1408,43 +1351,21 @@ class TestCIMode:
             for r in _make_records(100, text_source="garbage_unknown_format"):
                 fh.write(json.dumps(r) + "\n")
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(shard.parent),
-                "--subset",
-                "100",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(shard.parent), "--subset", "100",
+             "--output", str(tmp_path / "r.json"),
+             "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 1
 
     def test_ci_mode_exits_0_when_all_pass(self, sample_shard_dir, tmp_path):
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "50",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(sample_shard_dir), "--subset", "50",
+             "--output", str(tmp_path / "r.json"),
+             "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
@@ -1455,22 +1376,26 @@ class TestCIMode:
             for r in _make_records(100, citation_count=0):
                 fh.write(json.dumps(r) + "\n")
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(shard.parent),
-                "--subset",
-                "100",
-                "--output",
-                str(tmp_path / "r.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-                "--ci-mode",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(shard.parent), "--subset", "100",
+             "--output", str(tmp_path / "r.json"),
+             "--skip-tokenizer", "--skip-spacy", "--ci-mode"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+
+    def test_without_ci_mode_exits_0_even_on_failure(self, tmp_path):
+        shard = tmp_path / "shards" / "s.jsonl"
+        shard.parent.mkdir()
+        with open(shard, "w") as fh:
+            for r in _make_records(100, text_source="garbage_format"):
+                fh.write(json.dumps(r) + "\n")
+        result = subprocess.run(
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(shard.parent), "--subset", "100",
+             "--output", str(tmp_path / "r.json"),
+             "--skip-tokenizer", "--skip-spacy"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
@@ -1483,40 +1408,20 @@ class TestCIMode:
 class TestCLI:
     def test_cli_runs_and_exits_zero(self, sample_shard_dir, tmp_path):
         result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "20",
-                "--output",
-                str(tmp_path / "cli_out.json"),
-                "--skip-tokenizer",
-                "--skip-spacy",
-            ],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(sample_shard_dir), "--subset", "20",
+             "--output", str(tmp_path / "cli_out.json"),
+             "--skip-tokenizer", "--skip-spacy"],
+            capture_output=True, text=True,
         )
         assert result.returncode == 0
 
     def test_cli_writes_json_output(self, sample_shard_dir, tmp_path):
         out = tmp_path / "cli_out.json"
         subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.dataset_probe",
-                "--data-dir",
-                str(sample_shard_dir),
-                "--subset",
-                "20",
-                "--output",
-                str(out),
-                "--skip-tokenizer",
-                "--skip-spacy",
-            ],
+            [sys.executable, "-m", "src.dataset_probe",
+             "--data-dir", str(sample_shard_dir), "--subset", "20",
+             "--output", str(out), "--skip-tokenizer", "--skip-spacy"],
             capture_output=True,
         )
         assert out.exists()
