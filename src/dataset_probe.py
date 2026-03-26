@@ -64,9 +64,11 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
+# CHANGED: bumped to 2.4.1 — adds word-count clarifying comment in
+# ModelQualitySignals.check and annotation resolution tests.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.4.0"
+PROBE_VERSION = "2.4.1"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex — single source of truth for A12 and
@@ -223,6 +225,7 @@ REQUIRED_FIELDS: frozenset[str] = frozenset(
 
 
 def _get_git_sha() -> str:
+    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -288,10 +291,6 @@ def _shannon_entropy(text: str) -> float:
 
 # ---------------------------------------------------------------------------
 # Shard loader with audit counters
-# CHANGED: iter_shards_with_audit now returns total_records_decoded — the count
-# of successfully parsed records. Previously only total_parse_errors was tracked,
-# leaving the sampling fraction implicit. total_records_decoded makes it explicit
-# and auditable: sampling_fraction = subset_n / total_records_decoded.
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +333,7 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
     return {
         "records": records,
-        "total_records_decoded": len(records),  # ADDED: explicit decoded count
+        "total_records_decoded": len(records),
         "total_parse_errors": total_parse_errors,
         "total_blank_lines": total_blank_lines,
         "shard_errors": shard_errors,
@@ -343,6 +342,7 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
 
 def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], None, None]:
+    """Internal generator yielding (record, shard_name) tuples."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -658,8 +658,7 @@ def gate_a12_citation_anchor_survival(
     """
     A12 — Citation anchor survival in normalized text field.
     Uses shared _LEGAL_CITATION_RE and _get_text(r).
-    Includes citation_field_vs_regex cross-validation to detect normalization
-    destroying citation anchors before Stage 3 retrieval.
+    Includes citation_field_vs_regex cross-validation.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -842,7 +841,21 @@ def gate_b6_text_entropy_distribution(
 
 
 class ModelQualitySignals:
-    """Soft quality warnings for RAG pipeline rows. Uses _LEGAL_CITATION_RE."""
+    """
+    Soft quality warnings for RAG pipeline rows.
+    Uses shared _LEGAL_CITATION_RE for citation detection.
+
+    Token count terminology note:
+      token_count in the schema field refers to an upstream pre-computed count.
+      The local `word_count_estimate` variable below (len(text.split())) is a
+      whitespace-split word count — NOT HF subword token count. These are
+      distinct quantities:
+        - schema field token_count: upstream integer, not recomputed here
+        - word_count_estimate: whitespace words, used as a fast proxy for
+          document size signals (truncated, gigantic) only
+        - HF subword tokens: computed by AutoTokenizer in gate_a11 only
+      Never conflate these three — see gate_a11 for subword token counts.
+    """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
     BOILERPLATE_PHRASES = (
@@ -857,12 +870,16 @@ class ModelQualitySignals:
     def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
         signals: list[tuple[str, str]] = []
         text: str = _get_text(row) if text_field == "text" else str(row.get(text_field, ""))
-        token_count = len(text.split())
 
-        if token_count < 20:
-            signals.append(("truncated_document", f"~{token_count} tokens — likely truncated"))
-        if token_count > 100_000:
-            signals.append(("gigantic_document", f"~{token_count} tokens — may exceed model context"))
+        # CHANGED: renamed from token_count to word_count_estimate to clarify
+        # this is a whitespace-split word count, NOT HF subword token count.
+        # HF subword token counts are computed in gate_a11 via AutoTokenizer.
+        word_count_estimate = len(text.split())
+
+        if word_count_estimate < 20:
+            signals.append(("truncated_document", f"~{word_count_estimate} words — likely truncated"))
+        if word_count_estimate > 100_000:
+            signals.append(("gigantic_document", f"~{word_count_estimate} words — may exceed model context"))
         if cls.HTML_RE.search(text):
             signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
         if unicodedata.normalize("NFC", text) != text:
@@ -874,8 +891,9 @@ class ModelQualitySignals:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
 
+        # Uses shared _LEGAL_CITATION_RE — same pattern as gate_a12
         citation_count = len(_LEGAL_CITATION_RE.findall(text))
-        if token_count > 100 and citation_count == 0:
+        if word_count_estimate > 100 and citation_count == 0:
             signals.append(("no_citations", "No legal citations found — may be non-opinion text"))
 
         return signals
@@ -887,6 +905,7 @@ class ModelQualitySignals:
         sample_n: int = 500,
         seed: int = 0,
     ) -> dict[str, Any]:
+        """Return signal frequency counts and pct_clean for a record sample."""
         rng = random.Random(seed)
         subsample = rng.sample(records, min(sample_n, len(records)))
         signal_counts: dict[str, int] = {}
@@ -955,6 +974,10 @@ def run_probe(
     config: ProbeConfig | None = None,
     log_to_wandb: bool = False,
 ) -> dict[str, Any]:
+    """
+    Run all dataset-readiness gates on a sampled subset of the corpus.
+    Writes a JSON report to output. No side effects on corpus shards.
+    """
     cfg = config or ProbeConfig()
 
     print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
@@ -993,7 +1016,7 @@ def run_probe(
         "seed": seed,
         "shard_audit": {
             "shard_count": audit["shard_count"],
-            "total_records_decoded": audit["total_records_decoded"],  # ADDED
+            "total_records_decoded": audit["total_records_decoded"],
             "total_parse_errors": audit["total_parse_errors"],
             "total_blank_lines": audit["total_blank_lines"],
             "shard_errors": audit["shard_errors"],
