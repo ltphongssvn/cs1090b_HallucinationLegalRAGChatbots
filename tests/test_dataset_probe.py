@@ -1126,3 +1126,128 @@ class TestCLI:
         )
         assert out.exists()
         assert "gates" in json.loads(out.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Obs 4 — _get_text(row) helper
+# ---------------------------------------------------------------------------
+
+
+class TestGetTextHelper:
+    def test_get_text_exported(self):
+        """_get_text must be a module-level helper."""
+        from src.dataset_probe import _get_text
+        assert callable(_get_text)
+
+    def test_get_text_returns_text_field(self):
+        from src.dataset_probe import _get_text
+        assert _get_text({"text": "hello"}) == "hello"
+
+    def test_get_text_returns_empty_string_when_missing(self):
+        from src.dataset_probe import _get_text
+        assert _get_text({}) == ""
+
+    def test_get_text_returns_empty_string_when_none(self):
+        from src.dataset_probe import _get_text
+        assert _get_text({"text": None}) == ""
+
+    def test_get_text_returns_string_when_non_string_value(self):
+        from src.dataset_probe import _get_text
+        result = _get_text({"text": 42})
+        assert isinstance(result, str)
+
+    def test_get_text_strips_nothing(self):
+        """_get_text must not strip — stripping is caller's responsibility."""
+        from src.dataset_probe import _get_text
+        assert _get_text({"text": "  spaced  "}) == "  spaced  "
+
+
+# ---------------------------------------------------------------------------
+# Obs 10 — Hypothesis property-based tests for _percentile and gate_a8
+# ---------------------------------------------------------------------------
+
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+
+class TestPercentileProperty:
+    @given(
+        values=st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=500),
+        p=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    )
+    @settings(max_examples=200)
+    def test_result_always_within_range(self, values, p):
+        """_percentile must always return a value within [min, max] of the input."""
+        sorted_vals = sorted(values)
+        result = _percentile(sorted_vals, p)
+        assert min(sorted_vals) <= result <= max(sorted_vals)
+
+    @given(
+        values=st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=500),
+    )
+    @settings(max_examples=200)
+    def test_p0_always_returns_min(self, values):
+        sorted_vals = sorted(values)
+        assert _percentile(sorted_vals, 0) == sorted_vals[0]
+
+    @given(
+        values=st.lists(st.integers(min_value=0, max_value=10_000), min_size=1, max_size=500),
+    )
+    @settings(max_examples=200)
+    def test_p100_always_returns_max(self, values):
+        sorted_vals = sorted(values)
+        assert _percentile(sorted_vals, 100) == sorted_vals[-1]
+
+    @given(
+        constant=st.integers(min_value=0, max_value=10_000),
+        n=st.integers(min_value=1, max_value=100),
+        p=st.floats(min_value=0.0, max_value=100.0, allow_nan=False),
+    )
+    @settings(max_examples=100)
+    def test_repeated_values_always_returns_same_constant(self, constant, n, p):
+        """All-same list must always return that constant at any percentile."""
+        sorted_vals = [constant] * n
+        assert _percentile(sorted_vals, p) == constant
+
+
+class TestGateA8Property:
+    @given(
+        n_above=st.integers(min_value=1, max_value=500),
+        n_below=st.integers(min_value=0, max_value=500),
+    )
+    @settings(max_examples=200)
+    def test_below_provisional_pct_always_in_0_100(self, n_above, n_below):
+        """below_provisional_pct must always be in [0, 100]."""
+        records = _make_records(n_above, text_length=5000) + _make_records(n_below, text_length=100)
+        r = gate_a8_text_length_distribution(records)
+        assert 0.0 <= r["below_provisional_pct"] <= 100.0
+
+    @given(
+        n_above=st.integers(min_value=1, max_value=200),
+        n_below=st.integers(min_value=0, max_value=200),
+    )
+    @settings(max_examples=100)
+    def test_below_count_plus_above_equals_total(self, n_above, n_below):
+        """below_provisional_count + records above threshold must equal total count."""
+        records = _make_records(n_above, text_length=5000) + _make_records(n_below, text_length=100)
+        r = gate_a8_text_length_distribution(records)
+        assert r["below_provisional_count"] + (r["count"] - r["below_provisional_count"]) == r["count"]
+
+    @given(
+        n=st.integers(min_value=1, max_value=200),
+    )
+    @settings(max_examples=100)
+    def test_all_above_threshold_passes(self, n):
+        """When all records exceed min_text_length, gate must pass."""
+        records = _make_records(n, text_length=5000)
+        assert gate_a8_text_length_distribution(records)["pass"] is True
+
+    @given(
+        n=st.integers(min_value=4, max_value=200),
+    )
+    @settings(max_examples=100)
+    def test_all_below_threshold_fails(self, n):
+        """When all records are below min_text_length, gate must fail."""
+        records = _make_records(n, text_length=100)
+        assert gate_a8_text_length_distribution(records)["pass"] is False
