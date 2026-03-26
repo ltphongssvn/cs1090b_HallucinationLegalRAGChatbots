@@ -1137,28 +1137,34 @@ class TestGetTextHelper:
     def test_get_text_exported(self):
         """_get_text must be a module-level helper."""
         from src.dataset_probe import _get_text
+
         assert callable(_get_text)
 
     def test_get_text_returns_text_field(self):
         from src.dataset_probe import _get_text
+
         assert _get_text({"text": "hello"}) == "hello"
 
     def test_get_text_returns_empty_string_when_missing(self):
         from src.dataset_probe import _get_text
+
         assert _get_text({}) == ""
 
     def test_get_text_returns_empty_string_when_none(self):
         from src.dataset_probe import _get_text
+
         assert _get_text({"text": None}) == ""
 
     def test_get_text_returns_string_when_non_string_value(self):
         from src.dataset_probe import _get_text
+
         result = _get_text({"text": 42})
         assert isinstance(result, str)
 
     def test_get_text_strips_nothing(self):
         """_get_text must not strip — stripping is caller's responsibility."""
         from src.dataset_probe import _get_text
+
         assert _get_text({"text": "  spaced  "}) == "  spaced  "
 
 
