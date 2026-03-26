@@ -709,7 +709,7 @@ class TestGateA13NlpMaxLengthSideEffect:
             )
 
     def test_internal_nlp_max_length_is_set(self):
-        """When nlp=None, gate_a13 must set max_length on the internally loaded pipeline."""
+        """When nlp=None, gate_a13 must set max_length=2_000_000 on the loaded pipeline."""
         long_text = "The court held this point clearly. " * 100
         records = _make_records(5, text_length=5000, text=long_text)
         with patch("src.dataset_probe.spacy") as mock_spacy:
@@ -721,7 +721,8 @@ class TestGateA13NlpMaxLengthSideEffect:
             mock_spacy.load.return_value = mock_nlp
             mock_spacy.__version__ = "3.8.11"
             gate_a13_sentence_density(records, nlp=None)
-            mock_nlp.__setattr__.assert_any_call("max_length", 2_000_000)
+            # After internal load, max_length attribute must equal 2_000_000
+            assert mock_nlp.max_length == 2_000_000
 
 
 # ---------------------------------------------------------------------------
