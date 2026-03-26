@@ -66,27 +66,35 @@ from transformers import AutoTokenizer  # type: ignore[import]
 # Probe version
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.3.0"
+PROBE_VERSION = "2.4.0"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex — single source of truth for A12 and
 # ModelQualitySignals to prevent drift between gating and advisory logic.
+#
+# Match examples (inline for maintainability):
+#   "123 F.3d 456"     — federal reporter, third series (e.g. 9th Cir.)
+#   "456 F.2d 789"     — federal reporter, second series
+#   "123 F.Supp 456"   — federal supplement reporter
+#   "347 U.S. 483"     — United States Reports (Brown v. Board of Education)
+#   "Smith v. Jones"   — case name citation anchor
+#   "Brown v. Board"   — landmark SCOTUS case name anchor
+#
+# Non-match examples:
+#   "The defendant argued the motion." — pure prose, no citation format
+#   "Section 42 of the statute"        — bare number, no reporter context
 # ---------------------------------------------------------------------------
 
 _LEGAL_CITATION_RE = re.compile(
-    r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
-    r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
-    r"|U\.S\.\s+\d+"
-    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
+    r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"  # e.g. 123 F.3d 456, 123 F.Supp 456
+    r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"  # e.g. Smith v. Jones
+    r"|U\.S\.\s+\d+"  # e.g. U.S. 483
+    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",  # e.g. 123 F.3d 456
     re.MULTILINE,
 )
 
 # ---------------------------------------------------------------------------
 # DOCUMENTED_FIELDS — all 23 fields declared in the module docstring schema.
-# ADDED: closes the epistemic gap between REQUIRED_FIELDS (11) and the full
-# schema contract (23). validate_schema reports missing_documented_fields
-# separately so the probe can detect undeclared missing fields without
-# failing on non-critical fields.
 # ---------------------------------------------------------------------------
 
 DOCUMENTED_FIELDS: frozenset[str] = frozenset(
@@ -118,7 +126,7 @@ DOCUMENTED_FIELDS: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Known text_source vocabulary — controlled vocabulary for semantic validation.
+# Known text_source vocabulary
 # ---------------------------------------------------------------------------
 
 KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
@@ -135,7 +143,7 @@ KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# ProbeConfig — frozen dataclass so experiment settings are versioned/loggable
+# ProbeConfig
 # ---------------------------------------------------------------------------
 
 
@@ -153,10 +161,6 @@ class ProbeConfig:
     encoder_model: str = "BAAI/bge-m3"
     spacy_model: str = "en_core_web_sm"
     a7_known_formats_pass_pct: float = 80.0
-    # ADDED: a7_known_formats — configurable set of text_source values that
-    # count toward the A7 "known formats" pass threshold. Previously hardcoded
-    # to {"plain_text", "html_with_citations"} inside gate_a7. Now in config
-    # so experiments can extend it without forking the gate.
     a7_known_formats: frozenset = dataclasses.field(
         default_factory=lambda: frozenset({"plain_text", "html_with_citations"})
     )
@@ -176,11 +180,7 @@ class ProbeConfig:
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
-    """
-    Serialize ProbeConfig to a JSON-safe dict.
-    ADDED: handles frozenset fields (a7_known_formats) by converting to sorted
-    lists — dataclasses.asdict does not handle frozensets.
-    """
+    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists."""
     result: dict[str, Any] = {}
     for f in dataclasses.fields(cfg):
         val = getattr(cfg, f.name)
@@ -191,7 +191,7 @@ def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
     return result
 
 
-# Module-level defaults (kept for backward-compatible imports)
+# Module-level defaults (backward-compatible imports)
 PROVISIONAL_MIN_TEXT_LENGTH = ProbeConfig().min_text_length
 CHUNK_SIZE_SUBWORDS = ProbeConfig().chunk_size_subwords
 CHUNK_OVERLAP_SUBWORDS = ProbeConfig().chunk_overlap_subwords
@@ -223,7 +223,6 @@ REQUIRED_FIELDS: frozenset[str] = frozenset(
 
 
 def _get_git_sha() -> str:
-    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -237,7 +236,7 @@ def _get_git_sha() -> str:
 
 
 # ---------------------------------------------------------------------------
-# _get_text helper — eliminates repeated str(r.get("text", "")) pattern.
+# _get_text helper
 # ---------------------------------------------------------------------------
 
 
@@ -257,8 +256,7 @@ def _get_text(row: dict[str, Any]) -> str:
 def _percentile(sorted_values: list[Any], p: float) -> Any:
     """
     Return the p-th percentile of a pre-sorted list.
-    Uses ceiling-index method consistent with numpy default.
-    p must be in [0, 100].
+    Uses ceiling-index method consistent with numpy default. p in [0, 100].
     """
     n = len(sorted_values)
     if n == 0:
@@ -290,6 +288,10 @@ def _shannon_entropy(text: str) -> float:
 
 # ---------------------------------------------------------------------------
 # Shard loader with audit counters
+# CHANGED: iter_shards_with_audit now returns total_records_decoded — the count
+# of successfully parsed records. Previously only total_parse_errors was tracked,
+# leaving the sampling fraction implicit. total_records_decoded makes it explicit
+# and auditable: sampling_fraction = subset_n / total_records_decoded.
 # ---------------------------------------------------------------------------
 
 
@@ -300,7 +302,11 @@ def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
 
 
 def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
-    """Load all shards and return audit summary including per-shard parse error counts."""
+    """
+    Load all shards and return audit summary.
+    Returns total_records_decoded (successfully parsed), total_parse_errors,
+    total_blank_lines, per-shard shard_errors, and shard_count.
+    """
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -328,6 +334,7 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
     return {
         "records": records,
+        "total_records_decoded": len(records),  # ADDED: explicit decoded count
         "total_parse_errors": total_parse_errors,
         "total_blank_lines": total_blank_lines,
         "shard_errors": shard_errors,
@@ -366,19 +373,14 @@ def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Schema validation — presence + type + range + vocabulary + documented fields
-# CHANGED: added missing_documented_fields to surface gaps between REQUIRED_FIELDS
-# (11 enforced) and DOCUMENTED_FIELDS (23 declared in docstring schema).
+# Schema validation
 # ---------------------------------------------------------------------------
 
 
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Check required field presence, type correctness, value ranges, vocabulary,
-    and documented field coverage.
-
-    missing_documented_fields: counts records missing fields from DOCUMENTED_FIELDS
-    but not in REQUIRED_FIELDS — advisory, does not affect pass/fail.
+    Check required field presence, type, range, vocabulary, and documented coverage.
+    missing_documented_fields: advisory — does not affect pass/fail.
     vocabulary_errors: text_source must be in KNOWN_TEXT_SOURCES.
     """
     if not records:
@@ -398,7 +400,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     type_errors: dict[str, int] = {}
     range_errors: dict[str, int] = {}
     vocabulary_errors: dict[str, int] = {}
-    # Track documented-but-not-required fields separately — advisory only
     documented_only = DOCUMENTED_FIELDS - REQUIRED_FIELDS
     missing_documented: dict[str, int] = {}
 
@@ -407,7 +408,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_by_field[f] += 1
 
-        # Documented-but-not-required field coverage check
         for f in documented_only:
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
@@ -455,11 +455,7 @@ def gate_a7_text_source_breakdown(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    A7 — Full text_source breakdown.
-    CHANGED: uses cfg.a7_known_formats instead of hardcoded {"plain_text",
-    "html_with_citations"} — now configurable per experiment via ProbeConfig.
-    """
+    """A7 — text_source breakdown. Uses cfg.a7_known_formats for pass calculation."""
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A7_text_source_breakdown", "pass": False, "note": "No records."}
@@ -473,7 +469,6 @@ def gate_a7_text_source_breakdown(
         src: {"count": cnt, "pct": round(100.0 * cnt / total, 2)}
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
-    # Use cfg.a7_known_formats instead of hardcoded set
     known_pct = sum(v["pct"] for k, v in breakdown.items() if k in cfg.a7_known_formats)
     return {
         "gate": "A7_text_source_breakdown",
@@ -569,7 +564,7 @@ def gate_a11_tokenizer_chunk_count(
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3.
     tokenizer injectable — when provided, AutoTokenizer.from_pretrained not called.
-    Optional secondary check against a11_generative_model (Mistral by default).
+    Optional secondary Mistral generative tokenizer check.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -642,7 +637,7 @@ def gate_a11_tokenizer_chunk_count(
                 "max_tokens": max(gen_lengths),
                 "over_32k_count": over_limit,
                 "over_32k_pct": round(100.0 * over_limit / len(subsample), 2),
-                "note": ("README asserts max(prompt_tokens) < 32768 using Mistral tokenizer."),
+                "note": "README asserts max(prompt_tokens) < 32768 using Mistral tokenizer.",
             }
         except Exception as exc:
             result["generative_token_check"] = {
@@ -662,10 +657,9 @@ def gate_a12_citation_anchor_survival(
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival in normalized text field.
-    Uses shared _LEGAL_CITATION_RE and _get_text(r) helper.
-    ADDED: citation_field_vs_regex cross-validation — detects records where
-    citation_count > 0 but regex finds 0 matches, indicating normalization
-    may be destroying citation anchors before they reach Stage 3 retrieval.
+    Uses shared _LEGAL_CITATION_RE and _get_text(r).
+    Includes citation_field_vs_regex cross-validation to detect normalization
+    destroying citation anchors before Stage 3 retrieval.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -674,8 +668,6 @@ def gate_a12_citation_anchor_survival(
     subsample = records
     has_anchor = 0
     citation_counts_found: list[int] = []
-
-    # Cross-validation: field says citations exist but regex finds none
     field_nonzero_regex_zero = 0
     field_nonzero_total = 0
 
@@ -730,10 +722,9 @@ def gate_a13_sentence_density(
     nlp: Any | None = None,
 ) -> dict[str, Any]:
     """
-    A13 — Sentence density on A8-filtered records only (text_length >= min_text_length).
-    Depends on A8: only evaluates records passing the A8 length filter.
-    nlp injectable — when provided, spacy.load NOT called and max_length NOT mutated.
-    FIXED: nlp.max_length only set when nlp is loaded internally, not when injected.
+    A13 — Sentence density on A8-filtered records (text_length >= min_text_length).
+    Depends on A8 filter. nlp injectable — when provided, spacy.load NOT called
+    and max_length NOT mutated on the injected object.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -745,7 +736,6 @@ def gate_a13_sentence_density(
             nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
             if "sentencizer" not in nlp.pipe_names:
                 nlp.add_pipe("sentencizer")
-            # Only set max_length when we own the nlp object (loaded internally)
             nlp.max_length = 2_000_000
             spacy_version = spacy.__version__
         except Exception as exc:
@@ -755,7 +745,6 @@ def gate_a13_sentence_density(
                 "error": str(exc),
                 "note": f"spaCy model load failed: {exc}",
             }
-    # When nlp is injected, do NOT mutate nlp.max_length — caller owns the object
 
     substantive = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
     if not substantive:
@@ -922,7 +911,7 @@ class ModelQualitySignals:
 
 class CourtListenerDatasetProbe:
     """
-    Orchestrates all dataset-readiness gates for the local CourtListener corpus.
+    Orchestrates all dataset-readiness gates.
     validate_row removed — dead code. Full batch validation via validate_schema().
     """
 
@@ -1004,6 +993,7 @@ def run_probe(
         "seed": seed,
         "shard_audit": {
             "shard_count": audit["shard_count"],
+            "total_records_decoded": audit["total_records_decoded"],  # ADDED
             "total_parse_errors": audit["total_parse_errors"],
             "total_blank_lines": audit["total_blank_lines"],
             "shard_errors": audit["shard_errors"],
