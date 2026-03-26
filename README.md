@@ -82,7 +82,7 @@
 **Single GPU (23.7GB L4/A10G, SLURM-allocated).**
 * Each phase loads **only the model and data it needs**.
 * After a phase finishes, its resources are **unloaded before the next phase begins**.
-* The primary GPU dtype is **bfloat16**.
+* The default GPU execution dtype is **bfloat16**.
 * At startup, `src/environment.py` enforces these checks:
   * `transformers.__version__ == "4.39.3"`
   * `torch.cuda.get_device_capability()[0] >= 8`

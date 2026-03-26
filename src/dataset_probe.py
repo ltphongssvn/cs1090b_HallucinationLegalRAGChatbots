@@ -66,15 +66,22 @@ from pathlib import Path
 from typing import Any, Generator, Iterator
 
 import spacy as spacy  # type: ignore[import]
-from transformers import AutoTokenizer  # type: ignore[import]
 
-import wandb  # type: ignore[import]
+# CHANGED: wandb wrapped in try/except so the probe is importable and runnable
+# even in environments where wandb is not installed. When unavailable, wandb is
+# set to None and all wandb code paths are guarded with `if wandb is not None`.
+try:
+    import wandb  # type: ignore[import]
+except ImportError:
+    wandb = None  # type: ignore[assignment]
+
+from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.0"
+PROBE_VERSION = "2.5.1"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -190,6 +197,7 @@ class ProbeConfig:
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
+    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists."""
     result: dict[str, Any] = {}
     for f in dataclasses.fields(cfg):
         val = getattr(cfg, f.name)
@@ -207,6 +215,7 @@ MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 
 
 def _get_git_sha() -> str:
+    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -220,6 +229,7 @@ def _get_git_sha() -> str:
 
 
 def _get_text(row: dict[str, Any]) -> str:
+    """Return the text field of a record as a string, or '' if missing/None."""
     val = row.get("text")
     if val is None:
         return ""
@@ -243,6 +253,23 @@ def _percentile(sorted_values: list[Any], p: float) -> Any:
 
 
 def _shannon_entropy(text: str) -> float:
+    """
+    Compute word-level Shannon entropy in bits (not normalized by log2(|V|)).
+
+    Tokenization contract (must match upstream text_entropy field computation):
+      - Tokenization basis: whitespace split (str.split()) — no regex, no unicode
+        segmentation. Tokens are substrings separated by any whitespace.
+      - Case: preserved as-is — 'Court' and 'court' are distinct tokens.
+      - Punctuation: included — 'held.' and 'held' are distinct tokens.
+      - Stopwords: no removal — all whitespace-delimited tokens are counted.
+      - Normalization: raw Shannon bits, NOT divided by log2(|V|). Formula:
+          H = -sum(p_i * log2(p_i)) where p_i = count(w_i) / total_words.
+      - Empty string: returns 0.0.
+      - Single unique token: returns 0.0 (H = 0 for a deterministic signal).
+
+    This contract is validated by B6 spot-check against stored text_entropy.
+    If upstream changes tokenization basis, B6 spot_check.consistent will be False.
+    """
     words = text.split()
     if not words:
         return 0.0
@@ -257,7 +284,7 @@ def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
     """
     Yield valid records from all .jsonl shards in sorted order.
     Silently skips blank lines and JSON parse errors — use
-    iter_shards_with_audit() to obtain counts of skipped lines.
+    iter_shards_with_audit() to obtain counts of skipped lines and errors.
     """
     for record, _ in _iter_shards_inner(data_dir):
         yield record
@@ -301,6 +328,7 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
 
 def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], None, None]:
+    """Internal generator yielding (record, shard_name) tuples."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -887,6 +915,7 @@ class ModelQualitySignals:
         sample_n: int = 500,
         seed: int = 0,
     ) -> dict[str, Any]:
+        """Return signal frequency counts and pct_clean for a record sample."""
         rng = random.Random(seed)
         subsample = rng.sample(records, min(sample_n, len(records)))
         signal_counts: dict[str, int] = {}
@@ -939,10 +968,11 @@ def _log_report_to_wandb(
     name: str,
     output: Path,
 ) -> None:
-    """
-    Initialize a W&B run, log all gate metrics and the full report artifact.
-    Called by main() when --log-to-wandb is set.
-    """
+    """Initialize a W&B run, log all gate metrics and the full report artifact."""
+    if wandb is None:
+        print("[dataset_probe] W&B not installed — skipping W&B logging.")
+        return
+
     run = wandb.init(
         project=project,
         entity=entity,
@@ -1172,7 +1202,10 @@ def run_probe(
         f"SKIPPED: {skipped}"
     )
 
-    if log_to_wandb and wandb.run is not None:
+    # CHANGED: guard wandb.run access — wandb may be None if not installed.
+    # Previously `if log_to_wandb and wandb.run is not None` raised AttributeError
+    # when wandb=None. Now checks wandb is not None before accessing .run.
+    if log_to_wandb and wandb is not None and wandb.run is not None:
         wandb.log(
             {
                 "probe/passed_gates": len(passed),
@@ -1201,7 +1234,6 @@ def main() -> None:
         action="store_true",
         help="Exit 1 if any BLOCKING gate fails. Advisory failures do not trigger exit 1.",
     )
-    # ADDED: W&B CLI flags — enable automatic logging with a single flag
     parser.add_argument(
         "--log-to-wandb",
         action="store_true",
@@ -1237,7 +1269,6 @@ def main() -> None:
         skip_spacy=args.skip_spacy,
     )
 
-    # W&B logging — called after run_probe so report is fully written first
     if args.log_to_wandb:
         run_name = args.wandb_name or f"dataset_probe_v{PROBE_VERSION}_{args.subset // 1000}k"
         _log_report_to_wandb(
