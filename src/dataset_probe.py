@@ -44,7 +44,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.2_10k
+      --wandb-name dataset_probe_v2.5.3_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -76,11 +76,13 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.2 — frozenset[str] annotation, _percentile docstring
-# fix, citation_density type/range check in validate_schema.
+# CHANGED: bumped to 2.5.3 — a12_text_cap_chars + quality_signals_text_cap_chars
+# added to ProbeConfig; gate_a12 caps text before regex; ModelQualitySignals.check
+# accepts config param and caps text before citation regex; sample_records
+# docstring updated to mention silent parse errors.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.2"
+PROBE_VERSION = "2.5.3"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -180,8 +182,7 @@ class ProbeConfig:
     encoder_model: str = "BAAI/bge-m3"
     spacy_model: str = "en_core_web_sm"
     a7_known_formats_pass_pct: float = 80.0
-    # CHANGED: annotated as frozenset[str] instead of bare frozenset so mypy
-    # can catch non-string values being passed (e.g. frozenset({1, 2})).
+    # frozenset[str] — typed explicitly so mypy catches non-string values.
     a7_known_formats: frozenset[str] = dataclasses.field(
         default_factory=lambda: frozenset({"plain_text", "html_with_citations"})
     )
@@ -189,12 +190,20 @@ class ProbeConfig:
     a9_zero_citation_pass_pct: float = 20.0
     a11_min_median_chunks: float = 2.0
     a12_min_pct_with_anchor: float = 60.0
+    # ADDED: a12_text_cap_chars — caps text before regex scan in gate_a12 and
+    # ModelQualitySignals.check. Legal opinions can exceed 100K words; O(n)
+    # regex scanning on the full string is wasteful. 50K chars captures enough
+    # citation density for the heuristic check. Mirrors a13_text_cap_chars.
+    a12_text_cap_chars: int = 50_000
     a13_max_below_threshold_pct: float = 15.0
     quality_signals_sample_n: int = 500
     a11_subsample_n: int = 200
     a12_subsample_n: int = 500
     a13_subsample_n: int = 200
     a13_text_cap_chars: int = 50_000
+    # ADDED: quality_signals_text_cap_chars — caps text before citation regex
+    # in ModelQualitySignals.check. Consistent with a12_text_cap_chars pattern.
+    quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
@@ -292,8 +301,9 @@ def _shannon_entropy(text: str) -> float:
 def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
     """
     Yield valid records from all .jsonl shards in sorted order.
-    Silently skips blank lines and JSON parse errors — use
-    iter_shards_with_audit() to obtain counts of skipped lines and errors.
+    Silently drops blank lines and JSON parse errors with no counting —
+    use iter_shards_with_audit() to obtain counts of skipped lines and
+    parse errors.
     """
     for record, _ in _iter_shards_inner(data_dir):
         yield record
@@ -354,7 +364,11 @@ def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], 
 
 
 def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]]:
-    """Reservoir-sample n records from all shards without loading full corpus."""
+    """
+    Reservoir-sample n records from all shards without loading full corpus.
+    JSON parse errors are silently dropped with no counting in this path —
+    use iter_shards_with_audit() to obtain parse error counts and audit stats.
+    """
     reservoir: list[dict[str, Any]] = []
     rng = random.Random(seed)
     for i, record in enumerate(iter_shards(data_dir)):
@@ -422,8 +436,8 @@ def _reservoir_sample_with_audit(
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Check required field presence, type, range, vocabulary, and documented coverage.
-    CHANGED: added citation_density type (must be numeric) and range (must be >= 0)
-    checks alongside existing text_entropy, paragraph_count, token_count checks.
+    Checks citation_density type (numeric) and range (>= 0) alongside
+    text_entropy, paragraph_count, and token_count.
     """
     if not records:
         return {
@@ -455,17 +469,14 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
 
-        # text_length: must be int or float
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
 
-        # is_precedential: must be bool
         is_prec = r.get("is_precedential")
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
-        # citation_count: must be int, non-negative
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -474,10 +485,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
-        # citation_density: must be numeric (int/float), non-negative.
-        # ADDED: closes gap in schema contract — citation_density is a computed
-        # field (citation_count / text_length) so negative values indicate
-        # upstream computation errors.
         cite_density = r.get("citation_density")
         if cite_density is not None:
             if not isinstance(cite_density, (int, float)):
@@ -485,7 +492,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(cite_density) < 0:
                 range_errors["citation_density"] = range_errors.get("citation_density", 0) + 1
 
-        # text_entropy: must be numeric (int/float), non-negative
         text_entropy = r.get("text_entropy")
         if text_entropy is not None:
             if not isinstance(text_entropy, (int, float)):
@@ -493,7 +499,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(text_entropy) < 0:
                 range_errors["text_entropy"] = range_errors.get("text_entropy", 0) + 1
 
-        # paragraph_count: must be int, non-negative
         para_count = r.get("paragraph_count")
         if para_count is not None:
             if not isinstance(para_count, int):
@@ -501,7 +506,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif para_count < 0:
                 range_errors["paragraph_count"] = range_errors.get("paragraph_count", 0) + 1
 
-        # token_count: must be int, non-negative
         tok_count = r.get("token_count")
         if tok_count is not None:
             if not isinstance(tok_count, int):
@@ -509,7 +513,6 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
-        # text_source: must be in KNOWN_TEXT_SOURCES vocabulary
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
             vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
@@ -728,7 +731,13 @@ def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A12 — Citation anchor survival. severity=blocking."""
+    """
+    A12 — Citation anchor survival. severity=blocking.
+    CHANGED: text is capped at cfg.a12_text_cap_chars before regex scan.
+    Legal opinions can exceed 100K words; O(n) regex scanning on the full
+    string is wasteful. 50K chars is sufficient for citation density heuristic.
+    Mirrors the a13_text_cap_chars pattern in gate_a13.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A12_citation_anchor_survival", "severity": "blocking", "pass": False, "note": "No records."}
@@ -739,7 +748,8 @@ def gate_a12_citation_anchor_survival(
     field_nonzero_total = 0
 
     for r in records:
-        text = _get_text(r)
+        # CHANGED: cap text before regex scan — same pattern as A13
+        text = _get_text(r)[: cfg.a12_text_cap_chars]
         matches = _LEGAL_CITATION_RE.findall(text)
         n_matches = len(matches)
         citation_counts_found.append(n_matches)
@@ -760,6 +770,7 @@ def gate_a12_citation_anchor_survival(
         "gate": "A12_citation_anchor_survival",
         "severity": "blocking",
         "subsample_n": len(records),
+        "text_cap_chars": cfg.a12_text_cap_chars,
         "records_with_citation_anchor": has_anchor,
         "pct_with_citation_anchor": round(pct_with_anchor, 2),
         "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
@@ -776,7 +787,8 @@ def gate_a12_citation_anchor_survival(
         "note": (
             "Heuristic approximation via regex — not a precision extractor. "
             ">=60% of records must contain extractable citation anchors "
-            "for Tier C SQLite lookup to be viable."
+            "for Tier C SQLite lookup to be viable. "
+            f"Text capped at {cfg.a12_text_cap_chars} chars before scan."
         ),
     }
 
@@ -913,7 +925,19 @@ class ModelQualitySignals:
     )
 
     @classmethod
-    def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
+    def check(
+        cls,
+        row: dict[str, Any],
+        text_field: str = "text",
+        config: ProbeConfig | None = None,
+    ) -> list[tuple[str, str]]:
+        """
+        Return soft quality warning signals for a single record.
+        CHANGED: accepts optional config parameter. When provided, text is
+        capped at config.quality_signals_text_cap_chars before citation regex
+        scan — consistent with the a12_text_cap_chars pattern in gate_a12.
+        """
+        cfg = config or ProbeConfig()
         signals: list[tuple[str, str]] = []
         text: str = _get_text(row) if text_field == "text" else str(row.get(text_field, ""))
         word_count_estimate = len(text.split())
@@ -933,7 +957,11 @@ class ModelQualitySignals:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
 
-        citation_count = len(_LEGAL_CITATION_RE.findall(text))
+        # CHANGED: cap text before citation regex scan using quality_signals_text_cap_chars.
+        # Word count estimate still uses full text (for truncation/gigantic signals),
+        # but citation regex only scans the capped prefix for efficiency.
+        capped_text = text[: cfg.quality_signals_text_cap_chars]
+        citation_count = len(_LEGAL_CITATION_RE.findall(capped_text))
         if word_count_estimate > 100 and citation_count == 0:
             signals.append(("no_citations", "No legal citations found — may be non-opinion text"))
 
