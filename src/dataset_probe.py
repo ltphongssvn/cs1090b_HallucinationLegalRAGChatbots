@@ -2,13 +2,27 @@
 """
 Dataset readiness probe for local CourtListener federal appellate JSONL shards.
 
+Gate dependency graph and failure semantics
+-------------------------------------------
+Gate independence:
+  A7, A8, A9, A12, B6 — independent; run on the full sampled record set.
+  A11 — independent; runs on a11_subsample_n records.
+  A13 — depends on A8: evaluates sentence density only on records that pass
+        the A8 text_length >= min_text_length filter.
+  schema — independent; presence/type/range/vocabulary checks.
+
+Failure semantics:
+  Any failed Category A gate (A7–A13, schema) blocks Stage 3 pipeline entry.
+  B6 is advisory/distribution-only — always passes; threshold is data-derived.
+  Gate failures are surfaced in report["summary"]["failed"] and in --ci-mode.
+
 Implements Category A dataset-readiness gates required before Stage 3:
-  A7  — text_source breakdown (missing 17.2% audit)
+  A7  — text_source breakdown (configurable known formats via ProbeConfig)
   A8  — text_length distribution + RAG viability threshold derivation
   A9  — citation_count distribution (advisory — not a hard corpus filter)
   A11 — tokenizer-aware chunk count (BGE-M3 + optional Mistral generative check)
-  A12 — citation anchor survival check in normalized text
-  A13 — sentence density check via repo-certified spaCy pipeline (nlp injectable)
+  A12 — citation anchor survival + cross-validation vs citation_count field
+  A13 — sentence density check via repo-certified spaCy pipeline (A8-filtered)
   B6  — text_entropy empirical distribution + spot-check for formula drift
 
 Expected schema (23 fields):
@@ -25,7 +39,7 @@ CLI usage:
       --output logs/dataset_probe_report.json
   uv run python -m src.dataset_probe ... --ci-mode  # exits 1 if any gate fails
 
-All output written to --output as JSON. No side effects on corpus shards.
+No side effects on corpus shards — all output written to --output only.
 """
 
 from __future__ import annotations
@@ -49,13 +63,13 @@ import wandb  # type: ignore[import]
 from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
-# Probe version — increment when report schema changes
+# Probe version
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.2.0"
+PROBE_VERSION = "2.3.0"
 
 # ---------------------------------------------------------------------------
-# Shared legal citation regex — single source of truth used by A12 and
+# Shared legal citation regex — single source of truth for A12 and
 # ModelQualitySignals to prevent drift between gating and advisory logic.
 # ---------------------------------------------------------------------------
 
@@ -65,6 +79,42 @@ _LEGAL_CITATION_RE = re.compile(
     r"|U\.S\.\s+\d+"
     r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
     re.MULTILINE,
+)
+
+# ---------------------------------------------------------------------------
+# DOCUMENTED_FIELDS — all 23 fields declared in the module docstring schema.
+# ADDED: closes the epistemic gap between REQUIRED_FIELDS (11) and the full
+# schema contract (23). validate_schema reports missing_documented_fields
+# separately so the probe can detect undeclared missing fields without
+# failing on non-critical fields.
+# ---------------------------------------------------------------------------
+
+DOCUMENTED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "cluster_id",
+        "docket_id",
+        "court_id",
+        "court_name",
+        "case_name",
+        "date_filed",
+        "precedential_status",
+        "opinion_type",
+        "extracted_by_ocr",
+        "raw_text",
+        "text",
+        "text_length",
+        "text_source",
+        "cleaning_flags",
+        "source",
+        "token_count",
+        "paragraph_count",
+        "citation_count",
+        "text_hash",
+        "citation_density",
+        "is_precedential",
+        "text_entropy",
+    }
 )
 
 # ---------------------------------------------------------------------------
@@ -93,7 +143,7 @@ KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
 class ProbeConfig:
     """
     All probe thresholds and sampling parameters in one place.
-    Explicit, versionable, injectable, and JSON-serializable for provenance logging.
+    Explicit, versionable, injectable, and JSON-serializable for provenance.
     """
 
     min_text_length: int = 1500
@@ -103,6 +153,13 @@ class ProbeConfig:
     encoder_model: str = "BAAI/bge-m3"
     spacy_model: str = "en_core_web_sm"
     a7_known_formats_pass_pct: float = 80.0
+    # ADDED: a7_known_formats — configurable set of text_source values that
+    # count toward the A7 "known formats" pass threshold. Previously hardcoded
+    # to {"plain_text", "html_with_citations"} inside gate_a7. Now in config
+    # so experiments can extend it without forking the gate.
+    a7_known_formats: frozenset = dataclasses.field(
+        default_factory=lambda: frozenset({"plain_text", "html_with_citations"})
+    )
     a8_below_threshold_pass_pct: float = 25.0
     a9_zero_citation_pass_pct: float = 20.0
     a11_min_median_chunks: float = 2.0
@@ -116,6 +173,22 @@ class ProbeConfig:
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
+
+
+def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
+    """
+    Serialize ProbeConfig to a JSON-safe dict.
+    ADDED: handles frozenset fields (a7_known_formats) by converting to sorted
+    lists — dataclasses.asdict does not handle frozensets.
+    """
+    result: dict[str, Any] = {}
+    for f in dataclasses.fields(cfg):
+        val = getattr(cfg, f.name)
+        if isinstance(val, frozenset):
+            result[f.name] = sorted(val)
+        else:
+            result[f.name] = val
+    return result
 
 
 # Module-level defaults (kept for backward-compatible imports)
@@ -165,9 +238,6 @@ def _get_git_sha() -> str:
 
 # ---------------------------------------------------------------------------
 # _get_text helper — eliminates repeated str(r.get("text", "")) pattern.
-# ADDED: single DRY helper used by all gates and ModelQualitySignals.
-# Returns "" for missing, None, or non-string values coerced to str.
-# Does NOT strip — stripping is caller's responsibility.
 # ---------------------------------------------------------------------------
 
 
@@ -187,7 +257,8 @@ def _get_text(row: dict[str, Any]) -> str:
 def _percentile(sorted_values: list[Any], p: float) -> Any:
     """
     Return the p-th percentile of a pre-sorted list.
-    p must be in [0, 100]. Uses ceiling-index method consistent with numpy default.
+    Uses ceiling-index method consistent with numpy default.
+    p must be in [0, 100].
     """
     n = len(sorted_values)
     if n == 0:
@@ -265,7 +336,6 @@ def iter_shards_with_audit(data_dir: Path) -> dict[str, Any]:
 
 
 def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], None, None]:
-    """Internal generator yielding (record, shard_name) tuples."""
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -296,13 +366,19 @@ def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Schema validation — presence + type + range + vocabulary checks
+# Schema validation — presence + type + range + vocabulary + documented fields
+# CHANGED: added missing_documented_fields to surface gaps between REQUIRED_FIELDS
+# (11 enforced) and DOCUMENTED_FIELDS (23 declared in docstring schema).
 # ---------------------------------------------------------------------------
 
 
 def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Check required field presence, type correctness, value ranges, and vocabulary.
+    Check required field presence, type correctness, value ranges, vocabulary,
+    and documented field coverage.
+
+    missing_documented_fields: counts records missing fields from DOCUMENTED_FIELDS
+    but not in REQUIRED_FIELDS — advisory, does not affect pass/fail.
     vocabulary_errors: text_source must be in KNOWN_TEXT_SOURCES.
     """
     if not records:
@@ -313,6 +389,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             "type_errors": {},
             "range_errors": {},
             "vocabulary_errors": {},
+            "missing_documented_fields": {},
             "pass": True,
             "note": "No records to validate.",
         }
@@ -321,11 +398,19 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     type_errors: dict[str, int] = {}
     range_errors: dict[str, int] = {}
     vocabulary_errors: dict[str, int] = {}
+    # Track documented-but-not-required fields separately — advisory only
+    documented_only = DOCUMENTED_FIELDS - REQUIRED_FIELDS
+    missing_documented: dict[str, int] = {}
 
     for r in records:
         for f in REQUIRED_FIELDS:
             if f not in r:
                 missing_by_field[f] += 1
+
+        # Documented-but-not-required field coverage check
+        for f in documented_only:
+            if f not in r:
+                missing_documented[f] = missing_documented.get(f, 0) + 1
 
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
@@ -356,6 +441,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
         "type_errors": type_errors,
         "range_errors": range_errors,
         "vocabulary_errors": vocabulary_errors,
+        "missing_documented_fields": missing_documented,
         "pass": passed,
     }
 
@@ -369,7 +455,11 @@ def gate_a7_text_source_breakdown(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A7 — Full text_source breakdown including unaccounted ~17.2%."""
+    """
+    A7 — Full text_source breakdown.
+    CHANGED: uses cfg.a7_known_formats instead of hardcoded {"plain_text",
+    "html_with_citations"} — now configurable per experiment via ProbeConfig.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A7_text_source_breakdown", "pass": False, "note": "No records."}
@@ -383,7 +473,8 @@ def gate_a7_text_source_breakdown(
         src: {"count": cnt, "pct": round(100.0 * cnt / total, 2)}
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
-    known_pct = sum(v["pct"] for k, v in breakdown.items() if k in ("plain_text", "html_with_citations"))
+    # Use cfg.a7_known_formats instead of hardcoded set
+    known_pct = sum(v["pct"] for k, v in breakdown.items() if k in cfg.a7_known_formats)
     return {
         "gate": "A7_text_source_breakdown",
         "total_records": total,
@@ -392,7 +483,7 @@ def gate_a7_text_source_breakdown(
         "unknown_formats_pct": round(100.0 - known_pct, 2),
         "pass": known_pct >= cfg.a7_known_formats_pass_pct,
         "note": (
-            "Inspect records from any source outside plain_text/html_with_citations "
+            "Inspect records from any source outside a7_known_formats "
             "to verify row_normalizer.py strips them cleanly before Stage 3."
         ),
     }
@@ -438,10 +529,7 @@ def gate_a9_citation_count_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    A9 — citation_count distribution.
-    ADVISORY ONLY — this probe does not hard-filter the corpus.
-    """
+    """A9 — citation_count distribution. ADVISORY ONLY."""
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A9_citation_count_distribution", "pass": False, "note": "No records."}
@@ -480,8 +568,8 @@ def gate_a11_tokenizer_chunk_count(
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count using BAAI/bge-m3.
-    tokenizer is injectable — when provided, AutoTokenizer.from_pretrained not called.
-    CHANGED: uses _get_text(r) instead of str(r.get("text", "")).
+    tokenizer injectable — when provided, AutoTokenizer.from_pretrained not called.
+    Optional secondary check against a11_generative_model (Mistral by default).
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -554,10 +642,7 @@ def gate_a11_tokenizer_chunk_count(
                 "max_tokens": max(gen_lengths),
                 "over_32k_count": over_limit,
                 "over_32k_pct": round(100.0 * over_limit / len(subsample), 2),
-                "note": (
-                    "README asserts max(prompt_tokens) < 32768 using Mistral tokenizer. "
-                    "Docs with >32k tokens will trigger the runtime assertion in generation."
-                ),
+                "note": ("README asserts max(prompt_tokens) < 32768 using Mistral tokenizer."),
             }
         except Exception as exc:
             result["generative_token_check"] = {
@@ -578,6 +663,9 @@ def gate_a12_citation_anchor_survival(
     """
     A12 — Citation anchor survival in normalized text field.
     Uses shared _LEGAL_CITATION_RE and _get_text(r) helper.
+    ADDED: citation_field_vs_regex cross-validation — detects records where
+    citation_count > 0 but regex finds 0 matches, indicating normalization
+    may be destroying citation anchors before they reach Stage 3 retrieval.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -586,20 +674,45 @@ def gate_a12_citation_anchor_survival(
     subsample = records
     has_anchor = 0
     citation_counts_found: list[int] = []
+
+    # Cross-validation: field says citations exist but regex finds none
+    field_nonzero_regex_zero = 0
+    field_nonzero_total = 0
+
     for r in subsample:
         text = _get_text(r)
         matches = _LEGAL_CITATION_RE.findall(text)
-        citation_counts_found.append(len(matches))
+        n_matches = len(matches)
+        citation_counts_found.append(n_matches)
         if matches:
             has_anchor += 1
 
+        field_count = int(r.get("citation_count", 0))
+        if field_count > 0:
+            field_nonzero_total += 1
+            if n_matches == 0:
+                field_nonzero_regex_zero += 1
+
     pct_with_anchor = 100.0 * has_anchor / len(subsample)
+    field_nonzero_regex_zero_pct = (
+        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
+    )
+
     return {
         "gate": "A12_citation_anchor_survival",
         "subsample_n": len(subsample),
         "records_with_citation_anchor": has_anchor,
         "pct_with_citation_anchor": round(pct_with_anchor, 2),
         "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
+        "citation_field_vs_regex": {
+            "field_nonzero_total": field_nonzero_total,
+            "field_nonzero_regex_zero_count": field_nonzero_regex_zero,
+            "field_nonzero_regex_zero_pct": field_nonzero_regex_zero_pct,
+            "note": (
+                "Records where citation_count > 0 but regex finds 0 matches — "
+                "may indicate normalization destroying citation anchors."
+            ),
+        },
         "pass": pct_with_anchor >= cfg.a12_min_pct_with_anchor,
         "note": (
             "Heuristic approximation via regex — not a precision extractor. "
@@ -617,9 +730,10 @@ def gate_a13_sentence_density(
     nlp: Any | None = None,
 ) -> dict[str, Any]:
     """
-    A13 — Sentence density on A8-filtered records only.
-    nlp injectable — when provided, spacy.load is NOT called internally.
-    CHANGED: uses _get_text(r) helper.
+    A13 — Sentence density on A8-filtered records only (text_length >= min_text_length).
+    Depends on A8: only evaluates records passing the A8 length filter.
+    nlp injectable — when provided, spacy.load NOT called and max_length NOT mutated.
+    FIXED: nlp.max_length only set when nlp is loaded internally, not when injected.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -631,6 +745,7 @@ def gate_a13_sentence_density(
             nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
             if "sentencizer" not in nlp.pipe_names:
                 nlp.add_pipe("sentencizer")
+            # Only set max_length when we own the nlp object (loaded internally)
             nlp.max_length = 2_000_000
             spacy_version = spacy.__version__
         except Exception as exc:
@@ -640,6 +755,7 @@ def gate_a13_sentence_density(
                 "error": str(exc),
                 "note": f"spaCy model load failed: {exc}",
             }
+    # When nlp is injected, do NOT mutate nlp.max_length — caller owns the object
 
     substantive = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
     if not substantive:
@@ -686,10 +802,7 @@ def gate_b6_text_entropy_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    B6 — text_entropy distribution + spot-check for formula drift.
-    CHANGED: uses _get_text(r) helper in spot-check.
-    """
+    """B6 — text_entropy distribution + spot-check for formula drift."""
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "B6_text_entropy_distribution", "pass": True, "note": "No records."}
@@ -736,15 +849,11 @@ def gate_b6_text_entropy_distribution(
 
 # ---------------------------------------------------------------------------
 # Model-relevant quality signals
-# CHANGED: uses _get_text(row) and shared _LEGAL_CITATION_RE.
 # ---------------------------------------------------------------------------
 
 
 class ModelQualitySignals:
-    """
-    Soft quality warnings for RAG pipeline rows.
-    Returns (signal_name, detail) tuples. Empty = clean.
-    """
+    """Soft quality warnings for RAG pipeline rows. Uses _LEGAL_CITATION_RE."""
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
     BOILERPLATE_PHRASES = (
@@ -758,7 +867,6 @@ class ModelQualitySignals:
     @classmethod
     def check(cls, row: dict[str, Any], text_field: str = "text") -> list[tuple[str, str]]:
         signals: list[tuple[str, str]] = []
-        # Use _get_text for the default field; respect text_field override
         text: str = _get_text(row) if text_field == "text" else str(row.get(text_field, ""))
         token_count = len(text.split())
 
@@ -906,7 +1014,7 @@ def run_probe(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "spacy_version": spacy_version,
             "spacy_model_version": spacy_model_version,
-            "probe_config": dataclasses.asdict(cfg),
+            "probe_config": _probe_config_to_dict(cfg),
         },
         "gates": {},
     }
