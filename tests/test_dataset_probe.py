@@ -2033,3 +2033,88 @@ class TestSkipGenerativeTokenizerCLI:
         )
         report = json.loads(out.read_text())
         assert "mistral" in report["provenance"]["probe_config"]["a11_generative_model"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Obs 1/5/9 — A8 robust parsing of non-numeric text_length
+# ---------------------------------------------------------------------------
+
+
+class TestGateA8RobustParsing:
+    def test_a8_does_not_crash_on_string_text_length(self):
+        """
+        gate_a8 must not raise ValueError when text_length is a non-numeric
+        string like 'N/A'. It must treat the invalid value as 0 and continue.
+        """
+        records = _make_records(5, text_length="N/A")
+        result = gate_a8_text_length_distribution(records)
+        assert "pass" in result
+        assert result["count"] == 5
+
+    def test_a8_does_not_crash_on_none_text_length(self):
+        """gate_a8 must not crash when text_length is None."""
+        records = _make_records(5)
+        for r in records:
+            r["text_length"] = None
+        result = gate_a8_text_length_distribution(records)
+        assert "pass" in result
+
+    def test_a8_treats_invalid_text_length_as_zero(self):
+        """
+        Records with unparseable text_length must be counted as length 0,
+        so they contribute to below_provisional_count.
+        """
+        records = _make_records(10, text_length="N/A")
+        result = gate_a8_text_length_distribution(records)
+        # All treated as 0, all below 1500 threshold
+        assert result["below_provisional_count"] == 10
+
+    def test_a8_counts_valid_records_alongside_invalid(self):
+        """A mix of valid and invalid text_length values must process without crash."""
+        valid = _make_records(5, text_length=5000)
+        invalid = _make_records(5, text_length="bad")
+        result = gate_a8_text_length_distribution(valid + invalid)
+        assert result["count"] == 10
+        assert "pass" in result
+
+
+# ---------------------------------------------------------------------------
+# Obs 1/5/9 — A9 robust parsing of non-numeric citation_count
+# ---------------------------------------------------------------------------
+
+
+class TestGateA9RobustParsing:
+    def test_a9_does_not_crash_on_string_citation_count(self):
+        """
+        gate_a9 must not raise ValueError when citation_count is a non-numeric
+        string like 'N/A'. It must treat the invalid value as 0 and continue.
+        """
+        records = _make_records(5, citation_count="N/A")
+        result = gate_a9_citation_count_distribution(records)
+        assert "pass" in result
+        assert result["count"] == 5
+
+    def test_a9_does_not_crash_on_none_citation_count(self):
+        """gate_a9 must not crash when citation_count is None."""
+        records = _make_records(5)
+        for r in records:
+            r["citation_count"] = None
+        result = gate_a9_citation_count_distribution(records)
+        assert "pass" in result
+
+    def test_a9_treats_invalid_citation_count_as_zero(self):
+        """
+        Records with unparseable citation_count must be counted as 0,
+        contributing to zero_citation_count.
+        """
+        records = _make_records(10, citation_count="N/A")
+        result = gate_a9_citation_count_distribution(records)
+        assert result["zero_citation_count"] == 10
+
+    def test_a9_counts_valid_records_alongside_invalid(self):
+        """A mix of valid and invalid citation_count values must process without crash."""
+        valid = _make_records(8, citation_count=5)
+        invalid = _make_records(2, citation_count="bad")
+        result = gate_a9_citation_count_distribution(valid + invalid)
+        assert result["count"] == 10
+        assert "pass" in result
