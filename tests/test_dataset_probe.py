@@ -3,9 +3,9 @@
 Full contract tests for src/dataset_probe.py — CourtListener local shard probe.
 Single authoritative test file covering all contracts.
 """
+
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import inspect
 import json
@@ -20,10 +20,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.dataset_probe import (
+    _LEGAL_CITATION_RE,
     CHUNK_OVERLAP_SUBWORDS,
     CHUNK_SIZE_SUBWORDS,
     DOCUMENTED_FIELDS,
     ENCODER_MODEL,
+    GATE_REGISTRY,
     MIN_SENTENCE_COUNT,
     PROBE_VERSION,
     PROVISIONAL_MIN_TEXT_LENGTH,
@@ -32,10 +34,9 @@ from src.dataset_probe import (
     STAGE3_REQUIRED_FIELDS,
     CourtListenerDatasetProbe,
     GateResult,
-    GATE_REGISTRY,
     ModelQualitySignals,
     ProbeConfig,
-    _LEGAL_CITATION_RE,
+    _build_provenance,
     _check_consistency,
     _check_documented_coverage,
     _check_presence,
@@ -45,8 +46,6 @@ from src.dataset_probe import (
     _get_text,
     _load_spacy_nlp,
     _load_spacy_pipeline,
-    _build_provenance,
-    _summarize_gates,
     _log_report_to_wandb,
     _percentile,
     _prepare_samples,
@@ -54,6 +53,7 @@ from src.dataset_probe import (
     _reservoir_sample,
     _safe_int,
     _shannon_entropy,
+    _summarize_gates,
     gate_a7_text_source_breakdown,
     gate_a8_text_length_distribution,
     gate_a9_citation_count_distribution,
@@ -270,9 +270,17 @@ class TestStage3RequiredFields:
 
     def test_missing_stage3_field_fails_stage3_readiness(self):
         stage3_only = STAGE3_REQUIRED_FIELDS - {
-            "id", "court_id", "text", "text_length", "text_source",
-            "citation_count", "citation_density", "is_precedential",
-            "text_entropy", "token_count", "paragraph_count",
+            "id",
+            "court_id",
+            "text",
+            "text_length",
+            "text_source",
+            "citation_count",
+            "citation_density",
+            "is_precedential",
+            "text_entropy",
+            "token_count",
+            "paragraph_count",
         }
         if stage3_only:
             field_to_remove = next(iter(stage3_only))
@@ -314,9 +322,7 @@ class TestLazyImportBehavior:
             and "noqa" not in line
         ]
         spacy_top = [line for line in top_level_lines if "spacy" in line]
-        assert not spacy_top, (
-            f"spacy must be lazily imported inside functions. Found: {spacy_top}"
-        )
+        assert not spacy_top, f"spacy must be lazily imported inside functions. Found: {spacy_top}"
 
     def test_autotokenizer_not_imported_at_module_top_level(self):
         """AutoTokenizer must not be a top-level import."""
@@ -324,18 +330,12 @@ class TestLazyImportBehavior:
         top_level_lines = [
             line
             for line in source.split("\n")
-            if (line.startswith("import ") or line.startswith("from "))
-            and not line.startswith("#")
+            if (line.startswith("import ") or line.startswith("from ")) and not line.startswith("#")
         ]
         tok_top = [
-            line
-            for line in top_level_lines
-            if "AutoTokenizer" in line
-            or ("transformers" in line and "import" in line)
+            line for line in top_level_lines if "AutoTokenizer" in line or ("transformers" in line and "import" in line)
         ]
-        assert not tok_top, (
-            f"AutoTokenizer must be lazily imported inside gate_a11. Found: {tok_top}"
-        )
+        assert not tok_top, f"AutoTokenizer must be lazily imported inside gate_a11. Found: {tok_top}"
 
     def test_schema_gate_works_without_spacy_available(self):
         """validate_schema must succeed even when spacy is unavailable at module level."""
@@ -588,9 +588,7 @@ class TestDataclassesReplace:
         source = Path("src/dataset_probe.py").read_text(encoding="utf-8")
         assert "dataclasses.replace" in source
 
-    def test_skip_generative_tokenizer_still_sets_empty_string(
-        self, sample_shard_dir, tmp_path
-    ):
+    def test_skip_generative_tokenizer_still_sets_empty_string(self, sample_shard_dir, tmp_path):
         out = tmp_path / "r.json"
         subprocess.run(
             [
@@ -724,9 +722,7 @@ class TestGateA11GenerativeSeverity:
         with patch("transformers.AutoTokenizer") as mock_cls:
             mock_cls.from_pretrained.return_value = mock_gen
             cfg = ProbeConfig(a11_generative_model="fake-model")
-            result = gate_a11_tokenizer_chunk_count(
-                _make_records(5), config=cfg, tokenizer=mock_enc
-            )
+            result = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg, tokenizer=mock_enc)
         assert "generative_token_check" in result
         assert result["generative_token_check"].get("severity") == "advisory"
 
@@ -739,9 +735,7 @@ class TestGateA11GenerativeSeverity:
         with patch("transformers.AutoTokenizer") as mock_cls:
             mock_cls.from_pretrained.side_effect = OSError("not found")
             cfg = ProbeConfig(a11_generative_model="fake-model")
-            result = gate_a11_tokenizer_chunk_count(
-                _make_records(5), config=cfg, tokenizer=mock_enc
-            )
+            result = gate_a11_tokenizer_chunk_count(_make_records(5), config=cfg, tokenizer=mock_enc)
         assert result["generative_token_check"].get("severity") == "advisory"
 
     def test_a11_gate_level_severity_still_blocking(self):
@@ -970,9 +964,7 @@ class TestRunProbeNoInlineWandb:
         finally:
             dp.wandb = original
 
-    def test_run_probe_warning_printed_when_wandb_run_none(
-        self, sample_shard_dir, tmp_path, capsys
-    ):
+    def test_run_probe_warning_printed_when_wandb_run_none(self, sample_shard_dir, tmp_path, capsys):
         import src.dataset_probe as dp
 
         mock_wandb = MagicMock()
@@ -1123,9 +1115,7 @@ class TestGateA9RobustParsing:
         valid_zero = _make_records(3, citation_count=0)
         valid_nonzero = _make_records(5, citation_count=5)
         malformed = _make_records(2, citation_count="N/A")
-        result = gate_a9_citation_count_distribution(
-            valid_zero + valid_nonzero + malformed
-        )
+        result = gate_a9_citation_count_distribution(valid_zero + valid_nonzero + malformed)
         assert result["zero_citation_count"] == 3
 
     def test_a9_parse_errors_reported(self):
@@ -1234,9 +1224,7 @@ class TestFullScanCLI:
 
 
 class TestWandbRunIsNoneWarning:
-    def test_warning_printed_when_log_to_wandb_true_and_run_is_none(
-        self, sample_shard_dir, tmp_path, capsys
-    ):
+    def test_warning_printed_when_log_to_wandb_true_and_run_is_none(self, sample_shard_dir, tmp_path, capsys):
         import src.dataset_probe as dp
 
         mock_wandb = MagicMock()
@@ -1280,9 +1268,7 @@ class TestSkipGenerativeTokenizerCLI:
         )
         assert result.returncode == 0, result.stderr
 
-    def test_skip_generative_tokenizer_sets_model_to_empty_string(
-        self, sample_shard_dir, tmp_path
-    ):
+    def test_skip_generative_tokenizer_sets_model_to_empty_string(self, sample_shard_dir, tmp_path):
         out = tmp_path / "r.json"
         subprocess.run(
             [
@@ -1439,9 +1425,7 @@ class TestValidateSchemaCitationDensity:
 
     def test_passes_zero_citation_density(self):
         assert (
-            validate_schema(_make_records(5, citation_density=0.0))
-            .get("range_errors", {})
-            .get("citation_density")
+            validate_schema(_make_records(5, citation_density=0.0)).get("range_errors", {}).get("citation_density")
             is None
         )
 
@@ -1661,9 +1645,7 @@ class TestValidateSchemaDocumentedFields:
 class TestNoSideEffectsOnShards:
     def test_run_probe_does_not_modify_shard_files(self, sample_shard_dir, tmp_path):
         shard_files = sorted(sample_shard_dir.glob("*.jsonl"))
-        hashes_before = {
-            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files
-        }
+        hashes_before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files}
         run_probe(
             data_dir=sample_shard_dir,
             subset=20,
@@ -1671,17 +1653,13 @@ class TestNoSideEffectsOnShards:
             skip_tokenizer=True,
             skip_spacy=True,
         )
-        hashes_after = {
-            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files
-        }
+        hashes_after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in shard_files}
         assert hashes_before == hashes_after
 
 
 class TestGateA12CitationFieldCrossValidation:
     def test_a12_reports_citation_field_vs_regex(self):
-        assert "citation_field_vs_regex" in gate_a12_citation_anchor_survival(
-            _make_records(10)
-        )
+        assert "citation_field_vs_regex" in gate_a12_citation_anchor_survival(_make_records(10))
 
     def test_a12_detects_field_nonzero_but_regex_zero(self):
         records = _make_records(10, citation_count=5, text="No legal anchors here at all.")
@@ -1773,15 +1751,10 @@ class TestValidateSchema:
 
 class TestGateA7:
     def test_gate_key(self):
-        assert (
-            gate_a7_text_source_breakdown(_make_records(10))["gate"]
-            == "A7_text_source_breakdown"
-        )
+        assert gate_a7_text_source_breakdown(_make_records(10))["gate"] == "A7_text_source_breakdown"
 
     def test_pass_when_known_formats_dominant(self):
-        records = _make_records(85, text_source="plain_text") + _make_records(
-            15, text_source="html_with_citations"
-        )
+        records = _make_records(85, text_source="plain_text") + _make_records(15, text_source="html_with_citations")
         assert gate_a7_text_source_breakdown(records)["pass"] is True
 
     def test_empty_records_handled(self):
@@ -1815,10 +1788,7 @@ class TestGateA9:
         assert "pass" in gate_a9_citation_count_distribution([])
 
     def test_note_clarifies_advisory_role(self):
-        assert (
-            "advisory"
-            in gate_a9_citation_count_distribution(_make_records(10))["note"].lower()
-        )
+        assert "advisory" in gate_a9_citation_count_distribution(_make_records(10))["note"].lower()
 
 
 class TestGateA11:
@@ -1843,9 +1813,7 @@ class TestGateA11:
     def test_fail_on_tokenizer_load_error(self):
         with patch("transformers.AutoTokenizer") as mock_cls:
             mock_cls.from_pretrained.side_effect = OSError("not found")
-            r = gate_a11_tokenizer_chunk_count(
-                _make_records(5), config=ProbeConfig(a11_generative_model="")
-            )
+            r = gate_a11_tokenizer_chunk_count(_make_records(5), config=ProbeConfig(a11_generative_model=""))
         assert r["pass"] is False
 
     def test_empty_records_handled(self):
@@ -1860,12 +1828,7 @@ class TestGateA12:
         assert gate_a12_citation_anchor_survival(_make_records(100))["pass"] is True
 
     def test_fail_when_few_have_anchors(self):
-        assert (
-            gate_a12_citation_anchor_survival(
-                _make_records(100, text="No citations here.")
-            )["pass"]
-            is False
-        )
+        assert gate_a12_citation_anchor_survival(_make_records(100, text="No citations here."))["pass"] is False
 
     def test_empty_records_handled(self):
         assert "pass" in gate_a12_citation_anchor_survival([])
@@ -1900,19 +1863,12 @@ class TestGateB6:
 
     def test_b6_spot_check_flags_formula_drift(self):
         assert (
-            gate_b6_text_entropy_distribution(
-                _make_records(5, text_entropy=999.0)
-            )["spot_check"]["consistent"]
-            is False
+            gate_b6_text_entropy_distribution(_make_records(5, text_entropy=999.0))["spot_check"]["consistent"] is False
         )
 
 
 def _load_fixture_records() -> list[dict]:
-    return [
-        json.loads(line)
-        for line in FIXTURE_JSONL.read_text().splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in FIXTURE_JSONL.read_text().splitlines() if line.strip()]
 
 
 class TestFixtureJSONL:
@@ -2139,16 +2095,11 @@ class TestGateA8Property:
     )
     @settings(max_examples=200)
     def test_below_provisional_pct_always_in_0_100(self, n_above, n_below):
-        records = _make_records(n_above, text_length=5000) + _make_records(
-            n_below, text_length=100
-        )
+        records = _make_records(n_above, text_length=5000) + _make_records(n_below, text_length=100)
         r = gate_a8_text_length_distribution(records)
         assert 0.0 <= r["below_provisional_pct"] <= 100.0
 
     @given(n=st.integers(min_value=1, max_value=200))
     @settings(max_examples=100)
     def test_all_above_threshold_passes(self, n):
-        assert (
-            gate_a8_text_length_distribution(_make_records(n, text_length=5000))["pass"]
-            is True
-        )
+        assert gate_a8_text_length_distribution(_make_records(n, text_length=5000))["pass"] is True
