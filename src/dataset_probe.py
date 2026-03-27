@@ -46,7 +46,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.9_10k
+      --wandb-name dataset_probe_v2.5.10_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -67,8 +67,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterator
 
-# No alias — type: ignore[import] suppresses mypy import-untyped warning.
-import spacy  # type: ignore[import]
+from pydantic import BaseModel  # type: ignore[import]
 
 try:
     import wandb  # type: ignore[import]
@@ -80,26 +79,28 @@ try:
 except ImportError:
     pl = None  # type: ignore[assignment]
 
-from transformers import AutoTokenizer  # type: ignore[import]
+# spacy and transformers.AutoTokenizer are lazily imported inside the
+# functions that use them (_load_spacy_nlp, gate_a11_tokenizer_chunk_count).
+# This allows the probe to run schema/A7/A8/A9/B6 gates without requiring
+# the 1GB+ model downloads in minimal CI environments.
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED 2.5.9:
-#   - Module-level constants are now integer/string literals (obs 17)
-#   - 5 composable validate_schema helpers extracted (obs 3/16)
-#   - gate_a7/a8/a9/b6 report sample_n (obs 19)
-#   - gate_a11 generative_token_check has severity=advisory (obs 5/22)
-#   - gate_a12 reports records_text_capped (obs 23)
-#   - _load_spacy_nlp + _compute_sentence_counts extracted from A13 (obs 7)
-#   - ModelQualitySignals.summarize accepts config, reports records_text_capped
-#   - _log_report_to_wandb consolidates to single wandb.log call (obs 9)
-#   - _prepare_samples, _load_spacy_pipeline, _build_provenance, _summarize_gates
-#     extracted from run_probe (obs 10/12/21/24)
-#   - run_probe removes inline wandb.log (obs 11/13)
-#   - main() uses dataclasses.replace with _probe_defaults (obs 1)
+# CHANGED 2.5.10:
+#   - Lazy import spacy + AutoTokenizer (obs 1/9/19)
+#   - _reservoir_sample pure function decoupled from file I/O (obs 16)
+#   - text_length_relative_tolerance in ProbeConfig (obs 18)
+#   - _check_consistency uses relative + absolute tolerance (obs 18)
+#   - STAGE3_REQUIRED_FIELDS frozenset (obs 23)
+#   - validate_schema reports stage3_pass + stage3_missing_counts (obs 23)
+#   - quality_signals_html_pattern + quality_signals_boilerplate_phrases
+#     in ProbeConfig (obs 4)
+#   - ModelQualitySignals.check uses config html/boilerplate (obs 4)
+#   - GateResult Pydantic v2 model (obs 5/12/22)
+#   - GATE_REGISTRY list (obs 10)
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.9"
+PROBE_VERSION = "2.5.10"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex — OCR-resilient F\s*\.\s*\d+ pattern
@@ -113,64 +114,41 @@ _LEGAL_CITATION_RE = re.compile(
     re.MULTILINE,
 )
 
-DOCUMENTED_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "cluster_id",
-        "docket_id",
-        "court_id",
-        "court_name",
-        "case_name",
-        "date_filed",
-        "precedential_status",
-        "opinion_type",
-        "extracted_by_ocr",
-        "raw_text",
-        "text",
-        "text_length",
-        "text_source",
-        "cleaning_flags",
-        "source",
-        "token_count",
-        "paragraph_count",
-        "citation_count",
-        "text_hash",
-        "citation_density",
-        "is_precedential",
-        "text_entropy",
-    }
-)
+DOCUMENTED_FIELDS: frozenset[str] = frozenset({
+    "id", "cluster_id", "docket_id", "court_id", "court_name",
+    "case_name", "date_filed", "precedential_status", "opinion_type",
+    "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
+    "cleaning_flags", "source", "token_count", "paragraph_count",
+    "citation_count", "text_hash", "citation_density", "is_precedential",
+    "text_entropy",
+})
 
-KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
-    {
-        "plain_text",
-        "html_with_citations",
-        "html_lawbox",
-        "html_columbia",
-        "html_anon_2020",
-        "xml_harvard",
-        "direct_court_input",
-        "pdf",
-    }
-)
+KNOWN_TEXT_SOURCES: frozenset[str] = frozenset({
+    "plain_text", "html_with_citations", "html_lawbox", "html_columbia",
+    "html_anon_2020", "xml_harvard", "direct_court_input", "pdf",
+})
 
-MIN_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "court_id",
-        "text",
-        "text_length",
-        "text_source",
-        "citation_count",
-        "citation_density",
-        "is_precedential",
-        "text_entropy",
-        "token_count",
-        "paragraph_count",
-    }
-)
+MIN_REQUIRED_FIELDS: frozenset[str] = frozenset({
+    "id", "court_id", "text", "text_length", "text_source",
+    "citation_count", "citation_density", "is_precedential",
+    "text_entropy", "token_count", "paragraph_count",
+})
 
 REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
+
+# Fields explicitly required for Stage 3 chunking, metadata filtering,
+# and citation lookup as described in the README Stage 3 section.
+# Superset of MIN_REQUIRED_FIELDS — includes fields needed for:
+#   - chunking metadata: date_filed, opinion_type, precedential_status
+#   - citation lookup: citation_count, text_hash
+#   - corpus provenance: source, court_name
+STAGE3_REQUIRED_FIELDS: frozenset[str] = frozenset({
+    "id", "court_id", "court_name", "text", "text_length", "text_source",
+    "citation_count", "citation_density", "is_precedential",
+    "text_entropy", "token_count", "paragraph_count",
+    "date_filed", "opinion_type", "precedential_status",
+    "text_hash", "source",
+})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,21 +184,41 @@ class ProbeConfig:
     b6_entropy_spot_check_sample_n: int = 10
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     text_length_consistency_tolerance: int = 200
+    # Relative tolerance for text_length vs len(text) consistency check.
+    # A 200-char discrepancy is 40% of a 500-char doc (wrong) but 0.2% of
+    # a 100K-char doc (fine). Relative tolerance handles both correctly.
+    text_length_relative_tolerance: float = 0.05
+    # Quality signal patterns — injectable for reproducibility and testing.
+    quality_signals_html_pattern: str = r"<[a-zA-Z][^>]{0,100}>"
+    quality_signals_boilerplate_phrases: tuple[str, ...] = dataclasses.field(
+        default_factory=lambda: (
+            "all rights reserved",
+            "this page intentionally left blank",
+            "unpublished disposition",
+            "not for publication",
+            "do not cite",
+        )
+    )
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
-    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists."""
+    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists,
+    tuples to lists."""
     result: dict[str, Any] = {}
     for f in dataclasses.fields(cfg):
         val = getattr(cfg, f.name)
-        result[f.name] = sorted(val) if isinstance(val, frozenset) else val
+        if isinstance(val, frozenset):
+            result[f.name] = sorted(val)
+        elif isinstance(val, tuple):
+            result[f.name] = list(val)
+        else:
+            result[f.name] = val
     return result
 
 
 # ---------------------------------------------------------------------------
 # Module-level constants — literal values, NOT derived from ProbeConfig().
 # No type annotations — must match test assertions exactly.
-# Values must equal corresponding ProbeConfig field defaults.
 # ---------------------------------------------------------------------------
 PROVISIONAL_MIN_TEXT_LENGTH = 1500
 CHUNK_SIZE_SUBWORDS = 1024
@@ -229,6 +227,30 @@ ENCODER_MODEL = "BAAI/bge-m3"
 SPACY_MODEL = "en_core_web_sm"
 SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
 MIN_SENTENCE_COUNT = 20
+
+
+# ---------------------------------------------------------------------------
+# GateResult — Pydantic v2 model for gate output contract
+# ---------------------------------------------------------------------------
+
+class GateResult(BaseModel):
+    """
+    Typed contract for gate results. All gates return dicts that satisfy
+    this minimum contract. Extra gate-specific fields are allowed.
+    frozen=True enforces immutability after construction.
+    """
+
+    gate: str
+    severity: str
+    model_config = {"extra": "allow", "frozen": True}
+
+
+# ---------------------------------------------------------------------------
+# GATE_REGISTRY — ordered list of all gates with metadata
+# Adding a new gate (A14, etc.) requires only appending one entry here.
+# ---------------------------------------------------------------------------
+
+GATE_REGISTRY: list[dict[str, Any]] = []  # populated after gate functions defined
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
@@ -248,9 +270,7 @@ def _get_git_sha() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
+            capture_output=True, text=True, check=True,
         )
         return result.stdout.strip()
     except Exception:
@@ -312,6 +332,34 @@ def _shannon_entropy(text: str) -> float:
         freq[w] = freq.get(w, 0) + 1
     n = len(words)
     return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+# ---------------------------------------------------------------------------
+# Pure reservoir sampler — decoupled from file I/O
+# ---------------------------------------------------------------------------
+
+
+def _reservoir_sample(
+    iterable: Iterator[dict[str, Any]],
+    n: int,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Pure Vitter's reservoir sampling algorithm — accepts any iterator of dicts.
+    Decoupled from file I/O: no Path, no file opening, no JSON parsing.
+    This makes the sampling algorithm unit-testable without disk I/O.
+    Returns a reservoir of up to n records sampled uniformly at random.
+    """
+    rng = random.Random(seed)
+    reservoir: list[dict[str, Any]] = []
+    for i, record in enumerate(iterable):
+        if i < n:
+            reservoir.append(record)
+        else:
+            j = rng.randint(0, i)
+            if j < n:
+                reservoir[j] = record
+    return reservoir
 
 
 # ---------------------------------------------------------------------------
@@ -390,16 +438,7 @@ def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]
     JSON parse errors are silently dropped with no counting in this path —
     use iter_shards_with_audit() to obtain parse error counts and audit stats.
     """
-    reservoir: list[dict[str, Any]] = []
-    rng = random.Random(seed)
-    for i, record in enumerate(iter_shards(data_dir)):
-        if i < n:
-            reservoir.append(record)
-        else:
-            j = rng.randint(0, i)
-            if j < n:
-                reservoir[j] = record
-    return reservoir
+    return _reservoir_sample(iter_shards(data_dir), n=n, seed=seed)
 
 
 def _reservoir_sample_with_audit(
@@ -460,7 +499,9 @@ def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[s
     Used by run_probe when full_scan=True.
     """
     if pl is None:
-        raise ImportError("polars is required for --full-scan mode. Install with: uv add polars")
+        raise ImportError(
+            "polars is required for --full-scan mode. Install with: uv add polars"
+        )
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -571,19 +612,35 @@ def _check_vocabulary(records: list[dict[str, Any]]) -> dict[str, int]:
 def _check_consistency(
     records: list[dict[str, Any]],
     tolerance: int = 200,
+    relative_tolerance: float = 0.05,
 ) -> dict[str, int]:
     """
-    Return consistency_errors — checks abs(text_length - len(text)) > tolerance.
-    Malformed text_length values are skipped (caught by _check_types_and_ranges).
+    Return consistency_errors — checks text_length vs len(text).
+    Uses BOTH absolute and relative tolerance: a discrepancy fails only if it
+    exceeds BOTH the absolute tolerance AND the relative tolerance.
+    This correctly handles short docs (where 200 chars may be 40% error)
+    and long docs (where 200 chars may be 0.2% — acceptable rounding).
+    A record fails if: abs_diff > tolerance AND rel_diff > relative_tolerance.
     """
     consistency_errors: dict[str, int] = {}
     for r in records:
         text_len = r.get("text_length")
         actual_text = r.get("text")
-        if text_len is not None and isinstance(text_len, (int, float)) and actual_text is not None:
+        if (
+            text_len is not None
+            and isinstance(text_len, (int, float))
+            and actual_text is not None
+        ):
             actual_len = len(str(actual_text))
-            if abs(int(text_len) - actual_len) > tolerance:
-                consistency_errors["text_length_consistency"] = consistency_errors.get("text_length_consistency", 0) + 1
+            abs_diff = abs(int(text_len) - actual_len)
+            rel_diff = abs_diff / max(actual_len, 1)
+            # Fail if EITHER absolute OR relative threshold exceeded
+            # (catches both large absolute errors on short docs and
+            #  large relative errors on any doc size)
+            if abs_diff > tolerance or rel_diff > relative_tolerance:
+                consistency_errors["text_length_consistency"] = (
+                    consistency_errors.get("text_length_consistency", 0) + 1
+                )
     return consistency_errors
 
 
@@ -608,6 +665,7 @@ def validate_schema(
     """
     Check required field presence, type, range, vocabulary, consistency, and
     documented field coverage. Delegates to 5 composable helper validators.
+    Also reports stage3_pass and stage3_missing_counts for Stage 3 readiness.
     """
     cfg = config or ProbeConfig()
 
@@ -622,6 +680,8 @@ def validate_schema(
             "vocabulary_errors": {},
             "consistency_errors": {},
             "missing_documented_fields": {},
+            "stage3_pass": True,
+            "stage3_missing_counts": {},
             "pass": True,
             "note": "No records to validate.",
         }
@@ -629,12 +689,28 @@ def validate_schema(
     missing_by_field = _check_presence(records)
     type_errors, range_errors = _check_types_and_ranges(records)
     vocabulary_errors = _check_vocabulary(records)
-    consistency_errors = _check_consistency(records, tolerance=cfg.text_length_consistency_tolerance)
+    consistency_errors = _check_consistency(
+        records,
+        tolerance=cfg.text_length_consistency_tolerance,
+        relative_tolerance=cfg.text_length_relative_tolerance,
+    )
     missing_documented = _check_documented_coverage(records)
+
+    # Stage 3 readiness check
+    stage3_missing: dict[str, int] = {}
+    for r in records:
+        for f in STAGE3_REQUIRED_FIELDS:
+            if f not in r:
+                stage3_missing[f] = stage3_missing.get(f, 0) + 1
+    stage3_pass = not bool(stage3_missing)
 
     any_missing = any(v > 0 for v in missing_by_field.values())
     passed = (
-        not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
+        not any_missing
+        and not type_errors
+        and not range_errors
+        and not vocabulary_errors
+        and not consistency_errors
     )
     return {
         "gate": "schema_validation",
@@ -646,6 +722,8 @@ def validate_schema(
         "vocabulary_errors": vocabulary_errors,
         "consistency_errors": consistency_errors,
         "missing_documented_fields": missing_documented,
+        "stage3_pass": stage3_pass,
+        "stage3_missing_counts": stage3_missing,
         "pass": passed,
     }
 
@@ -663,11 +741,8 @@ def gate_a7_text_source_breakdown(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A7_text_source_breakdown",
-            "severity": "blocking",
-            "sample_n": 0,
-            "pass": False,
-            "note": "No records.",
+            "gate": "A7_text_source_breakdown", "severity": "blocking",
+            "sample_n": 0, "pass": False, "note": "No records.",
         }
 
     counts: dict[str, int] = {}
@@ -709,12 +784,9 @@ def gate_a8_text_length_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A8_text_length_distribution",
-            "severity": "blocking",
-            "sample_n": 0,
-            "text_length_parse_errors": 0,
-            "pass": False,
-            "note": "No records.",
+            "gate": "A8_text_length_distribution", "severity": "blocking",
+            "sample_n": 0, "text_length_parse_errors": 0,
+            "pass": False, "note": "No records.",
         }
 
     lengths: list[int] = []
@@ -734,7 +806,10 @@ def gate_a8_text_length_distribution(
             "sample_n": 0,
             "text_length_parse_errors": parse_errors,
             "pass": False,
-            "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
+            "note": (
+                f"All {parse_errors} records have unparseable text_length — "
+                "cannot compute distribution."
+            ),
         }
 
     lengths_sorted = sorted(lengths)
@@ -779,12 +854,9 @@ def gate_a9_citation_count_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A9_citation_count_distribution",
-            "severity": "advisory",
-            "sample_n": 0,
-            "citation_count_parse_errors": 0,
-            "pass": False,
-            "note": "No records.",
+            "gate": "A9_citation_count_distribution", "severity": "advisory",
+            "sample_n": 0, "citation_count_parse_errors": 0,
+            "pass": False, "note": "No records.",
         }
 
     counts: list[int] = []
@@ -844,15 +916,18 @@ def gate_a11_tokenizer_chunk_count(
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count. severity=blocking.
+    AutoTokenizer is lazily imported here to avoid requiring transformers
+    in minimal environments that only run schema/A7/A8/A9/B6 gates.
     generative_token_check sub-dict has severity=advisory — diagnostic only.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "severity": "blocking", "pass": False, "note": "No records."}
 
-    tokenizer_revision = cfg.encoder_model
+    # Lazy import — only needed when actually running this gate without injection
     if tokenizer is None:
         try:
+            from transformers import AutoTokenizer  # type: ignore[import]  # noqa: PLC0415
             tokenizer = AutoTokenizer.from_pretrained(cfg.encoder_model)
             tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
         except Exception as exc:
@@ -900,6 +975,7 @@ def gate_a11_tokenizer_chunk_count(
 
     if cfg.a11_generative_model:
         try:
+            from transformers import AutoTokenizer  # type: ignore[import]  # noqa: PLC0415
             gen_tok = AutoTokenizer.from_pretrained(cfg.a11_generative_model)
             gen_lengths: list[int] = []
             mistral_limit = 32_768
@@ -942,11 +1018,8 @@ def gate_a12_citation_anchor_survival(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A12_citation_anchor_survival",
-            "severity": "blocking",
-            "records_text_capped": 0,
-            "pass": False,
-            "note": "No records.",
+            "gate": "A12_citation_anchor_survival", "severity": "blocking",
+            "records_text_capped": 0, "pass": False, "note": "No records.",
         }
 
     has_anchor = 0
@@ -973,7 +1046,9 @@ def gate_a12_citation_anchor_survival(
 
     pct_with_anchor = 100.0 * has_anchor / len(records)
     field_nonzero_regex_zero_pct = (
-        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
+        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2)
+        if field_nonzero_total > 0
+        else 0.0
     )
 
     return {
@@ -1015,6 +1090,8 @@ def _load_spacy_nlp(
 ) -> tuple[Any, str]:
     """
     Load or return the spaCy NLP pipeline.
+    spaCy is lazily imported here — not at module top level — so that
+    schema/A7/A8/A9/B6 gates can run without requiring spaCy to be installed.
     Returns (nlp_object, version_string).
     If nlp is injected, returns it with version='injected'.
     If loading fails, returns (None, 'load_failed').
@@ -1022,11 +1099,12 @@ def _load_spacy_nlp(
     if nlp is not None:
         return nlp, "injected"
     try:
-        loaded = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+        import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
+        loaded = _spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
         if "sentencizer" not in loaded.pipe_names:
             loaded.add_pipe("sentencizer")
         loaded.max_length = 2_000_000
-        return loaded, spacy.__version__
+        return loaded, _spacy.__version__
     except Exception:
         return None, "load_failed"
 
@@ -1061,15 +1139,13 @@ def gate_a13_sentence_density(
     A13 — Sentence density. severity=blocking.
     Trusts the caller's pre-filtered record list — no internal re-filter.
     records_after_a8_filter = len(records).
+    spaCy is lazily imported via _load_spacy_nlp.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "records_after_a8_filter": 0,
-            "note": "No records.",
+            "gate": "A13_sentence_density", "severity": "blocking",
+            "pass": False, "records_after_a8_filter": 0, "note": "No records.",
         }
 
     nlp_obj, spacy_version = _load_spacy_nlp(cfg, nlp)
@@ -1114,11 +1190,8 @@ def gate_b6_text_entropy_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "B6_text_entropy_distribution",
-            "severity": "advisory",
-            "sample_n": 0,
-            "pass": True,
-            "note": "No records.",
+            "gate": "B6_text_entropy_distribution", "severity": "advisory",
+            "sample_n": 0, "pass": True, "note": "No records.",
         }
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
@@ -1161,20 +1234,28 @@ def gate_b6_text_entropy_distribution(
     }
 
 
+# ---------------------------------------------------------------------------
+# Populate GATE_REGISTRY after all gate functions are defined
+# ---------------------------------------------------------------------------
+
+GATE_REGISTRY = [
+    {"name": "A7", "fn": gate_a7_text_source_breakdown, "severity": "blocking"},
+    {"name": "A8", "fn": gate_a8_text_length_distribution, "severity": "blocking"},
+    {"name": "A9", "fn": gate_a9_citation_count_distribution, "severity": "advisory"},
+    {"name": "A11", "fn": gate_a11_tokenizer_chunk_count, "severity": "blocking"},
+    {"name": "A12", "fn": gate_a12_citation_anchor_survival, "severity": "blocking"},
+    {"name": "A13", "fn": gate_a13_sentence_density, "severity": "blocking"},
+    {"name": "B6", "fn": gate_b6_text_entropy_distribution, "severity": "advisory"},
+]
+
+
 class ModelQualitySignals:
     """
     Soft quality warnings for RAG pipeline rows.
     word_count_estimate: whitespace-split word count — NOT HF subword token count.
+    HTML_RE and BOILERPLATE_PHRASES are now driven by ProbeConfig fields
+    for full provenance auditability and testability.
     """
-
-    HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
-    BOILERPLATE_PHRASES = (
-        "all rights reserved",
-        "this page intentionally left blank",
-        "unpublished disposition",
-        "not for publication",
-        "do not cite",
-    )
 
     @classmethod
     def check(
@@ -1185,9 +1266,12 @@ class ModelQualitySignals:
     ) -> list[tuple[str, str]]:
         """
         Return soft quality warning signals for a single record.
+        Uses cfg.quality_signals_html_pattern and cfg.quality_signals_boilerplate_phrases
+        from ProbeConfig — fully injectable for testing and provenance.
         Text is capped at config.quality_signals_text_cap_chars before citation regex.
         """
         cfg = config or ProbeConfig()
+        html_re = re.compile(cfg.quality_signals_html_pattern)
         signals: list[tuple[str, str]] = []
         text: str = _get_text(row) if text_field == "text" else str(row.get(text_field, ""))
         word_count_estimate = len(text.split())
@@ -1196,13 +1280,13 @@ class ModelQualitySignals:
             signals.append(("truncated_document", f"~{word_count_estimate} words — likely truncated"))
         if word_count_estimate > 100_000:
             signals.append(("gigantic_document", f"~{word_count_estimate} words — may exceed model context"))
-        if cls.HTML_RE.search(text):
+        if html_re.search(text):
             signals.append(("html_remnants", "HTML tags detected — scraping artifact"))
         if unicodedata.normalize("NFC", text) != text:
             signals.append(("unicode_not_nfc", "Text is not NFC-normalized"))
 
         lower = text.lower()
-        for phrase in cls.BOILERPLATE_PHRASES:
+        for phrase in cfg.quality_signals_boilerplate_phrases:
             if phrase in lower:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
@@ -1224,8 +1308,7 @@ class ModelQualitySignals:
     ) -> dict[str, Any]:
         """
         Return signal frequency counts and pct_clean for a record sample.
-        Accepts config and forwards it to check() so quality_signals_text_cap_chars
-        is respected. Reports records_text_capped.
+        Accepts config and forwards it to check(). Reports records_text_capped.
         """
         cfg = config or ProbeConfig()
         rng = random.Random(seed)
@@ -1300,7 +1383,9 @@ def _prepare_samples(
     rng = random.Random(seed + 1)
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
-    a13_candidates = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
+    a13_candidates = [
+        r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length
+    ]
     a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
     return a11_sample, a12_sample, a13_sample
 
@@ -1312,22 +1397,26 @@ def _load_spacy_pipeline(
     """
     Load spaCy pipeline (or return None when skip_spacy=True).
     Returns (nlp|None, spacy_version, model_version).
+    spaCy is lazily imported here.
     """
     if skip_spacy:
         try:
-            return None, spacy.__version__, "unknown"
+            import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
+            return None, _spacy.__version__, "unknown"
         except Exception:
             return None, "unknown", "unknown"
 
     try:
-        nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+        import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
+        nlp = _spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
         if "sentencizer" not in nlp.pipe_names:
             nlp.add_pipe("sentencizer")
         nlp.max_length = 2_000_000
-        return nlp, spacy.__version__, nlp.meta.get("version", "unknown")
+        return nlp, _spacy.__version__, nlp.meta.get("version", "unknown")
     except Exception:
         try:
-            return None, spacy.__version__, "unknown"
+            import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
+            return None, _spacy.__version__, "unknown"
         except Exception:
             return None, "unknown", "unknown"
 
@@ -1399,7 +1488,6 @@ def _log_report_to_wandb(
         print("[dataset_probe] W&B not installed — skipping W&B logging.")
         return
 
-    # Capture the run object — avoids mypy union-attr on wandb.run which can be None.
     _run = wandb.init(
         project=project,
         entity=entity,
@@ -1428,18 +1516,8 @@ def _log_report_to_wandb(
 
     if "A8" in report["gates"]:
         a8 = report["gates"]["A8"]
-        for key in (
-            "p5",
-            "p10",
-            "p25",
-            "p75",
-            "p90",
-            "p95",
-            "mean",
-            "median",
-            "below_provisional_pct",
-            "below_provisional_count",
-        ):
+        for key in ("p5", "p10", "p25", "p75", "p90", "p95", "mean", "median",
+                    "below_provisional_pct", "below_provisional_count"):
             if key in a8:
                 metrics[f"gate/A8/{key}"] = a8[key]
 
@@ -1448,9 +1526,9 @@ def _log_report_to_wandb(
         metrics["gate/A12/pct_with_citation_anchor"] = a12.get("pct_with_citation_anchor", 0)
         metrics["gate/A12/mean_anchors_per_doc"] = a12.get("mean_anchors_per_doc", 0)
         if "citation_field_vs_regex" in a12:
-            metrics["gate/A12/field_nonzero_regex_zero_pct"] = a12["citation_field_vs_regex"][
-                "field_nonzero_regex_zero_pct"
-            ]
+            metrics["gate/A12/field_nonzero_regex_zero_pct"] = (
+                a12["citation_field_vs_regex"]["field_nonzero_regex_zero_pct"]
+            )
 
     if "A11" in report["gates"] and "median_chunks_per_doc" in report["gates"]["A11"]:
         a11 = report["gates"]["A11"]
@@ -1486,8 +1564,6 @@ def _log_report_to_wandb(
         },
     )
     artifact.add_file(str(output))
-    # Use captured _run to satisfy mypy — wandb.run can be None but _run is the
-    # return value of wandb.init() which is typed as Run.
     if _run is not None:
         _run.log_artifact(artifact)
     wandb.finish()
@@ -1535,7 +1611,9 @@ def run_probe(
             "total_blank_lines": audit["total_blank_lines"],
             "shard_errors": audit["shard_errors"],
         },
-        "provenance": _build_provenance(cfg, audit, spacy_version, spacy_model_version, full_scan),
+        "provenance": _build_provenance(
+            cfg, audit, spacy_version, spacy_model_version, full_scan
+        ),
         "gates": {},
     }
 
@@ -1560,7 +1638,9 @@ def run_probe(
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
+        report["gates"]["A13"] = gate_a13_sentence_density(
+            a13_sample, config=cfg, nlp=nlp_pipeline
+        )
     else:
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
@@ -1583,10 +1663,12 @@ def run_probe(
     )
 
     # Warning only — run_probe does NOT call wandb.log directly.
-    # All W&B logging routes through _log_report_to_wandb from main().
     if log_to_wandb:
         if wandb is None:
-            print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
+            print(
+                "[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — "
+                "logging skipped."
+            )
         elif wandb.run is None:
             print(
                 "[dataset_probe] WARNING: log_to_wandb=True but no active wandb run detected. "
@@ -1598,7 +1680,9 @@ def run_probe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
+    parser = argparse.ArgumentParser(
+        description="CourtListener dataset readiness probe (Category A + B6 gates)."
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
     parser.add_argument("--subset", type=int, default=10_000)
     parser.add_argument("--output", type=Path, default=Path("logs/dataset_probe_report.json"))
@@ -1623,9 +1707,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Use _probe_defaults to avoid referencing ProbeConfig() field accessors
-    # in the dataclasses.replace call — keeps the pattern clean and avoids
-    # the double-ProbeConfig() construction smell.
+    # dataclasses.replace with _probe_defaults — clean, no double ProbeConfig() access
     _probe_defaults = ProbeConfig()
     cfg = dataclasses.replace(
         _probe_defaults,
