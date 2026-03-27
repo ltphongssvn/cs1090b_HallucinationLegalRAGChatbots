@@ -114,25 +114,62 @@ _LEGAL_CITATION_RE = re.compile(
     re.MULTILINE,
 )
 
-DOCUMENTED_FIELDS: frozenset[str] = frozenset({
-    "id", "cluster_id", "docket_id", "court_id", "court_name",
-    "case_name", "date_filed", "precedential_status", "opinion_type",
-    "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
-    "cleaning_flags", "source", "token_count", "paragraph_count",
-    "citation_count", "text_hash", "citation_density", "is_precedential",
-    "text_entropy",
-})
+DOCUMENTED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "cluster_id",
+        "docket_id",
+        "court_id",
+        "court_name",
+        "case_name",
+        "date_filed",
+        "precedential_status",
+        "opinion_type",
+        "extracted_by_ocr",
+        "raw_text",
+        "text",
+        "text_length",
+        "text_source",
+        "cleaning_flags",
+        "source",
+        "token_count",
+        "paragraph_count",
+        "citation_count",
+        "text_hash",
+        "citation_density",
+        "is_precedential",
+        "text_entropy",
+    }
+)
 
-KNOWN_TEXT_SOURCES: frozenset[str] = frozenset({
-    "plain_text", "html_with_citations", "html_lawbox", "html_columbia",
-    "html_anon_2020", "xml_harvard", "direct_court_input", "pdf",
-})
+KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
+    {
+        "plain_text",
+        "html_with_citations",
+        "html_lawbox",
+        "html_columbia",
+        "html_anon_2020",
+        "xml_harvard",
+        "direct_court_input",
+        "pdf",
+    }
+)
 
-MIN_REQUIRED_FIELDS: frozenset[str] = frozenset({
-    "id", "court_id", "text", "text_length", "text_source",
-    "citation_count", "citation_density", "is_precedential",
-    "text_entropy", "token_count", "paragraph_count",
-})
+MIN_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "court_id",
+        "text",
+        "text_length",
+        "text_source",
+        "citation_count",
+        "citation_density",
+        "is_precedential",
+        "text_entropy",
+        "token_count",
+        "paragraph_count",
+    }
+)
 
 REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
 
@@ -185,13 +222,13 @@ def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
 # Module-level constants — integer/string literals, NOT derived from ProbeConfig()
 # Values must match corresponding ProbeConfig field defaults exactly.
 # ---------------------------------------------------------------------------
-PROVISIONAL_MIN_TEXT_LENGTH: int = 1500
-CHUNK_SIZE_SUBWORDS: int = 1024
-CHUNK_OVERLAP_SUBWORDS: int = 128
-ENCODER_MODEL: str = "BAAI/bge-m3"
-SPACY_MODEL: str = "en_core_web_sm"
-SPACY_EXCLUDE: list[str] = ["ner", "parser", "lemmatizer"]
-MIN_SENTENCE_COUNT: int = 20
+PROVISIONAL_MIN_TEXT_LENGTH = 1500
+CHUNK_SIZE_SUBWORDS = 1024
+CHUNK_OVERLAP_SUBWORDS = 128
+ENCODER_MODEL = "BAAI/bge-m3"
+SPACY_MODEL = "en_core_web_sm"
+SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
+MIN_SENTENCE_COUNT = 20
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
@@ -211,7 +248,9 @@ def _get_git_sha() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return result.stdout.strip()
     except Exception:
@@ -421,9 +460,7 @@ def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[s
     Used by run_probe when full_scan=True.
     """
     if pl is None:
-        raise ImportError(
-            "polars is required for --full-scan mode. Install with: uv add polars"
-        )
+        raise ImportError("polars is required for --full-scan mode. Install with: uv add polars")
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -543,16 +580,10 @@ def _check_consistency(
     for r in records:
         text_len = r.get("text_length")
         actual_text = r.get("text")
-        if (
-            text_len is not None
-            and isinstance(text_len, (int, float))
-            and actual_text is not None
-        ):
+        if text_len is not None and isinstance(text_len, (int, float)) and actual_text is not None:
             actual_len = len(str(actual_text))
             if abs(int(text_len) - actual_len) > tolerance:
-                consistency_errors["text_length_consistency"] = (
-                    consistency_errors.get("text_length_consistency", 0) + 1
-                )
+                consistency_errors["text_length_consistency"] = consistency_errors.get("text_length_consistency", 0) + 1
     return consistency_errors
 
 
@@ -598,18 +629,12 @@ def validate_schema(
     missing_by_field = _check_presence(records)
     type_errors, range_errors = _check_types_and_ranges(records)
     vocabulary_errors = _check_vocabulary(records)
-    consistency_errors = _check_consistency(
-        records, tolerance=cfg.text_length_consistency_tolerance
-    )
+    consistency_errors = _check_consistency(records, tolerance=cfg.text_length_consistency_tolerance)
     missing_documented = _check_documented_coverage(records)
 
     any_missing = any(v > 0 for v in missing_by_field.values())
     passed = (
-        not any_missing
-        and not type_errors
-        and not range_errors
-        and not vocabulary_errors
-        and not consistency_errors
+        not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
     )
     return {
         "gate": "schema_validation",
@@ -638,8 +663,11 @@ def gate_a7_text_source_breakdown(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A7_text_source_breakdown", "severity": "blocking",
-            "sample_n": 0, "pass": False, "note": "No records.",
+            "gate": "A7_text_source_breakdown",
+            "severity": "blocking",
+            "sample_n": 0,
+            "pass": False,
+            "note": "No records.",
         }
 
     counts: dict[str, int] = {}
@@ -681,9 +709,12 @@ def gate_a8_text_length_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A8_text_length_distribution", "severity": "blocking",
-            "sample_n": 0, "text_length_parse_errors": 0,
-            "pass": False, "note": "No records.",
+            "gate": "A8_text_length_distribution",
+            "severity": "blocking",
+            "sample_n": 0,
+            "text_length_parse_errors": 0,
+            "pass": False,
+            "note": "No records.",
         }
 
     lengths: list[int] = []
@@ -703,10 +734,7 @@ def gate_a8_text_length_distribution(
             "sample_n": 0,
             "text_length_parse_errors": parse_errors,
             "pass": False,
-            "note": (
-                f"All {parse_errors} records have unparseable text_length — "
-                "cannot compute distribution."
-            ),
+            "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
         }
 
     lengths_sorted = sorted(lengths)
@@ -751,9 +779,12 @@ def gate_a9_citation_count_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A9_citation_count_distribution", "severity": "advisory",
-            "sample_n": 0, "citation_count_parse_errors": 0,
-            "pass": False, "note": "No records.",
+            "gate": "A9_citation_count_distribution",
+            "severity": "advisory",
+            "sample_n": 0,
+            "citation_count_parse_errors": 0,
+            "pass": False,
+            "note": "No records.",
         }
 
     counts: list[int] = []
@@ -911,8 +942,11 @@ def gate_a12_citation_anchor_survival(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A12_citation_anchor_survival", "severity": "blocking",
-            "records_text_capped": 0, "pass": False, "note": "No records.",
+            "gate": "A12_citation_anchor_survival",
+            "severity": "blocking",
+            "records_text_capped": 0,
+            "pass": False,
+            "note": "No records.",
         }
 
     has_anchor = 0
@@ -939,8 +973,7 @@ def gate_a12_citation_anchor_survival(
 
     pct_with_anchor = 100.0 * has_anchor / len(records)
     field_nonzero_regex_zero_pct = (
-        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2)
-        if field_nonzero_total > 0 else 0.0
+        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
     )
 
     return {
@@ -1032,8 +1065,11 @@ def gate_a13_sentence_density(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A13_sentence_density", "severity": "blocking",
-            "pass": False, "records_after_a8_filter": 0, "note": "No records.",
+            "gate": "A13_sentence_density",
+            "severity": "blocking",
+            "pass": False,
+            "records_after_a8_filter": 0,
+            "note": "No records.",
         }
 
     nlp_obj, spacy_version = _load_spacy_nlp(cfg, nlp)
@@ -1078,8 +1114,11 @@ def gate_b6_text_entropy_distribution(
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "B6_text_entropy_distribution", "severity": "advisory",
-            "sample_n": 0, "pass": True, "note": "No records.",
+            "gate": "B6_text_entropy_distribution",
+            "severity": "advisory",
+            "sample_n": 0,
+            "pass": True,
+            "note": "No records.",
         }
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
@@ -1261,9 +1300,7 @@ def _prepare_samples(
     rng = random.Random(seed + 1)
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
-    a13_candidates = [
-        r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length
-    ]
+    a13_candidates = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
     a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
     return a11_sample, a12_sample, a13_sample
 
@@ -1362,7 +1399,7 @@ def _log_report_to_wandb(
         print("[dataset_probe] W&B not installed — skipping W&B logging.")
         return
 
-    wandb.init(
+    _run = wandb.init(
         project=project,
         entity=entity,
         job_type="dataset_probe",
@@ -1390,8 +1427,18 @@ def _log_report_to_wandb(
 
     if "A8" in report["gates"]:
         a8 = report["gates"]["A8"]
-        for key in ("p5", "p10", "p25", "p75", "p90", "p95", "mean", "median",
-                    "below_provisional_pct", "below_provisional_count"):
+        for key in (
+            "p5",
+            "p10",
+            "p25",
+            "p75",
+            "p90",
+            "p95",
+            "mean",
+            "median",
+            "below_provisional_pct",
+            "below_provisional_count",
+        ):
             if key in a8:
                 metrics[f"gate/A8/{key}"] = a8[key]
 
@@ -1400,9 +1447,9 @@ def _log_report_to_wandb(
         metrics["gate/A12/pct_with_citation_anchor"] = a12.get("pct_with_citation_anchor", 0)
         metrics["gate/A12/mean_anchors_per_doc"] = a12.get("mean_anchors_per_doc", 0)
         if "citation_field_vs_regex" in a12:
-            metrics["gate/A12/field_nonzero_regex_zero_pct"] = (
-                a12["citation_field_vs_regex"]["field_nonzero_regex_zero_pct"]
-            )
+            metrics["gate/A12/field_nonzero_regex_zero_pct"] = a12["citation_field_vs_regex"][
+                "field_nonzero_regex_zero_pct"
+            ]
 
     if "A11" in report["gates"] and "median_chunks_per_doc" in report["gates"]["A11"]:
         a11 = report["gates"]["A11"]
@@ -1438,7 +1485,8 @@ def _log_report_to_wandb(
         },
     )
     artifact.add_file(str(output))
-    wandb.run.log_artifact(artifact)
+    if _run is not None:
+        _run.log_artifact(artifact)
     wandb.finish()
     print(f"[dataset_probe] W&B run complete — https://wandb.ai/{entity}/{project}")
 
@@ -1484,9 +1532,7 @@ def run_probe(
             "total_blank_lines": audit["total_blank_lines"],
             "shard_errors": audit["shard_errors"],
         },
-        "provenance": _build_provenance(
-            cfg, audit, spacy_version, spacy_model_version, full_scan
-        ),
+        "provenance": _build_provenance(cfg, audit, spacy_version, spacy_model_version, full_scan),
         "gates": {},
     }
 
@@ -1511,9 +1557,7 @@ def run_probe(
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(
-            a13_sample, config=cfg, nlp=nlp_pipeline
-        )
+        report["gates"]["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
     else:
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
@@ -1539,10 +1583,7 @@ def run_probe(
     # All W&B logging routes through _log_report_to_wandb from main().
     if log_to_wandb:
         if wandb is None:
-            print(
-                "[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — "
-                "logging skipped."
-            )
+            print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
         elif wandb.run is None:
             print(
                 "[dataset_probe] WARNING: log_to_wandb=True but no active wandb run detected. "
@@ -1554,9 +1595,7 @@ def run_probe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="CourtListener dataset readiness probe (Category A + B6 gates)."
-    )
+    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
     parser.add_argument("--subset", type=int, default=10_000)
     parser.add_argument("--output", type=Path, default=Path("logs/dataset_probe_report.json"))
@@ -1582,9 +1621,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # CHANGED: dataclasses.replace — clean single ProbeConfig() construction.
+    _probe_defaults = ProbeConfig()
     cfg = dataclasses.replace(
-        ProbeConfig(),
-        a11_generative_model="" if args.skip_generative_tokenizer else ProbeConfig().a11_generative_model,
+        _probe_defaults,
+        a11_generative_model="" if args.skip_generative_tokenizer else _probe_defaults.a11_generative_model,
     )
 
     report = run_probe(
