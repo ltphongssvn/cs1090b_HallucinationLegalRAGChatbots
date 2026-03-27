@@ -46,7 +46,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.8_10k
+      --wandb-name dataset_probe_v2.5.9_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -84,43 +84,26 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED 2.5.8:
-#   - _LEGAL_CITATION_RE: OCR-resilient F\s*\.\s*\d+ pattern (obs 20)
-#   - gate_a8: excludes malformed text_length from distribution, reports
-#     text_length_parse_errors (obs 22)
-#   - gate_a9: excludes malformed citation_count, reports
-#     citation_count_parse_errors; malformed not counted as zero (obs 22)
-#   - gate_a13: trusts caller's pre-filtered records, no internal re-filter
-#     (obs 17); records_after_a8_filter = len(records)
-#   - run_probe: full_scan param + --full-scan CLI flag uses pl.scan_ndjson
-#     for exact stats on full corpus without reservoir sampling (Polars)
+# CHANGED 2.5.9:
+#   - Module-level constants are now integer/string literals (obs 17)
+#   - 5 composable validate_schema helpers extracted (obs 3/16)
+#   - gate_a7/a8/a9/b6 report sample_n (obs 19)
+#   - gate_a11 generative_token_check has severity=advisory (obs 5/22)
+#   - gate_a12 reports records_text_capped (obs 23)
+#   - _load_spacy_nlp + _compute_sentence_counts extracted from A13 (obs 7)
+#   - ModelQualitySignals.summarize accepts config, reports records_text_capped
+#     (obs 8/15/20, 23)
+#   - _log_report_to_wandb consolidates to single wandb.log call (obs 9)
+#   - _prepare_samples, _load_spacy_pipeline, _build_provenance, _summarize_gates
+#     extracted from run_probe (obs 10/12/21/24)
+#   - run_probe removes inline wandb.log; all W&B via _log_report_to_wandb (obs 11/13)
+#   - main() uses dataclasses.replace(ProbeConfig(), ...) (obs 1)
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.8"
+PROBE_VERSION = "2.5.9"
 
 # ---------------------------------------------------------------------------
-# Shared legal citation regex
-#
-# CHANGED: OCR-resilient pattern for federal reporter.
-# The pattern \d+\s+F\s*\.\s*\d+[a-z]?\s+\d+ now matches clean and OCR-
-# mangled forms:
-#   Clean:   "123 F.3d 456"       (F. followed immediately by 3d)
-#   OCR:     "123 F. 3d 456"      (space after period)
-#   OCR:     "123 F .3d 456"      (space before period)
-#   OCR:     "123 F.3d  456"      (\s+ at end already handled)
-#   OCR:     "456 F. 2d 789"      (second series with space)
-#
-# Match examples:
-#   "123 F.3d 456"     — federal reporter, third series (clean)
-#   "123 F. 3d 456"    — federal reporter, third series (OCR space)
-#   "456 F.2d 789"     — federal reporter, second series
-#   "123 F.Supp 456"   — federal supplement reporter
-#   "347 U.S. 483"     — United States Reports
-#   "Smith v. Jones"   — case name citation anchor
-#
-# Non-match examples:
-#   "The defendant argued the motion." — pure prose
-#   "Section 42 of the statute"        — bare number
+# Shared legal citation regex — OCR-resilient F\s*\.\s*\d+ pattern
 # ---------------------------------------------------------------------------
 
 _LEGAL_CITATION_RE = re.compile(
@@ -131,62 +114,25 @@ _LEGAL_CITATION_RE = re.compile(
     re.MULTILINE,
 )
 
-DOCUMENTED_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "cluster_id",
-        "docket_id",
-        "court_id",
-        "court_name",
-        "case_name",
-        "date_filed",
-        "precedential_status",
-        "opinion_type",
-        "extracted_by_ocr",
-        "raw_text",
-        "text",
-        "text_length",
-        "text_source",
-        "cleaning_flags",
-        "source",
-        "token_count",
-        "paragraph_count",
-        "citation_count",
-        "text_hash",
-        "citation_density",
-        "is_precedential",
-        "text_entropy",
-    }
-)
+DOCUMENTED_FIELDS: frozenset[str] = frozenset({
+    "id", "cluster_id", "docket_id", "court_id", "court_name",
+    "case_name", "date_filed", "precedential_status", "opinion_type",
+    "extracted_by_ocr", "raw_text", "text", "text_length", "text_source",
+    "cleaning_flags", "source", "token_count", "paragraph_count",
+    "citation_count", "text_hash", "citation_density", "is_precedential",
+    "text_entropy",
+})
 
-KNOWN_TEXT_SOURCES: frozenset[str] = frozenset(
-    {
-        "plain_text",
-        "html_with_citations",
-        "html_lawbox",
-        "html_columbia",
-        "html_anon_2020",
-        "xml_harvard",
-        "direct_court_input",
-        "pdf",
-    }
-)
+KNOWN_TEXT_SOURCES: frozenset[str] = frozenset({
+    "plain_text", "html_with_citations", "html_lawbox", "html_columbia",
+    "html_anon_2020", "xml_harvard", "direct_court_input", "pdf",
+})
 
-MIN_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {
-        "id",
-        "court_id",
-        "text",
-        "text_length",
-        "text_source",
-        "citation_count",
-        "citation_density",
-        "is_precedential",
-        "text_entropy",
-        "token_count",
-        "paragraph_count",
-    }
-)
+MIN_REQUIRED_FIELDS: frozenset[str] = frozenset({
+    "id", "court_id", "text", "text_length", "text_source",
+    "citation_count", "citation_density", "is_precedential",
+    "text_entropy", "token_count", "paragraph_count",
+})
 
 REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
 
@@ -222,8 +168,6 @@ class ProbeConfig:
     quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
-    # Set to "" to skip the Mistral secondary tokenizer check in A11.
-    # Use --skip-generative-tokenizer CLI flag to set this at runtime.
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     text_length_consistency_tolerance: int = 200
 
@@ -237,23 +181,24 @@ def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
     return result
 
 
-PROVISIONAL_MIN_TEXT_LENGTH = ProbeConfig().min_text_length
-CHUNK_SIZE_SUBWORDS = ProbeConfig().chunk_size_subwords
-CHUNK_OVERLAP_SUBWORDS = ProbeConfig().chunk_overlap_subwords
-ENCODER_MODEL = ProbeConfig().encoder_model
-SPACY_MODEL = ProbeConfig().spacy_model
-SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
-MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
+# ---------------------------------------------------------------------------
+# Module-level constants — integer/string literals, NOT derived from ProbeConfig()
+# Values must match corresponding ProbeConfig field defaults exactly.
+# ---------------------------------------------------------------------------
+PROVISIONAL_MIN_TEXT_LENGTH: int = 1500
+CHUNK_SIZE_SUBWORDS: int = 1024
+CHUNK_OVERLAP_SUBWORDS: int = 128
+ENCODER_MODEL: str = "BAAI/bge-m3"
+SPACY_MODEL: str = "en_core_web_sm"
+SPACY_EXCLUDE: list[str] = ["ner", "parser", "lemmatizer"]
+MIN_SENTENCE_COUNT: int = 20
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
     """
     Safely convert value to int, returning fallback on ValueError or TypeError.
-    Used in gates and run_probe orchestration so malformed numeric fields like
-    'N/A' or None are treated as fallback rather than crashing.
-    Note: gates A8 and A9 no longer use _safe_int for distribution arrays —
-    they instead EXCLUDE malformed values and report parse error counts.
-    _safe_int is still used in A12/A13/run_probe for filtering logic.
+    Gates A8/A9 exclude malformed values and report parse error counts separately.
+    _safe_int is used in A12/A13/run_probe for filtering logic.
     """
     try:
         return int(value)
@@ -266,9 +211,7 @@ def _get_git_sha() -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
+            capture_output=True, text=True, check=True,
         )
         return result.stdout.strip()
     except Exception:
@@ -330,6 +273,11 @@ def _shannon_entropy(text: str) -> float:
         freq[w] = freq.get(w, 0) + 1
     n = len(words)
     return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+# ---------------------------------------------------------------------------
+# Shard loaders
+# ---------------------------------------------------------------------------
 
 
 def iter_shards(data_dir: Path) -> Iterator[dict[str, Any]]:
@@ -470,11 +418,12 @@ def _reservoir_sample_with_audit(
 def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Load all records from all shards using Polars scan_ndjson for exact statistics.
-    Returns (records, audit) with the same shape as _reservoir_sample_with_audit.
     Used by run_probe when full_scan=True.
     """
     if pl is None:
-        raise ImportError("polars is required for --full-scan mode. Install with: uv add polars")
+        raise ImportError(
+            "polars is required for --full-scan mode. Install with: uv add polars"
+        )
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -502,48 +451,29 @@ def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[s
     return all_records, audit
 
 
-def validate_schema(
-    records: list[dict[str, Any]],
-    config: ProbeConfig | None = None,
-) -> dict[str, Any]:
-    """
-    Check required field presence, type, range, vocabulary, consistency, and
-    documented field coverage. Accepts optional config for tolerance settings.
-    """
-    cfg = config or ProbeConfig()
+# ---------------------------------------------------------------------------
+# validate_schema composable helpers
+# ---------------------------------------------------------------------------
 
-    if not records:
-        return {
-            "gate": "schema_validation",
-            "severity": "blocking",
-            "required_fields": sorted(MIN_REQUIRED_FIELDS),
-            "missing_counts": {},
-            "type_errors": {},
-            "range_errors": {},
-            "vocabulary_errors": {},
-            "consistency_errors": {},
-            "missing_documented_fields": {},
-            "pass": True,
-            "note": "No records to validate.",
-        }
 
-    missing_by_field: dict[str, int] = {f: 0 for f in MIN_REQUIRED_FIELDS}
-    type_errors: dict[str, int] = {}
-    range_errors: dict[str, int] = {}
-    vocabulary_errors: dict[str, int] = {}
-    consistency_errors: dict[str, int] = {}
-    documented_only = DOCUMENTED_FIELDS - MIN_REQUIRED_FIELDS
-    missing_documented: dict[str, int] = {}
-
+def _check_presence(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Return missing_counts for MIN_REQUIRED_FIELDS — {field: count_missing}."""
+    missing: dict[str, int] = {f: 0 for f in MIN_REQUIRED_FIELDS}
     for r in records:
         for f in MIN_REQUIRED_FIELDS:
             if f not in r:
-                missing_by_field[f] += 1
+                missing[f] += 1
+    return missing
 
-        for f in documented_only:
-            if f not in r:
-                missing_documented[f] = missing_documented.get(f, 0) + 1
 
+def _check_types_and_ranges(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Return (type_errors, range_errors) dicts for numeric/bool fields."""
+    type_errors: dict[str, int] = {}
+    range_errors: dict[str, int] = {}
+
+    for r in records:
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
@@ -588,19 +518,98 @@ def validate_schema(
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
+    return type_errors, range_errors
+
+
+def _check_vocabulary(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Return vocabulary_errors — {field: count_invalid} for enum fields."""
+    vocab_errors: dict[str, int] = {}
+    for r in records:
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
-            vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
+            vocab_errors["text_source"] = vocab_errors.get("text_source", 0) + 1
+    return vocab_errors
 
+
+def _check_consistency(
+    records: list[dict[str, Any]],
+    tolerance: int = 200,
+) -> dict[str, int]:
+    """
+    Return consistency_errors — checks abs(text_length - len(text)) > tolerance.
+    Malformed text_length values are skipped (caught by _check_types_and_ranges).
+    """
+    consistency_errors: dict[str, int] = {}
+    for r in records:
+        text_len = r.get("text_length")
         actual_text = r.get("text")
-        if text_len is not None and isinstance(text_len, (int, float)) and actual_text is not None:
+        if (
+            text_len is not None
+            and isinstance(text_len, (int, float))
+            and actual_text is not None
+        ):
             actual_len = len(str(actual_text))
-            if abs(int(text_len) - actual_len) > cfg.text_length_consistency_tolerance:
-                consistency_errors["text_length_consistency"] = consistency_errors.get("text_length_consistency", 0) + 1
+            if abs(int(text_len) - actual_len) > tolerance:
+                consistency_errors["text_length_consistency"] = (
+                    consistency_errors.get("text_length_consistency", 0) + 1
+                )
+    return consistency_errors
+
+
+def _check_documented_coverage(records: list[dict[str, Any]]) -> dict[str, int]:
+    """
+    Return missing counts for DOCUMENTED_FIELDS not in MIN_REQUIRED_FIELDS.
+    Advisory — does not affect pass/fail.
+    """
+    documented_only = DOCUMENTED_FIELDS - MIN_REQUIRED_FIELDS
+    missing: dict[str, int] = {}
+    for r in records:
+        for f in documented_only:
+            if f not in r:
+                missing[f] = missing.get(f, 0) + 1
+    return missing
+
+
+def validate_schema(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
+    """
+    Check required field presence, type, range, vocabulary, consistency, and
+    documented field coverage. Delegates to 5 composable helper validators.
+    """
+    cfg = config or ProbeConfig()
+
+    if not records:
+        return {
+            "gate": "schema_validation",
+            "severity": "blocking",
+            "required_fields": sorted(MIN_REQUIRED_FIELDS),
+            "missing_counts": {},
+            "type_errors": {},
+            "range_errors": {},
+            "vocabulary_errors": {},
+            "consistency_errors": {},
+            "missing_documented_fields": {},
+            "pass": True,
+            "note": "No records to validate.",
+        }
+
+    missing_by_field = _check_presence(records)
+    type_errors, range_errors = _check_types_and_ranges(records)
+    vocabulary_errors = _check_vocabulary(records)
+    consistency_errors = _check_consistency(
+        records, tolerance=cfg.text_length_consistency_tolerance
+    )
+    missing_documented = _check_documented_coverage(records)
 
     any_missing = any(v > 0 for v in missing_by_field.values())
     passed = (
-        not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
+        not any_missing
+        and not type_errors
+        and not range_errors
+        and not vocabulary_errors
+        and not consistency_errors
     )
     return {
         "gate": "schema_validation",
@@ -616,6 +625,11 @@ def validate_schema(
     }
 
 
+# ---------------------------------------------------------------------------
+# Gates
+# ---------------------------------------------------------------------------
+
+
 def gate_a7_text_source_breakdown(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
@@ -623,7 +637,10 @@ def gate_a7_text_source_breakdown(
     """A7 — text_source breakdown. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A7_text_source_breakdown", "severity": "blocking", "pass": False, "note": "No records."}
+        return {
+            "gate": "A7_text_source_breakdown", "severity": "blocking",
+            "sample_n": 0, "pass": False, "note": "No records.",
+        }
 
     counts: dict[str, int] = {}
     for r in records:
@@ -638,6 +655,7 @@ def gate_a7_text_source_breakdown(
     return {
         "gate": "A7_text_source_breakdown",
         "severity": "blocking",
+        "sample_n": total,
         "total_records": total,
         "breakdown": breakdown,
         "known_formats_pct": round(known_pct, 2),
@@ -656,20 +674,16 @@ def gate_a8_text_length_distribution(
 ) -> dict[str, Any]:
     """
     A8 — text_length distribution. severity=blocking.
-    CHANGED: malformed text_length values (e.g. 'N/A', None) are EXCLUDED
-    from the distribution array rather than coerced to 0. This prevents
-    false zeros from contaminating percentiles and mean/median stats.
-    text_length_parse_errors reports the count of excluded records.
-    If all records have malformed text_length, returns structured failure.
+    Malformed text_length values are EXCLUDED from the distribution.
+    text_length_parse_errors counts excluded records.
+    sample_n reflects valid (parseable) records only.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A8_text_length_distribution",
-            "severity": "blocking",
-            "pass": False,
-            "text_length_parse_errors": 0,
-            "note": "No records.",
+            "gate": "A8_text_length_distribution", "severity": "blocking",
+            "sample_n": 0, "text_length_parse_errors": 0,
+            "pass": False, "note": "No records.",
         }
 
     lengths: list[int] = []
@@ -686,9 +700,13 @@ def gate_a8_text_length_distribution(
             "gate": "A8_text_length_distribution",
             "severity": "blocking",
             "count": 0,
+            "sample_n": 0,
             "text_length_parse_errors": parse_errors,
             "pass": False,
-            "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
+            "note": (
+                f"All {parse_errors} records have unparseable text_length — "
+                "cannot compute distribution."
+            ),
         }
 
     lengths_sorted = sorted(lengths)
@@ -697,6 +715,7 @@ def gate_a8_text_length_distribution(
         "gate": "A8_text_length_distribution",
         "severity": "blocking",
         "count": len(lengths),
+        "sample_n": len(lengths),
         "text_length_parse_errors": parse_errors,
         "mean": round(statistics.mean(lengths), 1),
         "median": statistics.median(lengths),
@@ -725,20 +744,16 @@ def gate_a9_citation_count_distribution(
 ) -> dict[str, Any]:
     """
     A9 — citation_count distribution. severity=advisory.
-    CHANGED: malformed citation_count values are EXCLUDED from the distribution
-    rather than coerced to 0. Coercing to 0 would conflate 'true zero citations'
-    with 'failed upstream parse', lowering mean and skewing zero_citation_pct.
-    citation_count_parse_errors reports the count of excluded records.
-    If all records have malformed citation_count, returns structured failure.
+    Malformed citation_count values are EXCLUDED from the distribution.
+    citation_count_parse_errors counts excluded records.
+    sample_n reflects valid (parseable) records only.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {
-            "gate": "A9_citation_count_distribution",
-            "severity": "advisory",
-            "pass": False,
-            "citation_count_parse_errors": 0,
-            "note": "No records.",
+            "gate": "A9_citation_count_distribution", "severity": "advisory",
+            "sample_n": 0, "citation_count_parse_errors": 0,
+            "pass": False, "note": "No records.",
         }
 
     counts: list[int] = []
@@ -755,6 +770,7 @@ def gate_a9_citation_count_distribution(
             "gate": "A9_citation_count_distribution",
             "severity": "advisory",
             "count": 0,
+            "sample_n": 0,
             "citation_count_parse_errors": parse_errors,
             "pass": False,
             "note": (
@@ -770,6 +786,7 @@ def gate_a9_citation_count_distribution(
         "gate": "A9_citation_count_distribution",
         "severity": "advisory",
         "count": n,
+        "sample_n": n,
         "citation_count_parse_errors": parse_errors,
         "mean": round(statistics.mean(counts), 2),
         "median": statistics.median(counts),
@@ -794,7 +811,10 @@ def gate_a11_tokenizer_chunk_count(
     config: ProbeConfig | None = None,
     tokenizer: Any | None = None,
 ) -> dict[str, Any]:
-    """A11 — Tokenizer-aware chunk count. severity=blocking."""
+    """
+    A11 — Tokenizer-aware chunk count. severity=blocking.
+    generative_token_check sub-dict has severity=advisory — diagnostic only.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A11_tokenizer_chunk_count", "severity": "blocking", "pass": False, "note": "No records."}
@@ -860,6 +880,7 @@ def gate_a11_tokenizer_chunk_count(
                 if len(gen_ids) > mistral_limit:
                     over_limit += 1
             result["generative_token_check"] = {
+                "severity": "advisory",
                 "model": cfg.a11_generative_model,
                 "mean_tokens": round(statistics.mean(gen_lengths), 1),
                 "median_tokens": statistics.median(gen_lengths),
@@ -870,6 +891,7 @@ def gate_a11_tokenizer_chunk_count(
             }
         except Exception as exc:
             result["generative_token_check"] = {
+                "severity": "advisory",
                 "model": cfg.a11_generative_model,
                 "error": str(exc),
                 "note": "Generative tokenizer load failed — skipping secondary check.",
@@ -882,18 +904,28 @@ def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A12 — Citation anchor survival. severity=blocking. Text capped before regex."""
+    """
+    A12 — Citation anchor survival. severity=blocking.
+    Reports records_text_capped — count of records where text > cap.
+    """
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A12_citation_anchor_survival", "severity": "blocking", "pass": False, "note": "No records."}
+        return {
+            "gate": "A12_citation_anchor_survival", "severity": "blocking",
+            "records_text_capped": 0, "pass": False, "note": "No records.",
+        }
 
     has_anchor = 0
     citation_counts_found: list[int] = []
     field_nonzero_regex_zero = 0
     field_nonzero_total = 0
+    records_text_capped = 0
 
     for r in records:
-        text = _get_text(r)[: cfg.a12_text_cap_chars]
+        raw_text = _get_text(r)
+        if len(raw_text) > cfg.a12_text_cap_chars:
+            records_text_capped += 1
+        text = raw_text[: cfg.a12_text_cap_chars]
         matches = _LEGAL_CITATION_RE.findall(text)
         n_matches = len(matches)
         citation_counts_found.append(n_matches)
@@ -907,7 +939,8 @@ def gate_a12_citation_anchor_survival(
 
     pct_with_anchor = 100.0 * has_anchor / len(records)
     field_nonzero_regex_zero_pct = (
-        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
+        round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2)
+        if field_nonzero_total > 0 else 0.0
     )
 
     return {
@@ -915,6 +948,7 @@ def gate_a12_citation_anchor_survival(
         "severity": "blocking",
         "subsample_n": len(records),
         "text_cap_chars": cfg.a12_text_cap_chars,
+        "records_text_capped": records_text_capped,
         "records_with_citation_anchor": has_anchor,
         "pct_with_citation_anchor": round(pct_with_anchor, 2),
         "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
@@ -937,48 +971,42 @@ def gate_a12_citation_anchor_survival(
     }
 
 
-def gate_a13_sentence_density(
+# ---------------------------------------------------------------------------
+# gate_a13 internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_spacy_nlp(
+    cfg: ProbeConfig,
+    nlp: Any | None,
+) -> tuple[Any, str]:
+    """
+    Load or return the spaCy NLP pipeline.
+    Returns (nlp_object, version_string).
+    If nlp is injected, returns it with version='injected'.
+    If loading fails, returns (None, 'load_failed').
+    """
+    if nlp is not None:
+        return nlp, "injected"
+    try:
+        loaded = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+        if "sentencizer" not in loaded.pipe_names:
+            loaded.add_pipe("sentencizer")
+        loaded.max_length = 2_000_000
+        return loaded, spacy.__version__
+    except Exception:
+        return None, "load_failed"
+
+
+def _compute_sentence_counts(
     records: list[dict[str, Any]],
-    config: ProbeConfig | None = None,
-    nlp: Any | None = None,
-) -> dict[str, Any]:
+    nlp: Any,
+    cfg: ProbeConfig,
+) -> tuple[list[int], int]:
     """
-    A13 — Sentence density. severity=blocking.
-    CHANGED: gate_a13 no longer re-filters records internally.
-    It trusts the caller's pre-filtered list (run_probe pre-filters to
-    a13_candidates before passing here). records_after_a8_filter = len(records).
-    This eliminates redundant double-filtering and clarifies responsibility:
-    filtering belongs at the orchestration layer (run_probe), not inside the gate.
+    Run sentence segmentation on all records.
+    Returns (sent_counts, below_threshold_count).
     """
-    cfg = config or ProbeConfig()
-    if not records:
-        return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "records_after_a8_filter": 0,
-            "note": "No records.",
-        }
-
-    spacy_version = "injected"
-    if nlp is None:
-        try:
-            nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
-            if "sentencizer" not in nlp.pipe_names:
-                nlp.add_pipe("sentencizer")
-            nlp.max_length = 2_000_000
-            spacy_version = spacy.__version__
-        except Exception as exc:
-            return {
-                "gate": "A13_sentence_density",
-                "severity": "blocking",
-                "pass": False,
-                "records_after_a8_filter": len(records),
-                "error": str(exc),
-                "note": f"spaCy model load failed: {exc}",
-            }
-
-    # Trust caller — process all records as received (caller pre-filters).
     sent_counts: list[int] = []
     below_threshold = 0
     for r in records:
@@ -988,6 +1016,38 @@ def gate_a13_sentence_density(
         sent_counts.append(n_sents)
         if n_sents < cfg.min_sentence_count:
             below_threshold += 1
+    return sent_counts, below_threshold
+
+
+def gate_a13_sentence_density(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+    nlp: Any | None = None,
+) -> dict[str, Any]:
+    """
+    A13 — Sentence density. severity=blocking.
+    Trusts the caller's pre-filtered record list — no internal re-filter.
+    records_after_a8_filter = len(records).
+    """
+    cfg = config or ProbeConfig()
+    if not records:
+        return {
+            "gate": "A13_sentence_density", "severity": "blocking",
+            "pass": False, "records_after_a8_filter": 0, "note": "No records.",
+        }
+
+    nlp_obj, spacy_version = _load_spacy_nlp(cfg, nlp)
+    if nlp_obj is None:
+        return {
+            "gate": "A13_sentence_density",
+            "severity": "blocking",
+            "pass": False,
+            "records_after_a8_filter": len(records),
+            "error": "spaCy model load failed",
+            "note": "spaCy model load failed — check spacy_model in ProbeConfig.",
+        }
+
+    sent_counts, below_threshold = _compute_sentence_counts(records, nlp_obj, cfg)
 
     return {
         "gate": "A13_sentence_density",
@@ -1017,7 +1077,10 @@ def gate_b6_text_entropy_distribution(
     """B6 — text_entropy distribution. severity=advisory — always passes."""
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "B6_text_entropy_distribution", "severity": "advisory", "pass": True, "note": "No records."}
+        return {
+            "gate": "B6_text_entropy_distribution", "severity": "advisory",
+            "sample_n": 0, "pass": True, "note": "No records.",
+        }
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
@@ -1034,6 +1097,7 @@ def gate_b6_text_entropy_distribution(
     return {
         "gate": "B6_text_entropy_distribution",
         "severity": "advisory",
+        "sample_n": len(entropies),
         "count": len(entropies),
         "mean": round(statistics.mean(entropies), 4),
         "median": round(float(statistics.median(entropies)), 4),
@@ -1062,7 +1126,6 @@ class ModelQualitySignals:
     """
     Soft quality warnings for RAG pipeline rows.
     word_count_estimate: whitespace-split word count — NOT HF subword token count.
-    HF subword tokens computed in gate_a11 via AutoTokenizer only.
     """
 
     HTML_RE = re.compile(r"<[a-zA-Z][^>]{0,100}>")
@@ -1118,22 +1181,35 @@ class ModelQualitySignals:
         records: list[dict[str, Any]],
         sample_n: int = 500,
         seed: int = 0,
+        config: ProbeConfig | None = None,
     ) -> dict[str, Any]:
-        """Return signal frequency counts and pct_clean for a record sample."""
+        """
+        Return signal frequency counts and pct_clean for a record sample.
+        Accepts config and forwards it to check() so quality_signals_text_cap_chars
+        is respected. Reports records_text_capped.
+        """
+        cfg = config or ProbeConfig()
         rng = random.Random(seed)
         subsample = rng.sample(records, min(sample_n, len(records)))
         signal_counts: dict[str, int] = {}
         clean = 0
+        records_text_capped = 0
+
         for row in subsample:
-            sigs = cls.check(row)
+            text = _get_text(row)
+            if len(text) > cfg.quality_signals_text_cap_chars:
+                records_text_capped += 1
+            sigs = cls.check(row, config=cfg)
             if not sigs:
                 clean += 1
             for name, _ in sigs:
                 signal_counts[name] = signal_counts.get(name, 0) + 1
+
         return {
             "subsample_n": len(subsample),
             "signal_counts": signal_counts,
             "pct_clean": round(100.0 * clean / len(subsample), 2) if subsample else 0.0,
+            "records_text_capped": records_text_capped,
         }
 
 
@@ -1167,6 +1243,109 @@ class CourtListenerDatasetProbe:
         )
 
 
+# ---------------------------------------------------------------------------
+# run_probe orchestration helpers
+# ---------------------------------------------------------------------------
+
+
+def _prepare_samples(
+    records: list[dict[str, Any]],
+    cfg: ProbeConfig,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Pre-compute subsamples for A11, A12, A13.
+    A13 candidates are pre-filtered to records with text_length >= min_text_length.
+    Returns (a11_sample, a12_sample, a13_sample).
+    """
+    rng = random.Random(seed + 1)
+    a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
+    a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
+    a13_candidates = [
+        r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length
+    ]
+    a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
+    return a11_sample, a12_sample, a13_sample
+
+
+def _load_spacy_pipeline(
+    cfg: ProbeConfig,
+    skip_spacy: bool,
+) -> tuple[Any | None, str, str]:
+    """
+    Load spaCy pipeline (or return None when skip_spacy=True).
+    Returns (nlp|None, spacy_version, model_version).
+    """
+    if skip_spacy:
+        try:
+            return None, spacy.__version__, "unknown"
+        except Exception:
+            return None, "unknown", "unknown"
+
+    try:
+        nlp = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
+        if "sentencizer" not in nlp.pipe_names:
+            nlp.add_pipe("sentencizer")
+        nlp.max_length = 2_000_000
+        return nlp, spacy.__version__, nlp.meta.get("version", "unknown")
+    except Exception:
+        try:
+            return None, spacy.__version__, "unknown"
+        except Exception:
+            return None, "unknown", "unknown"
+
+
+def _build_provenance(
+    cfg: ProbeConfig,
+    audit: dict[str, Any],
+    spacy_version: str,
+    spacy_model_version: str,
+    full_scan: bool,
+) -> dict[str, Any]:
+    """Build the provenance dict for the probe report."""
+    return {
+        "probe_version": PROBE_VERSION,
+        "git_sha": _get_git_sha(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "spacy_version": spacy_version,
+        "spacy_model_version": spacy_model_version,
+        "full_scan": full_scan,
+        "polars_version": pl.__version__ if pl is not None else None,
+        "probe_config": _probe_config_to_dict(cfg),
+    }
+
+
+def _summarize_gates(gates: dict[str, Any]) -> dict[str, Any]:
+    """
+    Partition gate results into passed/failed_blocking/failed_advisory/skipped.
+    Returns summary dict with all_passed = (no blocking failures).
+    """
+    passed: list[str] = []
+    failed_blocking: list[str] = []
+    failed_advisory: list[str] = []
+    skipped: list[str] = []
+
+    for k, v in gates.items():
+        if v.get("skipped"):
+            skipped.append(k)
+        elif v.get("pass") is True:
+            passed.append(k)
+        elif v.get("pass") is False:
+            if v.get("severity") == "advisory":
+                failed_advisory.append(k)
+            else:
+                failed_blocking.append(k)
+
+    return {
+        "passed": passed,
+        "failed_blocking": failed_blocking,
+        "failed_advisory": failed_advisory,
+        "failed": failed_blocking + failed_advisory,
+        "skipped": skipped,
+        "all_passed": len(failed_blocking) == 0,
+    }
+
+
 def _log_report_to_wandb(
     report: dict[str, Any],
     entity: str,
@@ -1174,12 +1353,16 @@ def _log_report_to_wandb(
     name: str,
     output: Path,
 ) -> None:
-    """Initialize a W&B run, log all gate metrics and the full report artifact."""
+    """
+    Initialize a W&B run, log all gate metrics in a SINGLE wandb.log call,
+    and upload the full report as a W&B Artifact.
+    All metrics consolidated into one dict — wandb.log called exactly once.
+    """
     if wandb is None:
         print("[dataset_probe] W&B not installed — skipping W&B logging.")
         return
 
-    run = wandb.init(
+    wandb.init(
         project=project,
         entity=entity,
         job_type="dataset_probe",
@@ -1188,79 +1371,60 @@ def _log_report_to_wandb(
         tags=["data_readiness", "courtlistener"],
     )
 
-    wandb.log(
-        {
-            "probe/all_passed": report["summary"]["all_passed"],
-            "probe/passed_count": len(report["summary"]["passed"]),
-            "probe/failed_blocking_count": len(report["summary"]["failed_blocking"]),
-            "probe/failed_advisory_count": len(report["summary"]["failed_advisory"]),
-            "probe/skipped_count": len(report["summary"]["skipped"]),
-            "probe/total_records_decoded": report["shard_audit"]["total_records_decoded"],
-            "probe/parse_errors": report["shard_audit"]["total_parse_errors"],
-            "probe/subset_n": report["subset_n"],
-            "probe/pct_clean": report["quality_signals"]["pct_clean"],
-        }
-    )
+    # Build one consolidated metrics dict — log exactly once.
+    metrics: dict[str, Any] = {
+        "probe/all_passed": report["summary"]["all_passed"],
+        "probe/passed_count": len(report["summary"]["passed"]),
+        "probe/failed_blocking_count": len(report["summary"]["failed_blocking"]),
+        "probe/failed_advisory_count": len(report["summary"]["failed_advisory"]),
+        "probe/skipped_count": len(report["summary"]["skipped"]),
+        "probe/total_records_decoded": report["shard_audit"]["total_records_decoded"],
+        "probe/parse_errors": report["shard_audit"]["total_parse_errors"],
+        "probe/subset_n": report["subset_n"],
+        "probe/pct_clean": report["quality_signals"]["pct_clean"],
+    }
 
     for gate_name, gate_result in report["gates"].items():
         if "pass" in gate_result:
-            wandb.log({f"gate/{gate_name}/pass": int(gate_result["pass"])})
+            metrics[f"gate/{gate_name}/pass"] = int(gate_result["pass"])
 
     if "A8" in report["gates"]:
         a8 = report["gates"]["A8"]
-        for key in (
-            "p5",
-            "p10",
-            "p25",
-            "p75",
-            "p90",
-            "p95",
-            "mean",
-            "median",
-            "below_provisional_pct",
-            "below_provisional_count",
-        ):
+        for key in ("p5", "p10", "p25", "p75", "p90", "p95", "mean", "median",
+                    "below_provisional_pct", "below_provisional_count"):
             if key in a8:
-                wandb.log({f"gate/A8/{key}": a8[key]})
+                metrics[f"gate/A8/{key}"] = a8[key]
 
     if "A12" in report["gates"]:
         a12 = report["gates"]["A12"]
-        wandb.log(
-            {
-                "gate/A12/pct_with_citation_anchor": a12.get("pct_with_citation_anchor", 0),
-                "gate/A12/mean_anchors_per_doc": a12.get("mean_anchors_per_doc", 0),
-                "gate/A12/field_nonzero_regex_zero_pct": (
-                    a12["citation_field_vs_regex"]["field_nonzero_regex_zero_pct"]
-                ),
-            }
-        )
+        metrics["gate/A12/pct_with_citation_anchor"] = a12.get("pct_with_citation_anchor", 0)
+        metrics["gate/A12/mean_anchors_per_doc"] = a12.get("mean_anchors_per_doc", 0)
+        if "citation_field_vs_regex" in a12:
+            metrics["gate/A12/field_nonzero_regex_zero_pct"] = (
+                a12["citation_field_vs_regex"]["field_nonzero_regex_zero_pct"]
+            )
 
     if "A11" in report["gates"] and "median_chunks_per_doc" in report["gates"]["A11"]:
         a11 = report["gates"]["A11"]
-        wandb.log(
-            {
-                "gate/A11/median_chunks_per_doc": a11["median_chunks_per_doc"],
-                "gate/A11/mean_chunks_per_doc": a11["mean_chunks_per_doc"],
-                "gate/A11/multi_chunk_pct": a11["multi_chunk_pct"],
-                "gate/A11/mean_token_length": a11["mean_token_length"],
-            }
-        )
+        metrics["gate/A11/median_chunks_per_doc"] = a11["median_chunks_per_doc"]
+        metrics["gate/A11/mean_chunks_per_doc"] = a11["mean_chunks_per_doc"]
+        metrics["gate/A11/multi_chunk_pct"] = a11["multi_chunk_pct"]
+        metrics["gate/A11/mean_token_length"] = a11["mean_token_length"]
 
     if "A13" in report["gates"] and "median_sentences" in report["gates"]["A13"]:
         a13 = report["gates"]["A13"]
-        wandb.log(
-            {
-                "gate/A13/median_sentences": a13["median_sentences"],
-                "gate/A13/below_threshold_pct": a13["below_threshold_pct"],
-                "gate/A13/records_after_a8_filter": a13["records_after_a8_filter"],
-            }
-        )
+        metrics["gate/A13/median_sentences"] = a13["median_sentences"]
+        metrics["gate/A13/below_threshold_pct"] = a13["below_threshold_pct"]
+        metrics["gate/A13/records_after_a8_filter"] = a13["records_after_a8_filter"]
 
     if "B6" in report["gates"]:
         b6 = report["gates"]["B6"]
         for key in ("p5", "p10", "p25", "p75", "mean", "median", "zero_entropy_count"):
             if key in b6:
-                wandb.log({f"gate/B6/{key}": b6[key]})
+                metrics[f"gate/B6/{key}"] = b6[key]
+
+    # Single consolidated log call
+    wandb.log(metrics)
 
     artifact = wandb.Artifact(
         name="dataset_probe_report",
@@ -1274,7 +1438,7 @@ def _log_report_to_wandb(
         },
     )
     artifact.add_file(str(output))
-    run.log_artifact(artifact)
+    wandb.run.log_artifact(artifact)
     wandb.finish()
     print(f"[dataset_probe] W&B run complete — https://wandb.ai/{entity}/{project}")
 
@@ -1292,9 +1456,8 @@ def run_probe(
 ) -> dict[str, Any]:
     """
     Run all gates on a record subset. No side effects on corpus shards.
-    CHANGED: full_scan=True uses pl.scan_ndjson (Polars) to load all records
-    from the corpus exactly — bypassing reservoir sampling for exact statistics.
-    full_scan=False (default) uses one-pass reservoir sampling for speed.
+    Delegates to extracted helpers. No inline wandb.log — all W&B telemetry
+    routes through _log_report_to_wandb called from main().
     """
     cfg = config or ProbeConfig()
 
@@ -1307,32 +1470,8 @@ def run_probe(
         records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
         print(f"[dataset_probe] Loaded {len(records)} records.")
 
-    rng = random.Random(seed + 1)
-    a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
-    a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
-    # Pre-filter for A13 — gate_a13 trusts caller's pre-filtered list
-    a13_candidates = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
-    a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
-
-    spacy_version = "unknown"
-    spacy_model_version = "unknown"
-    nlp_pipeline: Any | None = None
-
-    if not skip_spacy:
-        try:
-            nlp_pipeline = spacy.load(cfg.spacy_model, exclude=SPACY_EXCLUDE)
-            if "sentencizer" not in nlp_pipeline.pipe_names:
-                nlp_pipeline.add_pipe("sentencizer")
-            nlp_pipeline.max_length = 2_000_000
-            spacy_version = spacy.__version__
-            spacy_model_version = nlp_pipeline.meta.get("version", "unknown")
-        except Exception:
-            nlp_pipeline = None
-    else:
-        try:
-            spacy_version = spacy.__version__
-        except Exception:
-            pass
+    a11_sample, a12_sample, a13_sample = _prepare_samples(records, cfg, seed)
+    nlp_pipeline, spacy_version, spacy_model_version = _load_spacy_pipeline(cfg, skip_spacy)
 
     report: dict[str, Any] = {
         "data_dir": str(data_dir),
@@ -1345,16 +1484,9 @@ def run_probe(
             "total_blank_lines": audit["total_blank_lines"],
             "shard_errors": audit["shard_errors"],
         },
-        "provenance": {
-            "probe_version": PROBE_VERSION,
-            "git_sha": _get_git_sha(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "spacy_version": spacy_version,
-            "spacy_model_version": spacy_model_version,
-            "full_scan": full_scan,
-            "polars_version": pl.__version__ if pl is not None else None,
-            "probe_config": _probe_config_to_dict(cfg),
-        },
+        "provenance": _build_provenance(
+            cfg, audit, spacy_version, spacy_model_version, full_scan
+        ),
         "gates": {},
     }
 
@@ -1379,132 +1511,81 @@ def run_probe(
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
+        report["gates"]["A13"] = gate_a13_sentence_density(
+            a13_sample, config=cfg, nlp=nlp_pipeline
+        )
     else:
         report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
     print("[dataset_probe] Quality signals ...")
-    report["quality_signals"] = ModelQualitySignals.summarize(records, sample_n=cfg.quality_signals_sample_n)
+    report["quality_signals"] = ModelQualitySignals.summarize(
+        records, sample_n=cfg.quality_signals_sample_n, config=cfg
+    )
 
-    passed: list[str] = []
-    failed_blocking: list[str] = []
-    failed_advisory: list[str] = []
-    skipped: list[str] = []
-
-    for k, v in report["gates"].items():
-        if v.get("skipped"):
-            skipped.append(k)
-        elif v.get("pass") is True:
-            passed.append(k)
-        elif v.get("pass") is False:
-            if v.get("severity") == "advisory":
-                failed_advisory.append(k)
-            else:
-                failed_blocking.append(k)
-
-    report["summary"] = {
-        "passed": passed,
-        "failed_blocking": failed_blocking,
-        "failed_advisory": failed_advisory,
-        "failed": failed_blocking + failed_advisory,
-        "skipped": skipped,
-        "all_passed": len(failed_blocking) == 0,
-    }
+    report["summary"] = _summarize_gates(report["gates"])
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print(f"[dataset_probe] Report written → {output}")
     print(
-        f"[dataset_probe] PASSED: {passed} | "
-        f"FAILED_BLOCKING: {failed_blocking} | "
-        f"FAILED_ADVISORY: {failed_advisory} | "
-        f"SKIPPED: {skipped}"
+        f"[dataset_probe] PASSED: {report['summary']['passed']} | "
+        f"FAILED_BLOCKING: {report['summary']['failed_blocking']} | "
+        f"FAILED_ADVISORY: {report['summary']['failed_advisory']} | "
+        f"SKIPPED: {report['summary']['skipped']}"
     )
 
+    # Warning only — run_probe does NOT call wandb.log directly.
+    # All W&B logging routes through _log_report_to_wandb from main().
     if log_to_wandb:
         if wandb is None:
-            print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
+            print(
+                "[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — "
+                "logging skipped."
+            )
         elif wandb.run is None:
             print(
                 "[dataset_probe] WARNING: log_to_wandb=True but no active wandb run detected. "
                 "Call wandb.init() before run_probe, or use --log-to-wandb CLI flag which "
                 "handles wandb.init() automatically."
             )
-        else:
-            wandb.log(
-                {
-                    "probe/passed_gates": len(passed),
-                    "probe/failed_blocking": len(failed_blocking),
-                    "probe/failed_advisory": len(failed_advisory),
-                    "probe/all_passed": report["summary"]["all_passed"],
-                    "probe/parse_errors": audit["total_parse_errors"],
-                    **{f"probe/quality/{k}": v for k, v in report["quality_signals"]["signal_counts"].items()},
-                    "probe/pct_clean": report["quality_signals"]["pct_clean"],
-                }
-            )
 
     return report
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CourtListener dataset readiness probe (Category A + B6 gates).")
+    parser = argparse.ArgumentParser(
+        description="CourtListener dataset readiness probe (Category A + B6 gates)."
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
     parser.add_argument("--subset", type=int, default=10_000)
     parser.add_argument("--output", type=Path, default=Path("logs/dataset_probe_report.json"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--skip-tokenizer", action="store_true")
     parser.add_argument("--skip-spacy", action="store_true")
-    parser.add_argument(
-        "--ci-mode",
-        action="store_true",
-        help="Exit 1 if any BLOCKING gate fails. Advisory failures do not trigger exit 1.",
-    )
-    parser.add_argument(
-        "--log-to-wandb",
-        action="store_true",
-        help="Log gate metrics and report artifact to Weights & Biases.",
-    )
-    parser.add_argument(
-        "--wandb-entity",
-        type=str,
-        default="phl690-harvard-extension-schol",
-        help="W&B entity. Default: phl690-harvard-extension-schol",
-    )
-    parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="cs1090b",
-        help="W&B project name. Default: cs1090b",
-    )
-    parser.add_argument(
-        "--wandb-name",
-        type=str,
-        default=None,
-        help="W&B run name. Default: dataset_probe_v{PROBE_VERSION}_{subset}k",
-    )
+    parser.add_argument("--ci-mode", action="store_true")
+    parser.add_argument("--log-to-wandb", action="store_true")
+    parser.add_argument("--wandb-entity", type=str, default="phl690-harvard-extension-schol")
+    parser.add_argument("--wandb-project", type=str, default="cs1090b")
+    parser.add_argument("--wandb-name", type=str, default=None)
     parser.add_argument(
         "--skip-generative-tokenizer",
         action="store_true",
-        help=(
-            "Skip the Mistral-7B secondary tokenizer check in A11. "
-            "Sets a11_generative_model='' in ProbeConfig. "
-            "Use in CI or minimal environments to avoid the tokenizer download."
-        ),
+        help="Skip the Mistral-7B secondary tokenizer check in A11.",
     )
     parser.add_argument(
         "--full-scan",
         action="store_true",
-        help=(
-            "Bypass reservoir sampling. Use Polars scan_ndjson to load all records "
-            "from the corpus for exact statistics. Requires polars (uv add polars). "
-            "Recommended for final pre-training runs on the full 1.46M-opinion corpus."
-        ),
+        help="Use Polars scan_ndjson to load all records for exact statistics.",
     )
 
     args = parser.parse_args()
 
-    cfg = ProbeConfig(a11_generative_model="" if args.skip_generative_tokenizer else ProbeConfig().a11_generative_model)
+    # CHANGED: dataclasses.replace — clean single ProbeConfig() construction.
+    cfg = dataclasses.replace(
+        ProbeConfig(),
+        a11_generative_model="" if args.skip_generative_tokenizer else ProbeConfig().a11_generative_model,
+    )
 
     report = run_probe(
         data_dir=args.data_dir,
@@ -1514,6 +1595,7 @@ def main() -> None:
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
         config=cfg,
+        log_to_wandb=args.log_to_wandb,
         full_scan=args.full_scan,
     )
 
