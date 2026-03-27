@@ -45,7 +45,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.6_10k
+      --wandb-name dataset_probe_v2.5.7_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -66,7 +66,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Iterator
 
-import spacy as spacy  # type: ignore[import]
+# No alias — type: ignore[import] suppresses mypy import-untyped warning.
+import spacy  # type: ignore[import]
 
 try:
     import wandb  # type: ignore[import]
@@ -77,12 +78,13 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.6 — gate_a8 and gate_a9 now use safe int parsing
-# (_safe_int) that catches ValueError/TypeError and falls back to 0, so
-# records with text_length="N/A" or citation_count=None never crash the gate.
+# CHANGED: 2.5.7 — spacy import no longer uses redundant self-alias;
+# _safe_int helper added; A8/A9/A12/A13 use _safe_int for robust parsing;
+# --skip-generative-tokenizer CLI flag; wandb.run is None warning in run_probe;
+# text_length_consistency_tolerance in ProbeConfig; validate_schema config param.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.6"
+PROBE_VERSION = "2.5.7"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -199,6 +201,8 @@ class ProbeConfig:
     quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
+    # Set to "" to skip the Mistral secondary tokenizer check in A11.
+    # Use --skip-generative-tokenizer CLI flag to set this at runtime.
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     text_length_consistency_tolerance: int = 200
 
@@ -224,8 +228,9 @@ MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 def _safe_int(value: Any, fallback: int = 0) -> int:
     """
     Safely convert value to int, returning fallback on ValueError or TypeError.
-    Used in statistical gates (A8, A9) so records with malformed numeric fields
-    like 'N/A' or None are treated as fallback rather than crashing the gate.
+    Used in statistical gates (A8, A9, A12, A13) so records with malformed
+    numeric fields like 'N/A' or None are treated as fallback rather than
+    crashing the gate.
     """
     try:
         return int(value)
@@ -593,16 +598,13 @@ def gate_a8_text_length_distribution(
 ) -> dict[str, Any]:
     """
     A8 — text_length distribution. severity=blocking.
-    CHANGED: uses _safe_int() instead of bare int() so records with
-    text_length='N/A' or text_length=None are treated as 0 (below threshold)
-    rather than crashing the gate with ValueError/TypeError.
+    Uses _safe_int() so records with text_length='N/A' or None are treated
+    as 0 (below threshold) rather than crashing the gate.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A8_text_length_distribution", "severity": "blocking", "pass": False, "note": "No records."}
 
-    # CHANGED: _safe_int with fallback 0 — malformed text_length values are
-    # treated as 0 (short doc) rather than raising ValueError/TypeError.
     lengths = [_safe_int(r.get("text_length", 0), fallback=0) for r in records]
     lengths_sorted = sorted(lengths)
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
@@ -637,16 +639,13 @@ def gate_a9_citation_count_distribution(
 ) -> dict[str, Any]:
     """
     A9 — citation_count distribution. severity=advisory.
-    CHANGED: uses _safe_int() instead of bare int() so records with
-    citation_count='N/A' or citation_count=None are treated as 0 rather
-    than crashing the gate with ValueError/TypeError.
+    Uses _safe_int() so records with citation_count='N/A' or None are treated
+    as 0 rather than crashing the gate.
     """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A9_citation_count_distribution", "severity": "advisory", "pass": False, "note": "No records."}
 
-    # CHANGED: _safe_int with fallback 0 — malformed citation_count values are
-    # treated as 0 (no citations) rather than raising ValueError/TypeError.
     counts = [_safe_int(r.get("citation_count", 0), fallback=0) for r in records]
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
@@ -1351,7 +1350,7 @@ def main() -> None:
         help=(
             "Skip the Mistral-7B secondary tokenizer check in A11. "
             "Sets a11_generative_model='' in ProbeConfig. "
-            "Use in CI or minimal environments to avoid the ~1GB tokenizer download."
+            "Use in CI or minimal environments to avoid the tokenizer download."
         ),
     )
 
