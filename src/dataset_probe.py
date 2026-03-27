@@ -9,7 +9,7 @@ Gate independence:
   A11 — independent; runs on a11_subsample_n records.
   A13 — depends on A8: evaluates sentence density only on records that pass
         the A8 text_length >= min_text_length filter.
-  schema — independent; presence/type/range/vocabulary checks.
+  schema — independent; presence/type/range/vocabulary/consistency checks.
 
 Failure semantics:
   Any failed Category A gate with severity="blocking" (A7, A8, A11, A12, A13,
@@ -44,7 +44,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.3_10k
+      --wandb-name dataset_probe_v2.5.4_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -76,13 +76,13 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.3 — a12_text_cap_chars + quality_signals_text_cap_chars
-# added to ProbeConfig; gate_a12 caps text before regex; ModelQualitySignals.check
-# accepts config param and caps text before citation regex; sample_records
-# docstring updated to mention silent parse errors.
+# CHANGED: bumped to 2.5.4 — text_length_consistency_tolerance added to
+# ProbeConfig; validate_schema accepts config param and adds consistency_errors
+# dict checking abs(text_length - len(text)) > tolerance; pass flips False on
+# consistency errors.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.3"
+PROBE_VERSION = "2.5.4"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -190,10 +190,7 @@ class ProbeConfig:
     a9_zero_citation_pass_pct: float = 20.0
     a11_min_median_chunks: float = 2.0
     a12_min_pct_with_anchor: float = 60.0
-    # ADDED: a12_text_cap_chars — caps text before regex scan in gate_a12 and
-    # ModelQualitySignals.check. Legal opinions can exceed 100K words; O(n)
-    # regex scanning on the full string is wasteful. 50K chars captures enough
-    # citation density for the heuristic check. Mirrors a13_text_cap_chars.
+    # a12_text_cap_chars: cap text before regex in gate_a12 — mirrors a13_text_cap_chars.
     a12_text_cap_chars: int = 50_000
     a13_max_below_threshold_pct: float = 15.0
     quality_signals_sample_n: int = 500
@@ -201,12 +198,19 @@ class ProbeConfig:
     a12_subsample_n: int = 500
     a13_subsample_n: int = 200
     a13_text_cap_chars: int = 50_000
-    # ADDED: quality_signals_text_cap_chars — caps text before citation regex
-    # in ModelQualitySignals.check. Consistent with a12_text_cap_chars pattern.
+    # quality_signals_text_cap_chars: cap text before citation regex in ModelQualitySignals.check.
     quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
+    # ADDED: text_length_consistency_tolerance — maximum allowed absolute
+    # difference between the text_length field and actual len(text) before
+    # validate_schema flags a consistency error. Upstream may compute
+    # text_length on raw_text before cleaning, so a small tolerance is needed.
+    # Default 200 chars allows for minor pre/post-cleaning differences.
+    # A8 relies on text_length being approximately correct — a wildly wrong
+    # text_length field would make A8 gate decisions unreliable.
+    text_length_consistency_tolerance: int = 200
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
@@ -433,12 +437,24 @@ def _reservoir_sample_with_audit(
     return reservoir, audit
 
 
-def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
+def validate_schema(
+    records: list[dict[str, Any]],
+    config: ProbeConfig | None = None,
+) -> dict[str, Any]:
     """
-    Check required field presence, type, range, vocabulary, and documented coverage.
-    Checks citation_density type (numeric) and range (>= 0) alongside
-    text_entropy, paragraph_count, and token_count.
+    Check required field presence, type, range, vocabulary, consistency, and
+    documented field coverage.
+
+    CHANGED: accepts optional config parameter.
+    ADDED: consistency_errors dict — checks abs(text_length - len(text)) >
+    config.text_length_consistency_tolerance. A8 relies on text_length being
+    approximately correct; a wildly wrong text_length would make A8 gate
+    decisions unreliable. Upstream may compute text_length on raw_text before
+    cleaning, so a small tolerance (default 200 chars) is applied.
+    pass flips False when consistency_errors has any entries.
     """
+    cfg = config or ProbeConfig()
+
     if not records:
         return {
             "gate": "schema_validation",
@@ -448,6 +464,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             "type_errors": {},
             "range_errors": {},
             "vocabulary_errors": {},
+            "consistency_errors": {},
             "missing_documented_fields": {},
             "pass": True,
             "note": "No records to validate.",
@@ -457,6 +474,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
     type_errors: dict[str, int] = {}
     range_errors: dict[str, int] = {}
     vocabulary_errors: dict[str, int] = {}
+    consistency_errors: dict[str, int] = {}
     documented_only = DOCUMENTED_FIELDS - MIN_REQUIRED_FIELDS
     missing_documented: dict[str, int] = {}
 
@@ -469,14 +487,17 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
 
+        # text_length: must be int or float
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
 
+        # is_precedential: must be bool
         is_prec = r.get("is_precedential")
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
+        # citation_count: must be int, non-negative
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -485,6 +506,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
+        # citation_density: must be numeric, non-negative
         cite_density = r.get("citation_density")
         if cite_density is not None:
             if not isinstance(cite_density, (int, float)):
@@ -492,6 +514,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(cite_density) < 0:
                 range_errors["citation_density"] = range_errors.get("citation_density", 0) + 1
 
+        # text_entropy: must be numeric, non-negative
         text_entropy = r.get("text_entropy")
         if text_entropy is not None:
             if not isinstance(text_entropy, (int, float)):
@@ -499,6 +522,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif float(text_entropy) < 0:
                 range_errors["text_entropy"] = range_errors.get("text_entropy", 0) + 1
 
+        # paragraph_count: must be int, non-negative
         para_count = r.get("paragraph_count")
         if para_count is not None:
             if not isinstance(para_count, int):
@@ -506,6 +530,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif para_count < 0:
                 range_errors["paragraph_count"] = range_errors.get("paragraph_count", 0) + 1
 
+        # token_count: must be int, non-negative
         tok_count = r.get("token_count")
         if tok_count is not None:
             if not isinstance(tok_count, int):
@@ -513,12 +538,24 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
+        # text_source: must be in KNOWN_TEXT_SOURCES vocabulary
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
             vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
 
+        # ADDED: text_length consistency — abs(text_length - len(text)) must
+        # not exceed tolerance. Both text and text_length must be present and
+        # text_length must be numeric for this check to apply.
+        actual_text = r.get("text")
+        if text_len is not None and isinstance(text_len, (int, float)) and actual_text is not None:
+            actual_len = len(str(actual_text))
+            if abs(int(text_len) - actual_len) > cfg.text_length_consistency_tolerance:
+                consistency_errors["text_length_consistency"] = consistency_errors.get("text_length_consistency", 0) + 1
+
     any_missing = any(v > 0 for v in missing_by_field.values())
-    passed = not any_missing and not type_errors and not range_errors and not vocabulary_errors
+    passed = (
+        not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
+    )
     return {
         "gate": "schema_validation",
         "severity": "blocking",
@@ -527,6 +564,7 @@ def validate_schema(records: list[dict[str, Any]]) -> dict[str, Any]:
         "type_errors": type_errors,
         "range_errors": range_errors,
         "vocabulary_errors": vocabulary_errors,
+        "consistency_errors": consistency_errors,
         "missing_documented_fields": missing_documented,
         "pass": passed,
     }
@@ -733,10 +771,7 @@ def gate_a12_citation_anchor_survival(
 ) -> dict[str, Any]:
     """
     A12 — Citation anchor survival. severity=blocking.
-    CHANGED: text is capped at cfg.a12_text_cap_chars before regex scan.
-    Legal opinions can exceed 100K words; O(n) regex scanning on the full
-    string is wasteful. 50K chars is sufficient for citation density heuristic.
-    Mirrors the a13_text_cap_chars pattern in gate_a13.
+    Text is capped at cfg.a12_text_cap_chars before regex scan.
     """
     cfg = config or ProbeConfig()
     if not records:
@@ -748,7 +783,6 @@ def gate_a12_citation_anchor_survival(
     field_nonzero_total = 0
 
     for r in records:
-        # CHANGED: cap text before regex scan — same pattern as A13
         text = _get_text(r)[: cfg.a12_text_cap_chars]
         matches = _LEGAL_CITATION_RE.findall(text)
         n_matches = len(matches)
@@ -933,9 +967,8 @@ class ModelQualitySignals:
     ) -> list[tuple[str, str]]:
         """
         Return soft quality warning signals for a single record.
-        CHANGED: accepts optional config parameter. When provided, text is
-        capped at config.quality_signals_text_cap_chars before citation regex
-        scan — consistent with the a12_text_cap_chars pattern in gate_a12.
+        Accepts optional config parameter. Text is capped at
+        config.quality_signals_text_cap_chars before citation regex scan.
         """
         cfg = config or ProbeConfig()
         signals: list[tuple[str, str]] = []
@@ -957,9 +990,6 @@ class ModelQualitySignals:
                 signals.append(("boilerplate", f"Boilerplate phrase detected: {phrase!r}"))
                 break
 
-        # CHANGED: cap text before citation regex scan using quality_signals_text_cap_chars.
-        # Word count estimate still uses full text (for truncation/gigantic signals),
-        # but citation regex only scans the capped prefix for efficiency.
         capped_text = text[: cfg.quality_signals_text_cap_chars]
         citation_count = len(_LEGAL_CITATION_RE.findall(capped_text))
         if word_count_estimate > 100 and citation_count == 0:
@@ -1198,7 +1228,7 @@ def run_probe(
     }
 
     print("[dataset_probe] Gate: schema validation ...")
-    report["gates"]["schema"] = validate_schema(records)
+    report["gates"]["schema"] = validate_schema(records, config=cfg)
     print("[dataset_probe] Gate A7: text_source breakdown ...")
     report["gates"]["A7"] = gate_a7_text_source_breakdown(records, cfg)
     print("[dataset_probe] Gate A8: text_length distribution ...")
