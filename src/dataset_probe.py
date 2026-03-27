@@ -45,7 +45,7 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.5_10k
+      --wandb-name dataset_probe_v2.5.6_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -77,11 +77,12 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.5 — added --skip-generative-tokenizer CLI flag;
-# added warning print when log_to_wandb=True but wandb.run is None.
+# CHANGED: bumped to 2.5.6 — gate_a8 and gate_a9 now use safe int parsing
+# (_safe_int) that catches ValueError/TypeError and falls back to 0, so
+# records with text_length="N/A" or citation_count=None never crash the gate.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.5"
+PROBE_VERSION = "2.5.6"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -198,8 +199,6 @@ class ProbeConfig:
     quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
-    # Set to "" to skip the Mistral secondary tokenizer check in A11.
-    # Use --skip-generative-tokenizer CLI flag to set this at runtime.
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     text_length_consistency_tolerance: int = 200
 
@@ -220,6 +219,18 @@ ENCODER_MODEL = ProbeConfig().encoder_model
 SPACY_MODEL = ProbeConfig().spacy_model
 SPACY_EXCLUDE = ["ner", "parser", "lemmatizer"]
 MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
+
+
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    """
+    Safely convert value to int, returning fallback on ValueError or TypeError.
+    Used in statistical gates (A8, A9) so records with malformed numeric fields
+    like 'N/A' or None are treated as fallback rather than crashing the gate.
+    """
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return fallback
 
 
 def _get_git_sha() -> str:
@@ -580,12 +591,19 @@ def gate_a8_text_length_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A8 — text_length distribution. severity=blocking."""
+    """
+    A8 — text_length distribution. severity=blocking.
+    CHANGED: uses _safe_int() instead of bare int() so records with
+    text_length='N/A' or text_length=None are treated as 0 (below threshold)
+    rather than crashing the gate with ValueError/TypeError.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A8_text_length_distribution", "severity": "blocking", "pass": False, "note": "No records."}
 
-    lengths = [int(r.get("text_length", 0)) for r in records]
+    # CHANGED: _safe_int with fallback 0 — malformed text_length values are
+    # treated as 0 (short doc) rather than raising ValueError/TypeError.
+    lengths = [_safe_int(r.get("text_length", 0), fallback=0) for r in records]
     lengths_sorted = sorted(lengths)
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
     return {
@@ -617,12 +635,19 @@ def gate_a9_citation_count_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """A9 — citation_count distribution. severity=advisory."""
+    """
+    A9 — citation_count distribution. severity=advisory.
+    CHANGED: uses _safe_int() instead of bare int() so records with
+    citation_count='N/A' or citation_count=None are treated as 0 rather
+    than crashing the gate with ValueError/TypeError.
+    """
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A9_citation_count_distribution", "severity": "advisory", "pass": False, "note": "No records."}
 
-    counts = [int(r.get("citation_count", 0)) for r in records]
+    # CHANGED: _safe_int with fallback 0 — malformed citation_count values are
+    # treated as 0 (no citations) rather than raising ValueError/TypeError.
+    counts = [_safe_int(r.get("citation_count", 0), fallback=0) for r in records]
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
     above_5 = sum(1 for c in counts if c > 5)
@@ -758,7 +783,7 @@ def gate_a12_citation_anchor_survival(
         citation_counts_found.append(n_matches)
         if matches:
             has_anchor += 1
-        field_count = int(r.get("citation_count", 0))
+        field_count = _safe_int(r.get("citation_count", 0), fallback=0)
         if field_count > 0:
             field_nonzero_total += 1
             if n_matches == 0:
@@ -823,7 +848,7 @@ def gate_a13_sentence_density(
                 "note": f"spaCy model load failed: {exc}",
             }
 
-    substantive = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
+    substantive = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
     if not substantive:
         return {
             "gate": "A13_sentence_density",
@@ -1150,7 +1175,7 @@ def run_probe(
     rng = random.Random(seed + 1)
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
-    a13_candidates = [r for r in records if int(r.get("text_length", 0)) >= cfg.min_text_length]
+    a13_candidates = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
     a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
 
     spacy_version = "unknown"
@@ -1259,10 +1284,6 @@ def run_probe(
         f"SKIPPED: {skipped}"
     )
 
-    # CHANGED: guard wandb.run access — when log_to_wandb=True but wandb.run
-    # is None (no active run), emit a visible warning rather than silently
-    # doing nothing. This prevents confusion when callers expect W&B logs but
-    # forgot to call wandb.init() before run_probe.
     if log_to_wandb:
         if wandb is None:
             print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
@@ -1324,11 +1345,6 @@ def main() -> None:
         default=None,
         help="W&B run name. Default: dataset_probe_v{PROBE_VERSION}_{subset}k",
     )
-    # ADDED: --skip-generative-tokenizer — sets a11_generative_model="" in the
-    # ProbeConfig, skipping the Mistral-7B secondary tokenizer check in A11.
-    # The Mistral tokenizer requires a ~1GB download and network access.
-    # Use this flag in CI or minimal environments to avoid the download.
-    # Consistent with --skip-tokenizer and --skip-spacy flag pattern.
     parser.add_argument(
         "--skip-generative-tokenizer",
         action="store_true",
@@ -1341,7 +1357,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Build config — apply --skip-generative-tokenizer if set
     cfg = ProbeConfig(a11_generative_model="" if args.skip_generative_tokenizer else ProbeConfig().a11_generative_model)
 
     report = run_probe(
