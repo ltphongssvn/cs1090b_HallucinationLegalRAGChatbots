@@ -1,12 +1,9 @@
 # Reducing Hallucination in Legal RAG Chatbots
 ### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
-
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
-
 - **Author:** PHONG LE — phl690@g.harvard.edu
 - **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
-
 > - Although compute nodes physically contain 4× NVIDIA L4/A10G GPUs, student jobs are allocated a
 > single GPU by the SLURM scheduler. `CUDA_VISIBLE_DEVICES` is set automatically by SLURM, and
 > PyTorch correctly reports `torch.cuda.device_count() == 1`.
@@ -18,11 +15,8 @@
 >
 > - KV cache + activations during Mistral generation on retrieved legal contexts consume
 > several additional GB beyond model weights. Sequential model loading is the mitigation strategy.
-
 ---
-
 ## Certified Baseline Stack
-
 | Component                | Certified version                                                                                                                                     |
 |--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Python                   | 3.11.9                                                                                                                                                |
@@ -35,22 +29,19 @@
 | Vector search            | faiss-cpu 1.13.2                                                                                                                                      |
 | LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
-
+| DataFrame / corpus scan  | polars 1.39.3 (CPU-only; no GPU memory contention; used in `src/dataset_probe.py` `--full-scan` mode via `scan_ndjson` for exact corpus statistics)   |
 * This is the certified baseline stack for the current repository; newer upstream stacks are intentionally deferred for now, they will be adopted only after full re-certification in this repo.
 * **`BAAI/bge-m3`** is used **only in single-vector dense retrieval mode**.
 * It uses **CLS pooling**, not mean pooling.
-* This is defined in BAAI’s published `1_Pooling/config.json`, where:
+* This is defined in BAAI's published `1_Pooling/config.json`, where:
   * `pooling_mode_cls_token=true`
   * `pooling_mode_mean_tokens=false`
 * The same pooling setup has also been **confirmed by smoke tests in this repository**.
 * A **runtime assertion** in `src/model_loader.py` prevents accidental pooling overrides.
 * The selected **pooling flags** are logged to **W&B once per run**.
 * Sparse and multi-vector capabilities are out of scope.
-
 ---
-
 ## Revised Feasibility Statement
-
 | Component             | Cap                      | Notes                                                                                 |
 |-----------------------|--------------------------|---------------------------------------------------------------------------------------|
 | Training pairs        | 500K–1M                  | Not 3.2M full LePaRD set                                                              |
@@ -59,26 +50,18 @@
 | Iteration corpus      | ~150K opinions (10%)     | Loaded via DVC `data/raw/cl_federal_appellate_bulk` subset; full 1.46M for final runs |
 | Architectures         | 3 core + 1 optional      | BM25, BGE-M3, Hybrid + Legal-BERT reference                                           |
 | Datasets              | 2 core                   | CourtListener federal appellate subset + LePaRD                                       |
-
 ---
-
 ## Project Feasibility Statement
-
 **Infrastructure is complete. Corpus preprocessing is underway. The core experiment is the remaining work.**
-
 - ✅ Environment bootstrapped, verified, reproducible (`setup.sh`, tests passing, coverage verified)
 - ✅ 1,465,484 federal appellate opinions downloaded, filtered, sharded (7.6GB)
 - ✅ DVC + S3 artifact versioning operational
 - ✅ All `src/` modules implemented and tested
 - 🔄 CourtListener RAG-readiness refinement in progress (Cell 2)
 - ⏳ LePaRD acquisition, model training, evaluation remaining
-
 **Prioritization:** LePaRD first → 10–20% subset fast iteration → BM25+BGE-M3+Tier A → scale + Tier B/C
-
 ---
-
 ## VRAM Budget and Sequential Loading Strategy
-
 **Single GPU (23.7GB L4/A10G, SLURM-allocated).**
 * Each phase loads **only the model and data it needs**.
 * After a phase finishes, its resources are **unloaded before the next phase begins**.
@@ -87,7 +70,7 @@
   * `transformers.__version__ == "4.39.3"`
   * `torch.cuda.get_device_capability()[0] >= 8`
   * `torch.cuda.is_bf16_supported()`
-* These checks ensure the environment matches the repo’s certified GPU and library assumptions before execution starts.
+* These checks ensure the environment matches the repo's certified GPU and library assumptions before execution starts.
 * `TARGET_GPU_COUNT=1` is set in `.env` to match the **single-GPU allocation** provided by SLURM.
 * During preflight, `setup.sh` validates that:
   * `torch.cuda.device_count() == 1`
@@ -107,7 +90,6 @@
 * **Per phase**, W&B logs:
   * **peak allocated CUDA memory**
   * **peak reserved CUDA memory**
-
 | Phase      | Model loaded                                | Est. VRAM                                                                                                    | Strategy                                                                                                                                                                                                   |
 |------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Retrieval  | BGE-M3                                      | ~2.27GB                                                                                                      | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache                                                                                                      |
@@ -115,15 +97,11 @@
 | Generation | Mistral-7B-Instruct-v0.2                    | ~14–15GB + KV cache                                                                                          | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache                                                                                                                        |
 | Citation   | SQLite                                      | 0GB                                                                                                          | CPU only (read-only; check_same_thread=False)                                                                                                                                                              |
-
+| Corpus scan | Polars scan_ndjson                         | 0GB GPU (CPU-only)                                                                                           | `--full-scan` mode in `src/dataset_probe.py` — exact statistics on full 1.46M-opinion corpus without reservoir sampling; no GPU memory contention                                                          |
 Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
-
 ---
-
 ## Methodology Strengths
-
 **1 — Automated Hallucination Measurement (No Human Annotation Bottleneck)**
-
 - **Tier A:**
   - LePaRD 4M+ expert-annotated citation pairs — gold-standard retrieval ground truth
 - **Tier B:**
@@ -152,31 +130,21 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
     - (2) keyword/regex on citation anchor;
     - (3) sliding-window fallback only if anchor extraction fails.
   - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
-
 **2 — Clean Experimental Design**
-
 - `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.39.3`).
 - All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
 - A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds Mistral's hard limit.
 - Prompt token count (Mistral tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
-
 **3 — Grounded in a Real Failure Case**
-
 - Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
-
 **4 — Production-Grade Reproducibility Already Operational**
-
 - `src/repro.configure()` + `uv.lock` + DVC + manifest checksums + tests passing.
 - `src/environment.py` asserts exact library versions and GPU configuration at startup.
 - `HF_TOKEN` is required by this repo on the shared cluster for authenticated Hub access and to reduce resolver/rate-limit failures; loaded via `dotenv` in `src/environment.py`.
-
 ---
-
 ## Addressing TF Reviewer Comments and Instructor Notes
-
 ### Comment 1 — Feasibility of Hallucination Measurement
 The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
-
 #### Tier A
 Retrieval Grounding
 * Uses a **capped LePaRD subset**.
@@ -184,7 +152,6 @@ Retrieval Grounding
   * **Recall@k**
   * **MRR**
   * **NDCG@10**
-
 #### Tier B
 * Use a **1,000-query stratified sample** for evaluation.
 * Run NLI locally with:
@@ -200,20 +167,16 @@ Retrieval Grounding
 * Batch padding is handled by:
   * `DataCollatorWithPadding(pad_to_multiple_of=8)`
 * Padding to a multiple of 8 helps keep tensor shapes hardware-friendly during batching. Per-claim aggregation:
-
 | Category          | Definition                             | Aggregation                                 | Reported As                                     |
 |-------------------|----------------------------------------|---------------------------------------------|-------------------------------------------------|
 | **Entailment**    | Any window supports the claim          | any(entail) → Entailment                    | Faithfulness metric + confidence score          |
 | **Contradiction** | No entailment, any window contradicts  | no entail + any(contradict) → Contradiction | Contradiction rate (normalized + per 1K tokens) |
 | **Neutral**       | No entailment or contradiction         | else → Neutral                              | Evidence-gap — **not hallucination by default** |
-
 * The **window index** that triggered each label is logged.
 * **NLI confidence scores** are recorded for diagnostics only.
 * These confidence scores are **not treated as calibrated probabilities**.
 * **Zero-claim responses** are excluded from the main hallucination-rate calculation.
 * The **zero-claim rate** is reported separately as its own metric.
-
-
 **Tier C:**
 * SQLite is configured with:
   * `check_same_thread=False`
@@ -221,31 +184,24 @@ Retrieval Grounding
 * A unique **citation hash** is logged for each lookup.
 * If the citation resolves to **`NULL`**, it is labeled **Hard Citation Hallucination**.
 * If the citation is found but has **no supporting evidence**, it is labeled **CitationFound_NoLocalSupport**.
-* If fallback passage localization is required, the system logs the **anchor offset** for debugging.
+* If fallback passage localization is required, the system logs the **citation anchor offset** for debugging.
 * Passage selection follows this order:
   * **(1) Hybrid reranker**
   * **(2) Keyword / regex matching**
   * **(3) Sliding-window fallback**
 - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
-
 ### Comment 2 — Embedding Model Training
-
 | Architecture                     | Base Model                                | Training                     | Key Hyperparameters                                                                              |
 |----------------------------------|-------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------|
 | BM25                             | None                                      | None                         | k1=1.5, b=0.75                                                                                   |
 | BGE-M3                           | BAAI/bge-m3 (CLS pooling per BAAI config) | MultipleNegativesRankingLoss | lr=1e-5, warmup=10%, batch=32, epochs=3                                                          |
 | Hybrid: BM25+BGE-M3+CrossEncoder | BGE-M3 + BAAI/bge-reranker-v2-m3          | RRF top-50 → rerank → top-10 | sentence-transformers CrossEncoder path smoke-tested in this repo; max_length=1024, batch_size=4 |
 | Legal-BERT (optional)            | Legal-BERT (12GB legal text)              | MultipleNegativesRankingLoss | lr=2e-5, warmup=10%, batch=32, epochs=3                                                          |
-
 ---
-
 ## Self-Audit Findings and Corrections
-
 ### Revision 1 — Domain Gap
 - Claims scoped to federal appellate opinions.
-
 ### Revision 2 — Hallucination Metric Definition
-
 * **Contradiction rate** is reported in two normalized forms:
   * by **claim count**
   * per **1,000 tokens**
@@ -255,9 +211,7 @@ Retrieval Grounding
 * **Window-level logits** are aggregated at the **chunk level**.
 * **NLI scores** are treated as **diagnostic indicators only**, not calibrated probabilities.
 * **Neutral** is **not automatically counted as hallucination**.
-
 ### Revision 3 — Citation Existence vs. Citation Correctness
-
 * **Tier C** assigns and logs a unique citation hash for every citation lookup.
 * If the citation resolves to `NULL`, it is labeled **Hard Citation Hallucination**.
 * If the citation is found but the cited passage does **not** provide local NLI support for the claimed proposition, it is labeled **CitationFound_NoLocalSupport**.
@@ -266,9 +220,7 @@ Retrieval Grounding
   * **(1) Hybrid reranker**
   * **(2) Keyword / regex matching**
   * **(3) Sliding-window fallback**
-
 ### Revision 4 — Architecture Alignment
-
 * The retrieval systems are organized along a spectrum:
   * **BM25** → lexical baseline
   * **BGE-M3** → dense retriever
@@ -277,15 +229,11 @@ Retrieval Grounding
 * This keeps the comparison fair by ensuring both methods operate on the same chunked inputs.
 * The **1024-subword chunk budget** is a **controlled experimental design choice**.
 * It is **not** a hard limitation of **BGE-M3** itself.
-
 ### Revision 5 — Scientific Claim Precision
 Scoped to federal appellate opinions.
-
 ### Revision 6 — Outdated Architectures
 CNN/BiLSTM replaced — see Architecture Classification.
-
 ### Revision 7 — Chunking Accuracy
-
 * **spaCy tokens are not the same as BPE subword tokens.**
 * `nlp.max_length` is set high enough to process full federal appellate opinions safely.
 * Chunks are built using:
@@ -307,9 +255,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * Optional ablation:
   * test **64-subword overlap**
   * on a **10% subset**
-
 ### Revision 8 — LLM Generator
-
 * The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
 * It has been **smoke-tested in this repository** under **`transformers 4.39.3`**.
 * All prompts are formatted using:
@@ -320,9 +266,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * A **runtime assertion** checks prompt length before generation starts.
 * This ensures the pipeline fails loudly if the prompt exceeds the allowed context size.
 * The model has **no built-in moderation layer**.
-
 ### Revision 9 — VRAM / KV Cache Risk
-
 * All experiments run on a **single SLURM-allocated GPU** with **23.7GB VRAM**.
 * All models use **bfloat16** as the primary dtype.
 * The environment asserts the following before execution:
@@ -349,10 +293,11 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * configurable `num_workers`
 * For SLURM-restricted environments, `num_workers=0` is available as a fallback.
 * The **projected peak memory usage** is expected to remain within the **23.7GB VRAM budget**.
-
-
+* **Polars** (`polars 1.39.3`) is used exclusively in `src/dataset_probe.py` for `--full-scan` mode.
+  * It is **CPU-only** and causes **zero GPU memory contention**.
+  * It uses `pl.scan_ndjson` for exact statistics on the full 1.46M-opinion corpus.
+  * It is not loaded during training, retrieval, generation, or NLI phases.
 ### Revision 10 — Tier C API Rate Limits
-
 * Tier C does **not** rely on live API calls at evaluation time.
 * API rate-limit risk is avoided by using a **local SQLite index** instead.
 * The SQLite connection is configured with:
@@ -362,12 +307,9 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * Result:
   * no live API dependency
   * no rate-limit bottleneck during large evaluation runs
-
 ### Revision 11 — Training Cost vs Timeline
 Explicit compute caps set up front — see Revised Feasibility Statement.
-
 ---
-
 ## Research Question
 * The central research question is:
   * **Which retrieval setup most improves evidence grounding and reduces contradiction and neutral-evidence failures in a legal RAG system built over U.S. federal appellate opinions?**
@@ -383,42 +325,32 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * **greedy decoding**
   * **chat template applied**
   * **sequential loading**
-
 ---
-
 ## Scientific Methods
-
 ### Exact Hypotheses
-
 * **H1:** The **Hybrid** system (**BM25 + BGE-M3 + CrossEncoder**) is expected to achieve **significantly higher Recall@10** than:
     * **BM25 alone**
     * **BGE-M3 alone**
   * Statistical significance will be tested using:
     * **paired bootstrap**
     * **p < 0.05**
-
 * **H2:** Retrieval architectures with higher **Recall@10** are expected to produce significantly lower **contradiction rates** in downstream generation.
-
   * Contradiction rate is reported in two normalized forms:
     * by **claim count**
     * per **1,000 tokens**
   * **Zero-claim responses are excluded** from this calculation.
   * The purpose of this hypothesis is to test whether better retrieval reduces **active hallucination**.
   * This also helps separate true contradiction errors from simple **retrieval-coverage gaps**.
-
 * **H3:** The **Hybrid** retrieval system is expected to achieve **higher Recall@10** than either of the single-method baselines used alone:
     * **BGE-M3**
     * **BM25**
-
 ### Task Definition
-
 * **Retrieval:** Minimize rank(p* | q, C) over CourtListener federal appellate corpus C. The system receives a legal question **`q`**, searches the corpus **`C`** of federal appellate opinions, and tries to place the **correct supporting passage `p*`** as high as possible in the results list. `rank(p* | q, C)` is the retrieval position of the gold legal passage `p*` for query `q` within corpus `C`, and minimizing it means pushing the correct evidence as close to the top of the retrieved results as possible.
-
 * **Generation input** consists of:
   * the query `q`
   * the **top-10 retrieved chunks**
   * each chunk capped at **1024 subwords**
-“q + top-10 chunks” means the user’s query combined with the 10 highest-ranked retrieved evidence chunks, which together form the grounded input sent to the generator model.
+"q + top-10 chunks" means the user's query combined with the 10 highest-ranked retrieved evidence chunks, which together form the grounded input sent to the generator model.
   * The full prompt is formatted using:
     * `tokenizer.apply_chat_template(...)`
   * The generator model is:
@@ -431,38 +363,27 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * `R`
   * Before generation starts, a **runtime assertion** checks prompt length.
   * The **effective prompt token count** is logged for each query using the **Mistral tokenizer**.
-
   * Begin with **Tier A** on a **10–20% subset** of the data.
   * Use this smaller run to **validate the pipeline and metrics first**.
   * Add **Tier B** and **Tier C** only after Tier A has been successfully validated.
-
 ### Data Split Strategy (Capped)
-
 | Split             | Capped size       | Use                                    |
 |-------------------|-------------------|----------------------------------------|
 | Train             | **500K–1M pairs** | Fine-tuning BGE-M3, reranker           |
 | Validation        | **50K pairs**     | Hyperparameter tuning, RRF grid search |
 | Test (retrieval)  | **10K–50K pairs** | Tier A evaluation                      |
 | Test (generation) | **1,000 queries** | Tier B/C evaluation                    |
-
 ### Sample Size
-
 | Component       | Capped size   | Justification                                   |
 |-----------------|---------------|-------------------------------------------------|
 | Training pairs  | 500K–1M       | Contrastive convergence in hours on L4/A10G     |
 | Retrieval eval  | 10K–50K       | Sufficient precision; avoids multi-day NLI cost |
 | Generation eval | 1,000 queries | ±2.5pp at 95% CI; stratified by circuit         |
-
 ### Evaluation Protocol
-
 1. **Acquire LePaRD** as the core retrieval dataset.**Cap the training set** to **500K–1M pairs** for feasibility and controlled compute.
-
 2. Train or adapt **all retrievers** using the **capped training split**, index **`bm25s`** over the **same pre-chunked payloads** used in the experiment.
-
 3. Validate first on a **10–20% subset** of the CourtListener corpus, scale up to the full corpus **only if the subset results remain stable and promising**. On the validation set, log **Recall@k versus `nprobe`**, use those validation results to **justify the chosen IVF search parameters**.
-
 4. Evaluation runs **sequentially over each batch of 1,000 queries**.
-
   * Between phases, the pipeline logs and enforces:
     * allocator diagnostics
     * CUDA stream synchronization time
@@ -470,7 +391,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * explicit **DataLoader deletion**
     * `torch.cuda.empty_cache()`
     * `gc.collect()`
-
   * **Phase 1 — Dense retrieval with BGE-M3**
     * Load **BGE-M3** in **bfloat16**
     * Log **pooling flags** to W&B
@@ -478,7 +398,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Log **embedding norm distribution**
     * Save results
     * Unload model
-
   * **Phase 2 — Reranking with bge-reranker-v2-m3**
     * Load **`bge-reranker-v2-m3`** in **bfloat16**
     * Use:
@@ -495,7 +414,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Serialize scores and ranks
     * Return the **top-10** results
     * Unload model
-
   * **Phase 3 — Generation with Mistral-7B-Instruct-v0.2**
     * Load **`Mistral-7B-Instruct-v0.2`** in **bfloat16**
     * Apply the **chat template**
@@ -508,7 +426,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
       * completion token count
     * Save outputs
     * Unload model
-
   * **Phase 4 — NLI evaluation with DeBERTa-v3**
     * Load **DeBERTa-v3 NLI** in **bfloat16**
     * Use:
@@ -534,7 +451,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
       * claim counts
     * Delete DataLoader
     * Unload model
-
   * **Phase 5 — Citation checking with SQLite**
     * Use **SQLite** with:
       * `check_same_thread=False`
@@ -545,9 +461,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
       * label as **Hard Citation Hallucination**
     * If citation is found but has **no support**:
       * label as **CitationFound_NoLocalSupport**
-
-  * The last SQLite bullet in the source text appears cut off after **“log an”**.
-
 5. Aggregate all evaluation outputs across queries and phases.
   * Report **contradiction rate** in two forms:
     * normalized by **claim count**
@@ -557,17 +470,13 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * Report the **CitationFound_NoLocalSupport rate** separately.
   * Run **significance tests** on the reported metrics.
   * Log all results and diagnostics to **Weights & Biases (W&B)**.
-
 ### Significance Testing
-
 * **Paired bootstrap** with **B = 10,000** resamples
 * Report **p-values**
 * Report **95% confidence intervals (CIs)**
-* Report **effect size** using **Cohen’s d**
+* Report **effect size** using **Cohen's d**
 * Apply **Benjamini–Hochberg FDR correction** for multiple comparisons
-
 ### Ablation Plan
-
 | Ablation | Isolates |
 |----------|---------|
 | BGE-M3 vs Hybrid | BM25+RRF+reranker contribution |
@@ -578,35 +487,28 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | With vs without Stage 3 normalization | Preprocessing contribution |
 | Contradiction vs Neutral vs combined | Metric sensitivity |
 | 128 vs 64 subword overlap | Chunk overlap sensitivity |
-
 ---
-
 ## Architecture Classification
-
 | ID | Architecture | Type | Role |
 |----|-------------|------|------|
 | (a) | BM25 | Non-neural baseline | Reference floor |
 | (b) | BGE-M3 (BAAI/bge-m3, CLS pooling per BAAI config) | Modern dense retriever — CLS pooling per published BAAI config | Primary dense baseline — 1024-subword chunks (design choice) |
 | (c) | Hybrid: BM25+BGE-M3+bge-reranker-v2-m3 | Transformer + lexical + CrossEncoder reranker | **Expected strongest** |
 | (d) | Legal-BERT Bi-Encoder | Domain-specific Transformer | Optional domain-reference model |
-
-* **Sparse retrieval** uses **`bm25s`**, `bm25s` is indexed over the **same pre-chunked payloads** embedded by **BGE-M3**. “pre-chunked payloads” means the retrieval-ready text chunks created ahead of time from legal opinions and reused identically by BM25 and BGE-M3 so the architecture comparison stays fair and reproducible.**
-
+* **Sparse retrieval** uses **`bm25s`**, `bm25s` is indexed over the **same pre-chunked payloads** embedded by **BGE-M3**. "pre-chunked payloads" means the retrieval-ready text chunks created ahead of time from legal opinions and reused identically by BM25 and BGE-M3 so the architecture comparison stays fair and reproducible.**
 * **Dense retrieval** uses the repo-certified stack:
   * `sentence-transformers 3.1.1`
   * `transformers 4.39.3`
-* It uses **CLS pooling**, following BAAI’s published:
+* It uses **CLS pooling**, following BAAI's published:
   * `1_Pooling/config.json`
 * A **runtime assertion** in `model_loader.py` prevents accidental pooling override.
 * The active **pooling flags** are logged to **Weights & Biases (W&B)** once per run.
-
 * The chunking policy is standardized as follows:
   * **1024 subwords per chunk**
   * **128-subword overlap**
   * **512 subwords per chunk for Legal-BERT**
 * This is a **controlled experimental design choice**.
 * It is intended to keep chunking **consistent across the pipeline**.
-
 * **Reranker model:** `BAAI/bge-reranker-v2-m3`
   * is being loaded and run using the **CrossEncoder class provided by the `sentence-transformers` library**.
   * is smoke-tested in this repository
@@ -623,7 +525,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * entropy
   * **Ranks are serialized** for later analysis
   * Reranking flow **top-50 → top-10**: the system first retrieves 50 likely relevant legal chunks, then reranks those candidates and keeps the 10 strongest chunks as final evidence for downstream answer generation.
-
 * **FAISS Flat** is used for:
   * capped experiments
   * validation runs
@@ -642,44 +543,33 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `MKL_NUM_THREADS`
 * **FAISS runs on CPU** in this setup.
 * The pinned package version is **`faiss-cpu 1.13.2`**.
-
 ---
-
 ## Current Pipeline Status
-
 | Stage | Status | What exists | What remains |
 |-------|--------|-------------|--------------|
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.8 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3) | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
 | Evaluation (Tiers A/B/C) | ⏳ Not started | Sequential loading + repo-certified overflow windowing documented | Capped eval runs |
 | Experiment tracking | ⏳ Not started | `src/wandb_logger.py` implemented | W&B setup and per-phase VRAM logging integration pending |
-
 ---
-
 ## DL System Stack
-
 ### Stage 1 — Raw Data Acquisition
-
 * **CourtListener federal appellate subset (🔄)**
   * Contains **1,465,484 opinions**
   * Stored as **23-field JSONL** records
-
 * **Tier C citation support**
   * Uses a local **SQLite citation index**
   * Configured with `check_same_thread=False`
   * Evaluation path is **read-only**
   * A **citation hash** is logged for every lookup
-
 * **Iteration strategy**
   * **Fast iteration:** ~150K opinions (**10% subset**)
   * **Final runs:** full **1.46M-opinion** corpus
-
-
 * **LePaRD** is **Priority 1**.
 * The full dataset contains **~4 million pairs**.
 * Training will be **capped at 500K–1M pairs** for feasibility.
@@ -696,14 +586,12 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `src/environment.py`
 * It is then passed to every:
   * `from_pretrained()` call
-
 * All datasets and artifacts are tracked with **DVC**.
 * The DVC remote storage is **S3**.
 * The configured S3 bucket is:
   * `cs1090b-hallucinationlegalragchatbots`
 * The bucket region is:
   * `us-east-2`
-
 ### Stage 2 — Raw Artifact Registration
 * An **immutable manifest** is generated for the dataset and pipeline state.
 * The manifest records:
@@ -713,7 +601,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * the **`uv.lock` SHA256** value
 * **Contract tests** validate the manifest on **every pipeline run**.
 * An **SBOM** is also generated, covering **357 software components**.
-
 ### Stage 3 — Preprocessing + Tokenizer-Aware Chunking
 * Data is processed through a **streaming CSV pipeline**.
 * Preprocessing includes:
@@ -749,8 +636,14 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * A **SQLite citation index** is built from:
   * `data/raw/cl_federal_appellate_bulk`
   * via `src/extract.py`
-
-
+* **Dataset readiness probing** (`src/dataset_probe.py` v2.5.8) runs before chunking:
+  * **Sampling mode** (default): reservoir sampling via `_reservoir_sample_with_audit`
+  * **Full-scan mode** (`--full-scan`): uses **Polars** `pl.scan_ndjson` for exact statistics on the full 1.46M-opinion corpus without loading into RAM
+  * **Polars** (`polars 1.39.3`) is CPU-only — zero GPU memory contention
+  * Gates A7, A8, A9, A12, B6 run on the full sampled/scanned set; A11 and A13 run on subsamples
+  * A8 and A9 exclude malformed field values from distributions and report `text_length_parse_errors` / `citation_count_parse_errors`
+  * Citation regex (`_LEGAL_CITATION_RE`) is OCR-resilient: handles `F. 3d` spacing artifacts from 1980s PDF scans
+  * Gate A13 trusts the caller's pre-filtered record list (no internal re-filter)
 ### Stage 4 — Index Generation *(not started)*
 * **BM25 (`bm25s`)** is indexed over the **pre-chunked payloads from Stage 3**, not over raw text.
 * The **FAISS dense index** uses two modes:
@@ -783,13 +676,11 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * serializing **ranks**
 * The reranker returns the **top 10** results after reranking.
 * A **SQLite citation index** is also maintained for citation-related lookup tasks.
-
 ### Stage 5 — Model Training *(not started)*
 * Training is **capped at 500K–1M pairs**.
 * **Early stopping** is used to avoid unnecessary training once performance stops improving.
 * **Gradient accumulation** is used to support effective larger-batch training under GPU memory constraints.
 * **GPU hours** are logged to **Weights & Biases (W&B)**.
-
 ### Stage 6 — Evaluation *(not started)*
 * All models use **bfloat16** as the primary dtype.
 * `environment.py` asserts the following at startup:
@@ -855,7 +746,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * Hard Citation Hallucination rate
   * CitationFound_NoLocalSupport rate
 * The projected peak VRAM usage remains within the **23.7GB** budget.
-
 ### Stage 7 — Experiment Tracking *(not started)*
 * `src/wandb_logger.py` is **ready**.
 * **W&B integration is still pending**.
@@ -889,18 +779,14 @@ When integrated, the logger is intended to track:
 * **Prompt token counts** using the Mistral tokenizer
 * **Completion token counts**
 * **Gradient norms**
-
+* **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
 ---
-
 ## Datasets
-
 | Dataset | Size | License | Role | Status |
 |---------|------|---------|------|--------|
 | CourtListener federal appellate subset | 1,465,484 opinions | CC BY-ND 4.0 | Retrieval corpus + SQLite citation index | 🔄 In progress |
 | LePaRD (ACL 2024) | ~4M pairs | Open research | Training (500K–1M cap) + evaluation | ⏳ **Priority 1** |
-
 ---
-
 ## Reproducibility
 ```bash
 bash setup.sh          # bootstrap environment, manifests, and verification tests
@@ -909,7 +795,6 @@ uv run dvc pull        # pull DVC artifacts from S3
 uv run pytest --cov=src --cov-report=term-missing  # run full test suite with coverage
 jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 ```
-
 * `src/repro.configure()` must be the **first statement** in every notebook cell and CLI script.
 * `HF_TOKEN` is required by this repository on the shared cluster.
 * Add `HF_TOKEN` to `.env` **before running** the project.
@@ -922,9 +807,7 @@ jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 * `uv.lock` and DVC together provide:
   * **configuration reproducibility**
   * **determinism-controlled experiments**
-
 ---
-
 ## Project Structure
 ```
 cs1090b_HallucinationLegalRAGChatbots/
@@ -946,7 +829,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Quality signal analysis
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.8: gates A7–A13+B6; --full-scan via Polars scan_ndjson; OCR-resilient citation regex; A8/A9 parse error counting; --skip-generative-tokenizer
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
@@ -968,11 +851,8 @@ cs1090b_HallucinationLegalRAGChatbots/
 ├── pyproject.toml               # requires-python = ">=3.11,<3.12"
 └── uv.lock                      # pinned dependency lockfile
 ```
-
 ---
-
 ## Certified Baseline Tech Stack
-
 | Layer                   | Tool                                                                                                 | Certified version |
 |-------------------------|------------------------------------------------------------------------------------------------------|------------------|
 | Language                | Python                                                                                               | 3.11.9 |
@@ -990,48 +870,37 @@ cs1090b_HallucinationLegalRAGChatbots/
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT) |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via scan_ndjson for exact statistics on full 1.46M-opinion corpus; verified compatible with torch 2.0.1+cu117, spaCy 3.8.11, transformers 4.39.3 on 4× NVIDIA L4 cluster |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
 | Linting                 | ruff                                                                                                 | lockfile-pinned |
 | Type checking           | mypy                                                                                                 | lockfile-pinned |
-
 ---
-
 ## Ethical Considerations
-
 * All datasets used in the project are **publicly available**.
 * **CourtListener** data is used under **CC BY-ND 4.0**.
 * **`mistralai/Mistral-7B-Instruct-v0.2`** does **not** include built-in moderation mechanisms, according to its model card.
 * Model outputs are used **strictly for retrieval research** under **academic supervision**.
 * Any **PII handling** follows the **redaction practices of the original data provider**.
 * The project uses **no human annotation** for hallucination measurement.
-
 ---
-
 GPU pipeline comparing retrieval architectures (TF-IDF, CNN, LSTM, BERT bi-encoder, KG-augmented) to reduce hallucination in legal RAG chatbots.
-
 **Hardware:** 4x NVIDIA L4/A10G GPUs | Python 3.11.9 | torch 2.0.1+cu117 | CUDA 11.7 (driver 12.8)
-
 ## Quick Start
 ```bash
 # Clone and install hooks (required once)
 git clone https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots.git
 cd cs1090b_HallucinationLegalRAGChatbots
 uv run pre-commit install && uv run pre-commit install --hook-type pre-push
-
 # Full GPU setup
 bash setup.sh
-
 # CPU-only (no GPU allocation needed)
 SKIP_GPU=1 bash setup.sh
-
 # Preview all side effects without executing
 DRY_RUN=1 bash setup.sh
 ```
-
 ## Setup Modes
-
 | Mode | Command |
 |---|---|
 | Full GPU setup | `bash setup.sh` |
@@ -1042,43 +911,32 @@ DRY_RUN=1 bash setup.sh
 | No download | `NO_DOWNLOAD=1 bash setup.sh` |
 | No Jupyter | `NO_JUPYTER=1 bash setup.sh` |
 | Single step | `STEP=<fn_name> bash setup.sh` |
-
 ## Notebook Cell 1 (required first line)
 ```python
 from src.repro import configure
 repro_cfg = configure()
 ```
-
 ## Testing
 ```bash
 # Unit tests (fast, no GPU)
 uv run pytest tests/ -m unit -v
-
 # Contract tests
 uv run pytest tests/ -m contract -v
-
 # GPU tests (requires allocation)
 uv run pytest tests/ -m gpu -v
-
 # All with coverage
 uv run pytest tests/ -m "unit or contract" --cov=src --cov-report=term-missing
-
 # Shell script tests (requires bats-core)
 bats tests/shell/
-
 # All pre-commit hooks
 uv run pre-commit run --all-files
 ```
-
 ## Coverage Enforcement
-
 80% per-file minimum enforced at three levels:
 - **pre-push hook** — blocks push if below threshold
 - **CI pipeline** — `unit-tests` job with coverage report
 - **pyproject.toml** — `fail_under = 80`
-
 ## CI/CD Pipeline
-
 | Job | Trigger | Purpose |
 |---|---|---|
 | lint | push/PR | ruff + mypy |
@@ -1086,9 +944,7 @@ uv run pre-commit run --all-files
 | unit-tests | push/PR | pytest unit + coverage |
 | cpu-smoke | push/PR | CPU forward pass + FAISS IVF |
 | security | push/PR | pip-audit + CycloneDX SBOM |
-
 ## Module Map
-
 | File | Responsibility |
 |---|---|
 | `scripts/lib.sh` | Constants, colors, step framework, messaging, guards |
@@ -1103,29 +959,21 @@ uv run pre-commit run --all-files
 | `src/environment.py` | Preflight checks and environment verification |
 | `src/drift_check.py` | 5-tier dependency drift detection |
 | `src/manifest_collector.py` | Environment provenance collection |
-
 ## Security
-
 See [SECURITY.md](SECURITY.md) for full security practices.
-
 Key protections:
 - **detect-secrets** baseline scan on every commit
 - **pre-push hooks** block .env, SSH keys, model binaries
 - **pip-audit** CVE scan in CI and pre-push
 - **CycloneDX SBOM** generated each CI run → `logs/sbom.json`
-
 ## Reproducibility
-
 All experiments are reproducible via:
 - `uv.lock` — pinned dependency snapshot
 - `src/repro.py` — seeds + deterministic flags
 - `logs/environment_manifest.json` — full provenance (git SHA, hardware, freeze snapshot, SLURM job)
-
 ## Git Workflow (GitFlow)
 ```
 main (production) ← develop (integration) ← feature/* (work)
 ```
-
 After cloning: `uv run pre-commit install && uv run pre-commit install --hook-type pre-push`
-
 ---
