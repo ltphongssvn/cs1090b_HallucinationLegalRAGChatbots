@@ -46,9 +46,11 @@ CLI usage:
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.10_10k
+      --wandb-name dataset_probe_v2.5.11_10k
 
 No side effects on corpus shards — all output written to --output only.
+W&B telemetry is exclusively a main() concern — _log_report_to_wandb is
+never called from run_probe().
 """
 
 from __future__ import annotations
@@ -86,21 +88,17 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED 2.5.10:
-#   - Lazy import spacy + AutoTokenizer (obs 1/9/19)
-#   - _reservoir_sample pure function decoupled from file I/O (obs 16)
-#   - text_length_relative_tolerance in ProbeConfig (obs 18)
-#   - _check_consistency uses relative + absolute tolerance (obs 18)
-#   - STAGE3_REQUIRED_FIELDS frozenset (obs 23)
-#   - validate_schema reports stage3_pass + stage3_missing_counts (obs 23)
-#   - quality_signals_html_pattern + quality_signals_boilerplate_phrases
-#     in ProbeConfig (obs 4)
-#   - ModelQualitySignals.check uses config html/boilerplate (obs 4)
-#   - GateResult Pydantic v2 model (obs 5/12/22)
-#   - GATE_REGISTRY list (obs 10)
+# CHANGED 2.5.11:
+#   - Specific exception types: OSError + CalledProcessError (obs 6)
+#   - sample_records() public utility API docstring (obs 8)
+#   - A11 chunk-count formula documented + regression constants (obs 15)
+#   - stratify_by in ProbeConfig + _stratified_reservoir_sample (obs 18)
+#   - ProbeReport(BaseModel) — run_probe returns typed report (obs 7/14)
+#   - log_to_wandb removed from run_probe + CourtListenerDatasetProbe.run (obs 4/17)
+#   - _log_report_to_wandb docstring: main()-only, no gate function calls (obs 3/13)
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.10"
+PROBE_VERSION = "2.5.11"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex — OCR-resilient F\s*\.\s*\d+ pattern
@@ -175,10 +173,6 @@ REQUIRED_FIELDS: frozenset[str] = MIN_REQUIRED_FIELDS
 
 # Fields explicitly required for Stage 3 chunking, metadata filtering,
 # and citation lookup as described in the README Stage 3 section.
-# Superset of MIN_REQUIRED_FIELDS — includes fields needed for:
-#   - chunking metadata: date_filed, opinion_type, precedential_status
-#   - citation lookup: citation_count, text_hash
-#   - corpus provenance: source, court_name
 STAGE3_REQUIRED_FIELDS: frozenset[str] = frozenset(
     {
         "id",
@@ -235,11 +229,7 @@ class ProbeConfig:
     b6_entropy_spot_check_sample_n: int = 10
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
     text_length_consistency_tolerance: int = 200
-    # Relative tolerance for text_length vs len(text) consistency check.
-    # A 200-char discrepancy is 40% of a 500-char doc (wrong) but 0.2% of
-    # a 100K-char doc (fine). Relative tolerance handles both correctly.
     text_length_relative_tolerance: float = 0.05
-    # Quality signal patterns — injectable for reproducibility and testing.
     quality_signals_html_pattern: str = r"<[a-zA-Z][^>]{0,100}>"
     quality_signals_boilerplate_phrases: tuple[str, ...] = dataclasses.field(
         default_factory=lambda: (
@@ -250,11 +240,16 @@ class ProbeConfig:
             "do not cite",
         )
     )
+    # Optional stratification field for proportional court/source coverage.
+    # When set, run_probe uses _stratified_reservoir_sample instead of uniform
+    # reservoir sampling. Ensures minority circuits are represented.
+    # Set to None (default) to use standard uniform reservoir sampling.
+    stratify_by: str | None = None
 
 
 def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
-    """Serialize ProbeConfig to a JSON-safe dict — converts frozensets to sorted lists,
-    tuples to lists."""
+    """Serialize ProbeConfig to a JSON-safe dict.
+    Converts frozensets to sorted lists, tuples to lists, None preserved."""
     result: dict[str, Any] = {}
     for f in dataclasses.fields(cfg):
         val = getattr(cfg, f.name)
@@ -270,6 +265,7 @@ def _probe_config_to_dict(cfg: ProbeConfig) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Module-level constants — literal values, NOT derived from ProbeConfig().
 # No type annotations — must match test assertions exactly.
+# Values must equal corresponding ProbeConfig field defaults.
 # ---------------------------------------------------------------------------
 PROVISIONAL_MIN_TEXT_LENGTH = 1500
 CHUNK_SIZE_SUBWORDS = 1024
@@ -298,11 +294,42 @@ class GateResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# GATE_REGISTRY — ordered list of all gates with metadata
-# Adding a new gate (A14, etc.) requires only appending one entry here.
+# ProbeReport — Pydantic v2 model for run_probe return value (obs 7/14)
 # ---------------------------------------------------------------------------
 
-GATE_REGISTRY: list[dict[str, Any]] = []  # populated after gate functions defined
+
+class ProbeReport(BaseModel):
+    """
+    Typed return value for run_probe(). Replaces raw dict[str, Any].
+    Supports dict-style access (report['gates']) and 'key in report'
+    for backward compatibility via __getitem__ and __contains__.
+    All fields are also accessible as attributes.
+    """
+
+    gates: dict[str, Any]
+    summary: dict[str, Any]
+    provenance: dict[str, Any]
+    quality_signals: dict[str, Any]
+    shard_audit: dict[str, Any]
+    subset_n: int
+    seed: int
+    data_dir: str
+    model_config = {"extra": "allow", "frozen": False}
+
+    def __getitem__(self, key: str) -> Any:
+        """Dict-style access for backward compatibility."""
+        return self.model_dump()[key]
+
+    def __contains__(self, key: object) -> bool:
+        """Support 'key in report' for backward compatibility."""
+        return key in self.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# GATE_REGISTRY — populated after gate functions are defined
+# ---------------------------------------------------------------------------
+
+GATE_REGISTRY: list[dict[str, Any]] = []
 
 
 def _safe_int(value: Any, fallback: int = 0) -> int:
@@ -318,7 +345,9 @@ def _safe_int(value: Any, fallback: int = 0) -> int:
 
 
 def _get_git_sha() -> str:
-    """Return current git commit SHA, or 'not-a-git-repo' if unavailable."""
+    """Return current git commit SHA, or 'not-a-git-repo' if unavailable.
+    Catches OSError (missing git binary) and CalledProcessError (non-zero
+    exit when not in a git repo) — not bare Exception."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -327,7 +356,7 @@ def _get_git_sha() -> str:
             check=True,
         )
         return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         return "not-a-git-repo"
 
 
@@ -399,9 +428,9 @@ def _reservoir_sample(
     seed: int = 0,
 ) -> list[dict[str, Any]]:
     """
-    Pure Vitter's reservoir sampling algorithm — accepts any iterator of dicts.
+    Pure Vitter's reservoir sampling — accepts any iterator of dicts.
     Decoupled from file I/O: no Path, no file opening, no JSON parsing.
-    This makes the sampling algorithm unit-testable without disk I/O.
+    Makes the sampling algorithm unit-testable without disk I/O.
     Returns a reservoir of up to n records sampled uniformly at random.
     """
     rng = random.Random(seed)
@@ -414,6 +443,47 @@ def _reservoir_sample(
             if j < n:
                 reservoir[j] = record
     return reservoir
+
+
+def _stratified_reservoir_sample(
+    iterable: Iterator[dict[str, Any]],
+    n: int,
+    stratify_by: str,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Proportional stratified sampling by a record field (e.g., 'court_id').
+
+    Consumes the full iterable to group records into strata, then samples
+    proportionally from each stratum so all strata are represented.
+    Proportional allocation: stratum_n = max(1, round(n * |stratum| / |total|)).
+    If result exceeds n after rounding, trims randomly.
+
+    Use when uniform reservoir sampling would under-represent minority courts
+    or text_source types. Configured via ProbeConfig.stratify_by.
+    """
+    rng = random.Random(seed)
+    all_records = list(iterable)
+    if not all_records:
+        return []
+
+    strata: dict[str, list[dict[str, Any]]] = {}
+    for r in all_records:
+        key = str(r.get(stratify_by, "MISSING"))
+        strata.setdefault(key, []).append(r)
+
+    total = len(all_records)
+    result: list[dict[str, Any]] = []
+    for stratum_records in strata.values():
+        stratum_n = max(1, round(n * len(stratum_records) / total))
+        sampled = rng.sample(stratum_records, min(stratum_n, len(stratum_records)))
+        result.extend(sampled)
+
+    if len(result) > n:
+        rng.shuffle(result)
+        result = result[:n]
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -488,9 +558,18 @@ def _iter_shards_inner(data_dir: Path) -> Generator[tuple[dict[str, Any], str], 
 
 def sample_records(data_dir: Path, n: int, seed: int = 0) -> list[dict[str, Any]]:
     """
-    Reservoir-sample n records from all shards without loading full corpus.
-    JSON parse errors are silently dropped with no counting in this path —
-    use iter_shards_with_audit() to obtain parse error counts and audit stats.
+    Public utility API: reservoir-sample n records from all shards.
+
+    This is an intentional public API for callers who need lightweight
+    corpus exploration (notebooks, ad-hoc analysis) without running the
+    full probe pipeline or collecting parse-error audit stats.
+
+    For the full probe pipeline with parse-error counting and shard-level
+    audit, use the internal _reservoir_sample_with_audit() path, which is
+    called automatically by run_probe().
+
+    JSON parse errors are silently dropped without audit in this path —
+    use iter_shards_with_audit() directly if parse error counts matter.
     """
     return _reservoir_sample(iter_shards(data_dir), n=n, seed=seed)
 
@@ -668,11 +747,9 @@ def _check_consistency(
 ) -> dict[str, int]:
     """
     Return consistency_errors — checks text_length vs len(text).
-    Uses BOTH absolute and relative tolerance: a discrepancy fails only if it
-    exceeds BOTH the absolute tolerance AND the relative tolerance.
-    This correctly handles short docs (where 200 chars may be 40% error)
-    and long docs (where 200 chars may be 0.2% — acceptable rounding).
-    A record fails if: abs_diff > tolerance AND rel_diff > relative_tolerance.
+    Uses OR logic: fails if abs_diff > tolerance OR rel_diff > relative_tolerance.
+    Handles short docs (200 chars = 40% of 500-char doc) and long docs
+    (200 chars = 0.2% of 100K-char doc — acceptable rounding) correctly.
     """
     consistency_errors: dict[str, int] = {}
     for r in records:
@@ -682,9 +759,6 @@ def _check_consistency(
             actual_len = len(str(actual_text))
             abs_diff = abs(int(text_len) - actual_len)
             rel_diff = abs_diff / max(actual_len, 1)
-            # Fail if EITHER absolute OR relative threshold exceeded
-            # (catches both large absolute errors on short docs and
-            #  large relative errors on any doc size)
             if abs_diff > tolerance or rel_diff > relative_tolerance:
                 consistency_errors["text_length_consistency"] = consistency_errors.get("text_length_consistency", 0) + 1
     return consistency_errors
@@ -710,8 +784,7 @@ def validate_schema(
 ) -> dict[str, Any]:
     """
     Check required field presence, type, range, vocabulary, consistency, and
-    documented field coverage. Delegates to 5 composable helper validators.
-    Also reports stage3_pass and stage3_missing_counts for Stage 3 readiness.
+    documented field coverage. Also reports stage3_pass and stage3_missing_counts.
     """
     cfg = config or ProbeConfig()
 
@@ -742,7 +815,6 @@ def validate_schema(
     )
     missing_documented = _check_documented_coverage(records)
 
-    # Stage 3 readiness check
     stage3_missing: dict[str, int] = {}
     for r in records:
         for f in STAGE3_REQUIRED_FIELDS:
@@ -964,22 +1036,35 @@ def gate_a11_tokenizer_chunk_count(
 ) -> dict[str, Any]:
     """
     A11 — Tokenizer-aware chunk count. severity=blocking.
-    AutoTokenizer is lazily imported here to avoid requiring transformers
-    in minimal environments that only run schema/A7/A8/A9/B6 gates.
+
+    Chunk count formula (matches Stage 3 chunking pipeline exactly):
+      stride = chunk_size_subwords - chunk_overlap_subwords  (= 896)
+      n_chunks = max(1, ceil((total_tokens - chunk_overlap_subwords) / stride))
+
+    This formula is validated by TestA11ChunkCountFormula regression tests
+    against CHUNK_SIZE_SUBWORDS=1024 and CHUNK_OVERLAP_SUBWORDS=128.
+
+    AutoTokenizer is lazily imported here — not at module top level — to allow
+    schema/A7/A8/A9/B6 gates to run without 1GB+ model downloads.
     generative_token_check sub-dict has severity=advisory — diagnostic only.
+    Catches OSError for tokenizer load failure (network/HF_TOKEN issue).
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A11_tokenizer_chunk_count", "severity": "blocking", "pass": False, "note": "No records."}
+        return {
+            "gate": "A11_tokenizer_chunk_count",
+            "severity": "blocking",
+            "pass": False,
+            "note": "No records.",
+        }
 
-    # Lazy import — only needed when actually running this gate without injection
     if tokenizer is None:
         try:
             from transformers import AutoTokenizer  # type: ignore[import]  # noqa: PLC0415
 
             tokenizer = AutoTokenizer.from_pretrained(cfg.encoder_model)
             tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
-        except Exception as exc:
+        except OSError as exc:
             return {
                 "gate": "A11_tokenizer_chunk_count",
                 "severity": "blocking",
@@ -1046,7 +1131,7 @@ def gate_a11_tokenizer_chunk_count(
                 "over_32k_pct": round(100.0 * over_limit / len(records), 2),
                 "note": "README asserts max(prompt_tokens) < 32768 using Mistral tokenizer.",
             }
-        except Exception as exc:
+        except OSError as exc:
             result["generative_token_check"] = {
                 "severity": "advisory",
                 "model": cfg.a11_generative_model,
@@ -1141,11 +1226,11 @@ def _load_spacy_nlp(
 ) -> tuple[Any, str]:
     """
     Load or return the spaCy NLP pipeline.
-    spaCy is lazily imported here — not at module top level — so that
-    schema/A7/A8/A9/B6 gates can run without requiring spaCy to be installed.
+    spaCy is lazily imported here — not at module top level.
+    Catches OSError specifically (missing model file or package).
     Returns (nlp_object, version_string).
     If nlp is injected, returns it with version='injected'.
-    If loading fails, returns (None, 'load_failed').
+    If loading fails with OSError, returns (None, 'load_failed').
     """
     if nlp is not None:
         return nlp, "injected"
@@ -1157,7 +1242,7 @@ def _load_spacy_nlp(
             loaded.add_pipe("sentencizer")
         loaded.max_length = 2_000_000
         return loaded, _spacy.__version__
-    except Exception:
+    except OSError:
         return None, "load_failed"
 
 
@@ -1190,7 +1275,6 @@ def gate_a13_sentence_density(
     """
     A13 — Sentence density. severity=blocking.
     Trusts the caller's pre-filtered record list — no internal re-filter.
-    records_after_a8_filter = len(records).
     spaCy is lazily imported via _load_spacy_nlp.
     """
     cfg = config or ProbeConfig()
@@ -1310,8 +1394,7 @@ GATE_REGISTRY = [
 class ModelQualitySignals:
     """
     Soft quality warnings for RAG pipeline rows.
-    word_count_estimate: whitespace-split word count — NOT HF subword token count.
-    HTML_RE and BOILERPLATE_PHRASES are now driven by ProbeConfig fields
+    HTML pattern and boilerplate phrases are driven by ProbeConfig fields
     for full provenance auditability and testability.
     """
 
@@ -1324,8 +1407,7 @@ class ModelQualitySignals:
     ) -> list[tuple[str, str]]:
         """
         Return soft quality warning signals for a single record.
-        Uses cfg.quality_signals_html_pattern and cfg.quality_signals_boilerplate_phrases
-        from ProbeConfig — fully injectable for testing and provenance.
+        Uses cfg.quality_signals_html_pattern and cfg.quality_signals_boilerplate_phrases.
         Text is capped at config.quality_signals_text_cap_chars before citation regex.
         """
         cfg = config or ProbeConfig()
@@ -1364,10 +1446,7 @@ class ModelQualitySignals:
         seed: int = 0,
         config: ProbeConfig | None = None,
     ) -> dict[str, Any]:
-        """
-        Return signal frequency counts and pct_clean for a record sample.
-        Accepts config and forwards it to check(). Reports records_text_capped.
-        """
+        """Return signal frequency counts and pct_clean. Reports records_text_capped."""
         cfg = config or ProbeConfig()
         rng = random.Random(seed)
         subsample = rng.sample(records, min(sample_n, len(records)))
@@ -1407,9 +1486,12 @@ class CourtListenerDatasetProbe:
         seed: int = 0,
         skip_tokenizer: bool = False,
         skip_spacy: bool = False,
-        log_to_wandb: bool = False,
         full_scan: bool = False,
-    ) -> dict[str, Any]:
+    ) -> "ProbeReport":
+        """
+        Run all gates. log_to_wandb removed — W&B is exclusively a main() concern.
+        Returns a typed ProbeReport.
+        """
         return run_probe(
             data_dir=data_dir,
             subset=subset,
@@ -1418,7 +1500,6 @@ class CourtListenerDatasetProbe:
             skip_tokenizer=skip_tokenizer,
             skip_spacy=skip_spacy,
             config=self.config,
-            log_to_wandb=log_to_wandb,
             full_scan=full_scan,
         )
 
@@ -1453,14 +1534,14 @@ def _load_spacy_pipeline(
     """
     Load spaCy pipeline (or return None when skip_spacy=True).
     Returns (nlp|None, spacy_version, model_version).
-    spaCy is lazily imported here.
+    Catches OSError specifically for missing model/package.
     """
     if skip_spacy:
         try:
             import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
 
             return None, _spacy.__version__, "unknown"
-        except Exception:
+        except OSError:
             return None, "unknown", "unknown"
 
     try:
@@ -1471,12 +1552,12 @@ def _load_spacy_pipeline(
             nlp.add_pipe("sentencizer")
         nlp.max_length = 2_000_000
         return nlp, _spacy.__version__, nlp.meta.get("version", "unknown")
-    except Exception:
+    except OSError:
         try:
             import spacy as _spacy  # type: ignore[import]  # noqa: PLC0415
 
             return None, _spacy.__version__, "unknown"
-        except Exception:
+        except OSError:
             return None, "unknown", "unknown"
 
 
@@ -1532,16 +1613,21 @@ def _summarize_gates(gates: dict[str, Any]) -> dict[str, Any]:
 
 
 def _log_report_to_wandb(
-    report: dict[str, Any],
+    report: Any,
     entity: str,
     project: str,
     name: str,
     output: Path,
 ) -> None:
     """
-    Initialize a W&B run, log all gate metrics in a SINGLE wandb.log call,
-    and upload the full report as a W&B Artifact.
+    Log all gate metrics to W&B in a single wandb.log call and upload the
+    full report as a W&B Artifact.
+
+    Called exclusively from main() — never from run_probe().
+    This function contains only W&B telemetry logic. It accesses report fields
+    by key but never calls gate functions (gate_a7, gate_a8, etc.) directly.
     Captures wandb.init() return value as _run to satisfy mypy union-attr check.
+    All metrics are consolidated into one dict — wandb.log is called exactly once.
     """
     if wandb is None:
         print("[dataset_probe] W&B not installed — skipping W&B logging.")
@@ -1556,7 +1642,6 @@ def _log_report_to_wandb(
         tags=["data_readiness", "courtlistener"],
     )
 
-    # Build one consolidated metrics dict — call wandb.log exactly once.
     metrics: dict[str, Any] = {
         "probe/all_passed": report["summary"]["all_passed"],
         "probe/passed_count": len(report["summary"]["passed"]),
@@ -1647,13 +1732,15 @@ def run_probe(
     skip_tokenizer: bool = False,
     skip_spacy: bool = False,
     config: ProbeConfig | None = None,
-    log_to_wandb: bool = False,
     full_scan: bool = False,
-) -> dict[str, Any]:
+) -> ProbeReport:
     """
-    Run all gates on a record subset. No side effects on corpus shards.
-    Delegates to extracted helpers. No inline wandb.log — all W&B telemetry
-    routes through _log_report_to_wandb called from main().
+    Run all gates on a record subset. Returns a typed ProbeReport.
+    No side effects on corpus shards — all output written to --output only.
+
+    log_to_wandb is intentionally absent from this signature (obs 4/17).
+    W&B telemetry is exclusively a main() concern — call _log_report_to_wandb
+    after run_probe() returns from main() only.
     """
     cfg = config or ProbeConfig()
 
@@ -1661,6 +1748,23 @@ def run_probe(
         print(f"[dataset_probe] Full scan mode — loading all records from {data_dir} via Polars ...")
         records, audit = _full_scan_with_polars(data_dir)
         print(f"[dataset_probe] Full scan loaded {len(records)} records.")
+    elif cfg.stratify_by:
+        print(f"[dataset_probe] Stratified sampling by '{cfg.stratify_by}' ({subset} records) from {data_dir} ...")
+        records = _stratified_reservoir_sample(
+            iter_shards(data_dir),
+            n=subset,
+            stratify_by=cfg.stratify_by,
+            seed=seed,
+        )
+        audit = {
+            "shard_count": len(sorted(data_dir.glob("*.jsonl"))),
+            "total_records_decoded": len(records),
+            "total_parse_errors": 0,
+            "total_blank_lines": 0,
+            "shard_errors": {},
+            "stratified_by": cfg.stratify_by,
+        }
+        print(f"[dataset_probe] Loaded {len(records)} stratified records.")
     else:
         print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
         records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
@@ -1669,74 +1773,68 @@ def run_probe(
     a11_sample, a12_sample, a13_sample = _prepare_samples(records, cfg, seed)
     nlp_pipeline, spacy_version, spacy_model_version = _load_spacy_pipeline(cfg, skip_spacy)
 
-    report: dict[str, Any] = {
-        "data_dir": str(data_dir),
-        "subset_n": len(records),
-        "seed": seed,
-        "shard_audit": {
-            "shard_count": audit["shard_count"],
-            "total_records_decoded": audit["total_records_decoded"],
-            "total_parse_errors": audit["total_parse_errors"],
-            "total_blank_lines": audit["total_blank_lines"],
-            "shard_errors": audit["shard_errors"],
-        },
-        "provenance": _build_provenance(cfg, audit, spacy_version, spacy_model_version, full_scan),
-        "gates": {},
-    }
+    gates: dict[str, Any] = {}
 
     print("[dataset_probe] Gate: schema validation ...")
-    report["gates"]["schema"] = validate_schema(records, config=cfg)
+    gates["schema"] = validate_schema(records, config=cfg)
     print("[dataset_probe] Gate A7: text_source breakdown ...")
-    report["gates"]["A7"] = gate_a7_text_source_breakdown(records, cfg)
+    gates["A7"] = gate_a7_text_source_breakdown(records, cfg)
     print("[dataset_probe] Gate A8: text_length distribution ...")
-    report["gates"]["A8"] = gate_a8_text_length_distribution(records, cfg)
+    gates["A8"] = gate_a8_text_length_distribution(records, cfg)
     print("[dataset_probe] Gate A9: citation_count distribution ...")
-    report["gates"]["A9"] = gate_a9_citation_count_distribution(records, cfg)
+    gates["A9"] = gate_a9_citation_count_distribution(records, cfg)
     print("[dataset_probe] Gate A12: citation anchor survival ...")
-    report["gates"]["A12"] = gate_a12_citation_anchor_survival(a12_sample, config=cfg)
+    gates["A12"] = gate_a12_citation_anchor_survival(a12_sample, config=cfg)
     print("[dataset_probe] Gate B6: text_entropy distribution ...")
-    report["gates"]["B6"] = gate_b6_text_entropy_distribution(records, cfg)
+    gates["B6"] = gate_b6_text_entropy_distribution(records, cfg)
 
     if not skip_tokenizer:
         print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
-        report["gates"]["A11"] = gate_a11_tokenizer_chunk_count(a11_sample, config=cfg)
+        gates["A11"] = gate_a11_tokenizer_chunk_count(a11_sample, config=cfg)
     else:
-        report["gates"]["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
+        gates["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
-        report["gates"]["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
+        gates["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
     else:
-        report["gates"]["A13"] = {"gate": "A13_sentence_density", "skipped": True}
+        gates["A13"] = {"gate": "A13_sentence_density", "skipped": True}
 
     print("[dataset_probe] Quality signals ...")
-    report["quality_signals"] = ModelQualitySignals.summarize(
-        records, sample_n=cfg.quality_signals_sample_n, config=cfg
-    )
+    quality_signals = ModelQualitySignals.summarize(records, sample_n=cfg.quality_signals_sample_n, config=cfg)
 
-    report["summary"] = _summarize_gates(report["gates"])
+    summary = _summarize_gates(gates)
+    provenance = _build_provenance(cfg, audit, spacy_version, spacy_model_version, full_scan)
+
+    shard_audit = {
+        "shard_count": audit["shard_count"],
+        "total_records_decoded": audit["total_records_decoded"],
+        "total_parse_errors": audit["total_parse_errors"],
+        "total_blank_lines": audit["total_blank_lines"],
+        "shard_errors": audit["shard_errors"],
+    }
+
+    report = ProbeReport(
+        gates=gates,
+        summary=summary,
+        provenance=provenance,
+        quality_signals=quality_signals,
+        shard_audit=shard_audit,
+        subset_n=len(records),
+        seed=seed,
+        data_dir=str(data_dir),
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2)
+        json.dump(report.model_dump(), fh, indent=2)
     print(f"[dataset_probe] Report written → {output}")
     print(
-        f"[dataset_probe] PASSED: {report['summary']['passed']} | "
-        f"FAILED_BLOCKING: {report['summary']['failed_blocking']} | "
-        f"FAILED_ADVISORY: {report['summary']['failed_advisory']} | "
-        f"SKIPPED: {report['summary']['skipped']}"
+        f"[dataset_probe] PASSED: {summary['passed']} | "
+        f"FAILED_BLOCKING: {summary['failed_blocking']} | "
+        f"FAILED_ADVISORY: {summary['failed_advisory']} | "
+        f"SKIPPED: {summary['skipped']}"
     )
-
-    # Warning only — run_probe does NOT call wandb.log directly.
-    if log_to_wandb:
-        if wandb is None:
-            print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
-        elif wandb.run is None:
-            print(
-                "[dataset_probe] WARNING: log_to_wandb=True but no active wandb run detected. "
-                "Call wandb.init() before run_probe, or use --log-to-wandb CLI flag which "
-                "handles wandb.init() automatically."
-            )
 
     return report
 
@@ -1767,13 +1865,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # dataclasses.replace with _probe_defaults — clean, no double ProbeConfig() access
     _probe_defaults = ProbeConfig()
     cfg = dataclasses.replace(
         _probe_defaults,
         a11_generative_model="" if args.skip_generative_tokenizer else _probe_defaults.a11_generative_model,
     )
 
+    # W&B is not passed to run_probe — exclusively a main() concern.
     report = run_probe(
         data_dir=args.data_dir,
         subset=args.subset,
@@ -1782,7 +1880,6 @@ def main() -> None:
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
         config=cfg,
-        log_to_wandb=args.log_to_wandb,
         full_scan=args.full_scan,
     )
 
