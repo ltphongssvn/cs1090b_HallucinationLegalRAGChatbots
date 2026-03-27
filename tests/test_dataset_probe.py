@@ -1880,9 +1880,7 @@ class TestGateA8Property:
 
 
 class TestWandbRunIsNoneWarning:
-    def test_warning_printed_when_log_to_wandb_true_and_run_is_none(
-        self, sample_shard_dir, tmp_path, capsys
-    ):
+    def test_warning_printed_when_log_to_wandb_true_and_run_is_none(self, sample_shard_dir, tmp_path, capsys):
         """
         When log_to_wandb=True but wandb.run is None (no active run),
         run_probe must print a warning so the caller knows logging was skipped.
@@ -1910,9 +1908,7 @@ class TestWandbRunIsNoneWarning:
         finally:
             dp.wandb = original_wandb
 
-    def test_no_warning_when_log_to_wandb_false(
-        self, sample_shard_dir, tmp_path, capsys
-    ):
+    def test_no_warning_when_log_to_wandb_false(self, sample_shard_dir, tmp_path, capsys):
         """When log_to_wandb=False, no W&B-related warning must be printed."""
         import src.dataset_probe as dp
 
@@ -1935,9 +1931,7 @@ class TestWandbRunIsNoneWarning:
         finally:
             dp.wandb = original_wandb
 
-    def test_no_warning_when_wandb_run_is_active(
-        self, sample_shard_dir, tmp_path, capsys
-    ):
+    def test_no_warning_when_wandb_run_is_active(self, sample_shard_dir, tmp_path, capsys):
         """When wandb.run is not None, no 'run is None' warning should appear."""
         import src.dataset_probe as dp
 
@@ -1966,26 +1960,29 @@ class TestWandbRunIsNoneWarning:
 
 
 class TestSkipGenerativeTokenizerCLI:
-    def test_cli_accepts_skip_generative_tokenizer_flag(
-        self, sample_shard_dir, tmp_path
-    ):
+    def test_cli_accepts_skip_generative_tokenizer_flag(self, sample_shard_dir, tmp_path):
         """--skip-generative-tokenizer must be a recognized CLI argument."""
         result = subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "20",
-                "--output", str(tmp_path / "r.json"),
-                "--skip-tokenizer", "--skip-spacy",
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "20",
+                "--output",
+                str(tmp_path / "r.json"),
+                "--skip-tokenizer",
+                "--skip-spacy",
                 "--skip-generative-tokenizer",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         assert result.returncode == 0, result.stderr
 
-    def test_skip_generative_tokenizer_sets_model_to_empty_string(
-        self, sample_shard_dir, tmp_path
-    ):
+    def test_skip_generative_tokenizer_sets_model_to_empty_string(self, sample_shard_dir, tmp_path):
         """
         --skip-generative-tokenizer must produce a report where
         a11_generative_model is "" in the provenance probe_config,
@@ -1994,33 +1991,45 @@ class TestSkipGenerativeTokenizerCLI:
         out = tmp_path / "r.json"
         subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "20",
-                "--output", str(out),
-                "--skip-tokenizer", "--skip-spacy",
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "20",
+                "--output",
+                str(out),
+                "--skip-tokenizer",
+                "--skip-spacy",
                 "--skip-generative-tokenizer",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         assert out.exists()
         report = json.loads(out.read_text())
         assert report["provenance"]["probe_config"]["a11_generative_model"] == ""
 
-    def test_without_flag_generative_model_is_mistral(
-        self, sample_shard_dir, tmp_path
-    ):
+    def test_without_flag_generative_model_is_mistral(self, sample_shard_dir, tmp_path):
         """Without --skip-generative-tokenizer, a11_generative_model must be Mistral."""
         out = tmp_path / "r.json"
         subprocess.run(
             [
-                sys.executable, "-m", "src.dataset_probe",
-                "--data-dir", str(sample_shard_dir),
-                "--subset", "20",
-                "--output", str(out),
-                "--skip-tokenizer", "--skip-spacy",
+                sys.executable,
+                "-m",
+                "src.dataset_probe",
+                "--data-dir",
+                str(sample_shard_dir),
+                "--subset",
+                "20",
+                "--output",
+                str(out),
+                "--skip-tokenizer",
+                "--skip-spacy",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         report = json.loads(out.read_text())
         assert "mistral" in report["provenance"]["probe_config"]["a11_generative_model"].lower()

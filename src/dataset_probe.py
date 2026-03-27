@@ -41,10 +41,11 @@ CLI usage:
       --subset 10000 \\
       --output logs/dataset_probe_report.json
   uv run python -m src.dataset_probe ... --ci-mode
+  uv run python -m src.dataset_probe ... --skip-generative-tokenizer
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.4_10k
+      --wandb-name dataset_probe_v2.5.5_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -76,13 +77,11 @@ from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: bumped to 2.5.4 — text_length_consistency_tolerance added to
-# ProbeConfig; validate_schema accepts config param and adds consistency_errors
-# dict checking abs(text_length - len(text)) > tolerance; pass flips False on
-# consistency errors.
+# CHANGED: bumped to 2.5.5 — added --skip-generative-tokenizer CLI flag;
+# added warning print when log_to_wandb=True but wandb.run is None.
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.4"
+PROBE_VERSION = "2.5.5"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
@@ -182,7 +181,6 @@ class ProbeConfig:
     encoder_model: str = "BAAI/bge-m3"
     spacy_model: str = "en_core_web_sm"
     a7_known_formats_pass_pct: float = 80.0
-    # frozenset[str] — typed explicitly so mypy catches non-string values.
     a7_known_formats: frozenset[str] = dataclasses.field(
         default_factory=lambda: frozenset({"plain_text", "html_with_citations"})
     )
@@ -190,7 +188,6 @@ class ProbeConfig:
     a9_zero_citation_pass_pct: float = 20.0
     a11_min_median_chunks: float = 2.0
     a12_min_pct_with_anchor: float = 60.0
-    # a12_text_cap_chars: cap text before regex in gate_a12 — mirrors a13_text_cap_chars.
     a12_text_cap_chars: int = 50_000
     a13_max_below_threshold_pct: float = 15.0
     quality_signals_sample_n: int = 500
@@ -198,18 +195,12 @@ class ProbeConfig:
     a12_subsample_n: int = 500
     a13_subsample_n: int = 200
     a13_text_cap_chars: int = 50_000
-    # quality_signals_text_cap_chars: cap text before citation regex in ModelQualitySignals.check.
     quality_signals_text_cap_chars: int = 50_000
     b6_entropy_spot_check_tolerance: float = 1.0
     b6_entropy_spot_check_sample_n: int = 10
+    # Set to "" to skip the Mistral secondary tokenizer check in A11.
+    # Use --skip-generative-tokenizer CLI flag to set this at runtime.
     a11_generative_model: str = "mistralai/Mistral-7B-Instruct-v0.2"
-    # ADDED: text_length_consistency_tolerance — maximum allowed absolute
-    # difference between the text_length field and actual len(text) before
-    # validate_schema flags a consistency error. Upstream may compute
-    # text_length on raw_text before cleaning, so a small tolerance is needed.
-    # Default 200 chars allows for minor pre/post-cleaning differences.
-    # A8 relies on text_length being approximately correct — a wildly wrong
-    # text_length field would make A8 gate decisions unreliable.
     text_length_consistency_tolerance: int = 200
 
 
@@ -443,15 +434,7 @@ def validate_schema(
 ) -> dict[str, Any]:
     """
     Check required field presence, type, range, vocabulary, consistency, and
-    documented field coverage.
-
-    CHANGED: accepts optional config parameter.
-    ADDED: consistency_errors dict — checks abs(text_length - len(text)) >
-    config.text_length_consistency_tolerance. A8 relies on text_length being
-    approximately correct; a wildly wrong text_length would make A8 gate
-    decisions unreliable. Upstream may compute text_length on raw_text before
-    cleaning, so a small tolerance (default 200 chars) is applied.
-    pass flips False when consistency_errors has any entries.
+    documented field coverage. Accepts optional config for tolerance settings.
     """
     cfg = config or ProbeConfig()
 
@@ -487,17 +470,14 @@ def validate_schema(
             if f not in r:
                 missing_documented[f] = missing_documented.get(f, 0) + 1
 
-        # text_length: must be int or float
         text_len = r.get("text_length")
         if text_len is not None and not isinstance(text_len, (int, float)):
             type_errors["text_length"] = type_errors.get("text_length", 0) + 1
 
-        # is_precedential: must be bool
         is_prec = r.get("is_precedential")
         if is_prec is not None and not isinstance(is_prec, bool):
             type_errors["is_precedential"] = type_errors.get("is_precedential", 0) + 1
 
-        # citation_count: must be int, non-negative
         cite_count = r.get("citation_count")
         if cite_count is not None:
             try:
@@ -506,7 +486,6 @@ def validate_schema(
             except (TypeError, ValueError):
                 type_errors["citation_count"] = type_errors.get("citation_count", 0) + 1
 
-        # citation_density: must be numeric, non-negative
         cite_density = r.get("citation_density")
         if cite_density is not None:
             if not isinstance(cite_density, (int, float)):
@@ -514,7 +493,6 @@ def validate_schema(
             elif float(cite_density) < 0:
                 range_errors["citation_density"] = range_errors.get("citation_density", 0) + 1
 
-        # text_entropy: must be numeric, non-negative
         text_entropy = r.get("text_entropy")
         if text_entropy is not None:
             if not isinstance(text_entropy, (int, float)):
@@ -522,7 +500,6 @@ def validate_schema(
             elif float(text_entropy) < 0:
                 range_errors["text_entropy"] = range_errors.get("text_entropy", 0) + 1
 
-        # paragraph_count: must be int, non-negative
         para_count = r.get("paragraph_count")
         if para_count is not None:
             if not isinstance(para_count, int):
@@ -530,7 +507,6 @@ def validate_schema(
             elif para_count < 0:
                 range_errors["paragraph_count"] = range_errors.get("paragraph_count", 0) + 1
 
-        # token_count: must be int, non-negative
         tok_count = r.get("token_count")
         if tok_count is not None:
             if not isinstance(tok_count, int):
@@ -538,14 +514,10 @@ def validate_schema(
             elif tok_count < 0:
                 range_errors["token_count"] = range_errors.get("token_count", 0) + 1
 
-        # text_source: must be in KNOWN_TEXT_SOURCES vocabulary
         text_source = r.get("text_source")
         if text_source is not None and str(text_source) not in KNOWN_TEXT_SOURCES:
             vocabulary_errors["text_source"] = vocabulary_errors.get("text_source", 0) + 1
 
-        # ADDED: text_length consistency — abs(text_length - len(text)) must
-        # not exceed tolerance. Both text and text_length must be present and
-        # text_length must be numeric for this check to apply.
         actual_text = r.get("text")
         if text_len is not None and isinstance(text_len, (int, float)) and actual_text is not None:
             actual_len = len(str(actual_text))
@@ -769,10 +741,7 @@ def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
 ) -> dict[str, Any]:
-    """
-    A12 — Citation anchor survival. severity=blocking.
-    Text is capped at cfg.a12_text_cap_chars before regex scan.
-    """
+    """A12 — Citation anchor survival. severity=blocking. Text capped before regex."""
     cfg = config or ProbeConfig()
     if not records:
         return {"gate": "A12_citation_anchor_survival", "severity": "blocking", "pass": False, "note": "No records."}
@@ -967,8 +936,7 @@ class ModelQualitySignals:
     ) -> list[tuple[str, str]]:
         """
         Return soft quality warning signals for a single record.
-        Accepts optional config parameter. Text is capped at
-        config.quality_signals_text_cap_chars before citation regex scan.
+        Text is capped at config.quality_signals_text_cap_chars before citation regex.
         """
         cfg = config or ProbeConfig()
         signals: list[tuple[str, str]] = []
@@ -1291,18 +1259,31 @@ def run_probe(
         f"SKIPPED: {skipped}"
     )
 
-    if log_to_wandb and wandb is not None and wandb.run is not None:
-        wandb.log(
-            {
-                "probe/passed_gates": len(passed),
-                "probe/failed_blocking": len(failed_blocking),
-                "probe/failed_advisory": len(failed_advisory),
-                "probe/all_passed": report["summary"]["all_passed"],
-                "probe/parse_errors": audit["total_parse_errors"],
-                **{f"probe/quality/{k}": v for k, v in report["quality_signals"]["signal_counts"].items()},
-                "probe/pct_clean": report["quality_signals"]["pct_clean"],
-            }
-        )
+    # CHANGED: guard wandb.run access — when log_to_wandb=True but wandb.run
+    # is None (no active run), emit a visible warning rather than silently
+    # doing nothing. This prevents confusion when callers expect W&B logs but
+    # forgot to call wandb.init() before run_probe.
+    if log_to_wandb:
+        if wandb is None:
+            print("[dataset_probe] WARNING: log_to_wandb=True but wandb is not installed — logging skipped.")
+        elif wandb.run is None:
+            print(
+                "[dataset_probe] WARNING: log_to_wandb=True but no active wandb run detected. "
+                "Call wandb.init() before run_probe, or use --log-to-wandb CLI flag which "
+                "handles wandb.init() automatically."
+            )
+        else:
+            wandb.log(
+                {
+                    "probe/passed_gates": len(passed),
+                    "probe/failed_blocking": len(failed_blocking),
+                    "probe/failed_advisory": len(failed_advisory),
+                    "probe/all_passed": report["summary"]["all_passed"],
+                    "probe/parse_errors": audit["total_parse_errors"],
+                    **{f"probe/quality/{k}": v for k, v in report["quality_signals"]["signal_counts"].items()},
+                    "probe/pct_clean": report["quality_signals"]["pct_clean"],
+                }
+            )
 
     return report
 
@@ -1343,8 +1324,25 @@ def main() -> None:
         default=None,
         help="W&B run name. Default: dataset_probe_v{PROBE_VERSION}_{subset}k",
     )
+    # ADDED: --skip-generative-tokenizer — sets a11_generative_model="" in the
+    # ProbeConfig, skipping the Mistral-7B secondary tokenizer check in A11.
+    # The Mistral tokenizer requires a ~1GB download and network access.
+    # Use this flag in CI or minimal environments to avoid the download.
+    # Consistent with --skip-tokenizer and --skip-spacy flag pattern.
+    parser.add_argument(
+        "--skip-generative-tokenizer",
+        action="store_true",
+        help=(
+            "Skip the Mistral-7B secondary tokenizer check in A11. "
+            "Sets a11_generative_model='' in ProbeConfig. "
+            "Use in CI or minimal environments to avoid the ~1GB tokenizer download."
+        ),
+    )
 
     args = parser.parse_args()
+
+    # Build config — apply --skip-generative-tokenizer if set
+    cfg = ProbeConfig(a11_generative_model="" if args.skip_generative_tokenizer else ProbeConfig().a11_generative_model)
 
     report = run_probe(
         data_dir=args.data_dir,
@@ -1353,6 +1351,7 @@ def main() -> None:
         seed=args.seed,
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
+        config=cfg,
     )
 
     if args.log_to_wandb:
