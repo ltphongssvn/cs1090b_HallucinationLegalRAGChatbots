@@ -33,6 +33,7 @@ dependencies = [
   "tqdm>=4.66",
   "bm25s>=0.3.2.post1",
   "sentencepiece>=0.2.1",
+  "polars>=1.39.3",
 ]
 [dependency-groups]
 dev = [

@@ -7,8 +7,8 @@ Gate dependency graph and failure semantics
 Gate independence:
   A7, A8, A9, A12, B6 — independent; run on the full sampled record set.
   A11 — independent; runs on a11_subsample_n records.
-  A13 — depends on A8: evaluates sentence density only on records that pass
-        the A8 text_length >= min_text_length filter.
+  A13 — depends on A8: caller pre-filters records before passing to gate_a13.
+        gate_a13 trusts the caller's pre-filtered list and does not re-filter.
   schema — independent; presence/type/range/vocabulary/consistency checks.
 
 Failure semantics:
@@ -41,11 +41,12 @@ CLI usage:
       --subset 10000 \\
       --output logs/dataset_probe_report.json
   uv run python -m src.dataset_probe ... --ci-mode
+  uv run python -m src.dataset_probe ... --full-scan
   uv run python -m src.dataset_probe ... --skip-generative-tokenizer
   uv run python -m src.dataset_probe ... --log-to-wandb \\
       --wandb-entity phl690-harvard-extension-schol \\
       --wandb-project cs1090b \\
-      --wandb-name dataset_probe_v2.5.7_10k
+      --wandb-name dataset_probe_v2.5.8_10k
 
 No side effects on corpus shards — all output written to --output only.
 """
@@ -74,28 +75,48 @@ try:
 except ImportError:
     wandb = None  # type: ignore[assignment]
 
+try:
+    import polars as pl  # type: ignore[import]
+except ImportError:
+    pl = None  # type: ignore[assignment]
+
 from transformers import AutoTokenizer  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
 # Probe version
-# CHANGED: 2.5.7 — spacy import no longer uses redundant self-alias;
-# _safe_int helper added; A8/A9/A12/A13 use _safe_int for robust parsing;
-# --skip-generative-tokenizer CLI flag; wandb.run is None warning in run_probe;
-# text_length_consistency_tolerance in ProbeConfig; validate_schema config param.
+# CHANGED 2.5.8:
+#   - _LEGAL_CITATION_RE: OCR-resilient F\s*\.\s*\d+ pattern (obs 20)
+#   - gate_a8: excludes malformed text_length from distribution, reports
+#     text_length_parse_errors (obs 22)
+#   - gate_a9: excludes malformed citation_count, reports
+#     citation_count_parse_errors; malformed not counted as zero (obs 22)
+#   - gate_a13: trusts caller's pre-filtered records, no internal re-filter
+#     (obs 17); records_after_a8_filter = len(records)
+#   - run_probe: full_scan param + --full-scan CLI flag uses pl.scan_ndjson
+#     for exact stats on full corpus without reservoir sampling (Polars)
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.7"
+PROBE_VERSION = "2.5.8"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex
 #
+# CHANGED: OCR-resilient pattern for federal reporter.
+# The pattern \d+\s+F\s*\.\s*\d+[a-z]?\s+\d+ now matches clean and OCR-
+# mangled forms:
+#   Clean:   "123 F.3d 456"       (F. followed immediately by 3d)
+#   OCR:     "123 F. 3d 456"      (space after period)
+#   OCR:     "123 F .3d 456"      (space before period)
+#   OCR:     "123 F.3d  456"      (\s+ at end already handled)
+#   OCR:     "456 F. 2d 789"      (second series with space)
+#
 # Match examples:
-#   "123 F.3d 456"     — federal reporter, third series
+#   "123 F.3d 456"     — federal reporter, third series (clean)
+#   "123 F. 3d 456"    — federal reporter, third series (OCR space)
 #   "456 F.2d 789"     — federal reporter, second series
 #   "123 F.Supp 456"   — federal supplement reporter
 #   "347 U.S. 483"     — United States Reports
 #   "Smith v. Jones"   — case name citation anchor
-#   "Brown v. Board"   — landmark SCOTUS case name anchor
 #
 # Non-match examples:
 #   "The defendant argued the motion." — pure prose
@@ -106,7 +127,7 @@ _LEGAL_CITATION_RE = re.compile(
     r"(\d+\s+[A-Z][a-z]*\.?\s*(?:\d+d?|App\.?|Supp\.?)"
     r"|[A-Z][a-z]+\s+v\.\s+[A-Z]"
     r"|U\.S\.\s+\d+"
-    r"|\d+\s+F\.\d+[a-z]?\s+\d+)",
+    r"|\d+\s+F\s*\.\s*\d+[a-z]?\s+\d+)",
     re.MULTILINE,
 )
 
@@ -228,9 +249,11 @@ MIN_SENTENCE_COUNT = ProbeConfig().min_sentence_count
 def _safe_int(value: Any, fallback: int = 0) -> int:
     """
     Safely convert value to int, returning fallback on ValueError or TypeError.
-    Used in statistical gates (A8, A9, A12, A13) so records with malformed
-    numeric fields like 'N/A' or None are treated as fallback rather than
-    crashing the gate.
+    Used in gates and run_probe orchestration so malformed numeric fields like
+    'N/A' or None are treated as fallback rather than crashing.
+    Note: gates A8 and A9 no longer use _safe_int for distribution arrays —
+    they instead EXCLUDE malformed values and report parse error counts.
+    _safe_int is still used in A12/A13/run_probe for filtering logic.
     """
     try:
         return int(value)
@@ -444,6 +467,41 @@ def _reservoir_sample_with_audit(
     return reservoir, audit
 
 
+def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Load all records from all shards using Polars scan_ndjson for exact statistics.
+    Returns (records, audit) with the same shape as _reservoir_sample_with_audit.
+    Used by run_probe when full_scan=True.
+    """
+    if pl is None:
+        raise ImportError("polars is required for --full-scan mode. Install with: uv add polars")
+    shard_files = sorted(data_dir.glob("*.jsonl"))
+    if not shard_files:
+        raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
+
+    all_records: list[dict[str, Any]] = []
+    total_parse_errors = 0
+    shard_errors: dict[str, int] = {}
+
+    for shard_path in shard_files:
+        try:
+            df = pl.scan_ndjson(shard_path).collect()
+            all_records.extend(df.to_dicts())
+        except Exception as exc:
+            shard_errors[shard_path.name] = 1
+            total_parse_errors += 1
+            print(f"[dataset_probe] WARNING: Polars failed on {shard_path.name}: {exc}")
+
+    audit = {
+        "shard_count": len(shard_files),
+        "total_records_decoded": len(all_records),
+        "total_parse_errors": total_parse_errors,
+        "total_blank_lines": 0,
+        "shard_errors": shard_errors,
+    }
+    return all_records, audit
+
+
 def validate_schema(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
@@ -598,20 +656,48 @@ def gate_a8_text_length_distribution(
 ) -> dict[str, Any]:
     """
     A8 — text_length distribution. severity=blocking.
-    Uses _safe_int() so records with text_length='N/A' or None are treated
-    as 0 (below threshold) rather than crashing the gate.
+    CHANGED: malformed text_length values (e.g. 'N/A', None) are EXCLUDED
+    from the distribution array rather than coerced to 0. This prevents
+    false zeros from contaminating percentiles and mean/median stats.
+    text_length_parse_errors reports the count of excluded records.
+    If all records have malformed text_length, returns structured failure.
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A8_text_length_distribution", "severity": "blocking", "pass": False, "note": "No records."}
+        return {
+            "gate": "A8_text_length_distribution",
+            "severity": "blocking",
+            "pass": False,
+            "text_length_parse_errors": 0,
+            "note": "No records.",
+        }
 
-    lengths = [_safe_int(r.get("text_length", 0), fallback=0) for r in records]
+    lengths: list[int] = []
+    parse_errors = 0
+    for r in records:
+        raw = r.get("text_length", 0)
+        try:
+            lengths.append(int(raw))
+        except (ValueError, TypeError):
+            parse_errors += 1
+
+    if not lengths:
+        return {
+            "gate": "A8_text_length_distribution",
+            "severity": "blocking",
+            "count": 0,
+            "text_length_parse_errors": parse_errors,
+            "pass": False,
+            "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
+        }
+
     lengths_sorted = sorted(lengths)
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
     return {
         "gate": "A8_text_length_distribution",
         "severity": "blocking",
         "count": len(lengths),
+        "text_length_parse_errors": parse_errors,
         "mean": round(statistics.mean(lengths), 1),
         "median": statistics.median(lengths),
         "min": min(lengths),
@@ -639,14 +725,44 @@ def gate_a9_citation_count_distribution(
 ) -> dict[str, Any]:
     """
     A9 — citation_count distribution. severity=advisory.
-    Uses _safe_int() so records with citation_count='N/A' or None are treated
-    as 0 rather than crashing the gate.
+    CHANGED: malformed citation_count values are EXCLUDED from the distribution
+    rather than coerced to 0. Coercing to 0 would conflate 'true zero citations'
+    with 'failed upstream parse', lowering mean and skewing zero_citation_pct.
+    citation_count_parse_errors reports the count of excluded records.
+    If all records have malformed citation_count, returns structured failure.
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A9_citation_count_distribution", "severity": "advisory", "pass": False, "note": "No records."}
+        return {
+            "gate": "A9_citation_count_distribution",
+            "severity": "advisory",
+            "pass": False,
+            "citation_count_parse_errors": 0,
+            "note": "No records.",
+        }
 
-    counts = [_safe_int(r.get("citation_count", 0), fallback=0) for r in records]
+    counts: list[int] = []
+    parse_errors = 0
+    for r in records:
+        raw = r.get("citation_count", 0)
+        try:
+            counts.append(int(raw))
+        except (ValueError, TypeError):
+            parse_errors += 1
+
+    if not counts:
+        return {
+            "gate": "A9_citation_count_distribution",
+            "severity": "advisory",
+            "count": 0,
+            "citation_count_parse_errors": parse_errors,
+            "pass": False,
+            "note": (
+                f"All {parse_errors} records have unparseable citation_count — "
+                "cannot compute distribution. Advisory gate only."
+            ),
+        }
+
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
     above_5 = sum(1 for c in counts if c > 5)
@@ -654,6 +770,7 @@ def gate_a9_citation_count_distribution(
         "gate": "A9_citation_count_distribution",
         "severity": "advisory",
         "count": n,
+        "citation_count_parse_errors": parse_errors,
         "mean": round(statistics.mean(counts), 2),
         "median": statistics.median(counts),
         "min": min(counts),
@@ -825,10 +942,23 @@ def gate_a13_sentence_density(
     config: ProbeConfig | None = None,
     nlp: Any | None = None,
 ) -> dict[str, Any]:
-    """A13 — Sentence density on A8-filtered records. severity=blocking."""
+    """
+    A13 — Sentence density. severity=blocking.
+    CHANGED: gate_a13 no longer re-filters records internally.
+    It trusts the caller's pre-filtered list (run_probe pre-filters to
+    a13_candidates before passing here). records_after_a8_filter = len(records).
+    This eliminates redundant double-filtering and clarifies responsibility:
+    filtering belongs at the orchestration layer (run_probe), not inside the gate.
+    """
     cfg = config or ProbeConfig()
     if not records:
-        return {"gate": "A13_sentence_density", "severity": "blocking", "pass": False, "note": "No records."}
+        return {
+            "gate": "A13_sentence_density",
+            "severity": "blocking",
+            "pass": False,
+            "records_after_a8_filter": 0,
+            "note": "No records.",
+        }
 
     spacy_version = "injected"
     if nlp is None:
@@ -843,23 +973,15 @@ def gate_a13_sentence_density(
                 "gate": "A13_sentence_density",
                 "severity": "blocking",
                 "pass": False,
+                "records_after_a8_filter": len(records),
                 "error": str(exc),
                 "note": f"spaCy model load failed: {exc}",
             }
 
-    substantive = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
-    if not substantive:
-        return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "records_after_a8_filter": 0,
-            "note": "No records pass A8 length filter.",
-        }
-
+    # Trust caller — process all records as received (caller pre-filters).
     sent_counts: list[int] = []
     below_threshold = 0
-    for r in substantive:
+    for r in records:
         text = _get_text(r)[: cfg.a13_text_cap_chars]
         doc = nlp(text)
         n_sents = sum(1 for _ in doc.sents)
@@ -873,16 +995,17 @@ def gate_a13_sentence_density(
         "spacy_model": cfg.spacy_model,
         "spacy_version": spacy_version,
         "min_sentence_threshold": cfg.min_sentence_count,
-        "subsample_n": len(substantive),
-        "records_after_a8_filter": len(substantive),
+        "subsample_n": len(records),
+        "records_after_a8_filter": len(records),
         "mean_sentences": round(statistics.mean(sent_counts), 1),
         "median_sentences": statistics.median(sent_counts),
         "min_sentences": min(sent_counts),
         "below_threshold_count": below_threshold,
-        "below_threshold_pct": round(100.0 * below_threshold / len(substantive), 2),
-        "pass": below_threshold / len(substantive) < cfg.a13_max_below_threshold_pct / 100.0,
+        "below_threshold_pct": round(100.0 * below_threshold / len(records), 2),
+        "pass": below_threshold / len(records) < cfg.a13_max_below_threshold_pct / 100.0,
         "note": (
-            "Evaluated on text_length >= 1500 records only (A8-filtered). Pass threshold: <15% below 20 sentences."
+            "Caller pre-filters to text_length >= 1500 records before passing here. "
+            "Pass threshold: <15% below 20 sentences."
         ),
     }
 
@@ -1029,6 +1152,7 @@ class CourtListenerDatasetProbe:
         skip_tokenizer: bool = False,
         skip_spacy: bool = False,
         log_to_wandb: bool = False,
+        full_scan: bool = False,
     ) -> dict[str, Any]:
         return run_probe(
             data_dir=data_dir,
@@ -1039,6 +1163,7 @@ class CourtListenerDatasetProbe:
             skip_spacy=skip_spacy,
             config=self.config,
             log_to_wandb=log_to_wandb,
+            full_scan=full_scan,
         )
 
 
@@ -1163,17 +1288,29 @@ def run_probe(
     skip_spacy: bool = False,
     config: ProbeConfig | None = None,
     log_to_wandb: bool = False,
+    full_scan: bool = False,
 ) -> dict[str, Any]:
-    """Run all gates on a reservoir-sampled subset. No side effects on corpus shards."""
+    """
+    Run all gates on a record subset. No side effects on corpus shards.
+    CHANGED: full_scan=True uses pl.scan_ndjson (Polars) to load all records
+    from the corpus exactly — bypassing reservoir sampling for exact statistics.
+    full_scan=False (default) uses one-pass reservoir sampling for speed.
+    """
     cfg = config or ProbeConfig()
 
-    print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
-    records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
-    print(f"[dataset_probe] Loaded {len(records)} records.")
+    if full_scan:
+        print(f"[dataset_probe] Full scan mode — loading all records from {data_dir} via Polars ...")
+        records, audit = _full_scan_with_polars(data_dir)
+        print(f"[dataset_probe] Full scan loaded {len(records)} records.")
+    else:
+        print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
+        records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
+        print(f"[dataset_probe] Loaded {len(records)} records.")
 
     rng = random.Random(seed + 1)
     a11_sample = rng.sample(records, min(cfg.a11_subsample_n, len(records)))
     a12_sample = rng.sample(records, min(cfg.a12_subsample_n, len(records)))
+    # Pre-filter for A13 — gate_a13 trusts caller's pre-filtered list
     a13_candidates = [r for r in records if _safe_int(r.get("text_length", 0)) >= cfg.min_text_length]
     a13_sample = rng.sample(a13_candidates, min(cfg.a13_subsample_n, len(a13_candidates)))
 
@@ -1214,6 +1351,8 @@ def run_probe(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "spacy_version": spacy_version,
             "spacy_model_version": spacy_model_version,
+            "full_scan": full_scan,
+            "polars_version": pl.__version__ if pl is not None else None,
             "probe_config": _probe_config_to_dict(cfg),
         },
         "gates": {},
@@ -1353,6 +1492,15 @@ def main() -> None:
             "Use in CI or minimal environments to avoid the tokenizer download."
         ),
     )
+    parser.add_argument(
+        "--full-scan",
+        action="store_true",
+        help=(
+            "Bypass reservoir sampling. Use Polars scan_ndjson to load all records "
+            "from the corpus for exact statistics. Requires polars (uv add polars). "
+            "Recommended for final pre-training runs on the full 1.46M-opinion corpus."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1366,6 +1514,7 @@ def main() -> None:
         skip_tokenizer=args.skip_tokenizer,
         skip_spacy=args.skip_spacy,
         config=cfg,
+        full_scan=args.full_scan,
     )
 
     if args.log_to_wandb:
