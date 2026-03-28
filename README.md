@@ -550,7 +550,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer, composable schema helpers, STAGE3_REQUIRED_FIELDS gating, exact-vs-sampled analysis via --full-scan | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer, composable schema helpers, STAGE3_REQUIRED_FIELDS gating, exact-vs-sampled analysis via --full-scan, proportional stratified sampling via ProbeConfig.stratify_by | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -638,6 +638,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * via `src/extract.py`
 * **Dataset readiness probing** (`src/dataset_probe.py` v2.5.11) runs before chunking:
   * **Sampling mode** (default): reservoir sampling via `_reservoir_sample_with_audit`
+  * **Stratified mode**: proportional stratified sampling via `_stratified_reservoir_sample` when `ProbeConfig.stratify_by` is set
   * **Full-scan mode** (`--full-scan`): uses **Polars** `pl.scan_ndjson` for exact statistics on the full 1.46M-opinion corpus without loading into RAM
   * **Polars** (`polars 1.39.3`) is CPU-only — zero GPU memory contention
   * Gates A7, A8, A9, A12, B6 run on the full sampled/scanned set; A11 and A13 run on subsamples
@@ -771,6 +772,41 @@ uv run python -m src.dataset_probe \
 | CPU-only — zero GPU memory contention | N/A — no CUDA dependency | ✅ |
 | `pl.__version__` logged to `provenance["polars_version"]` | N/A | ✅ |
 | `ImportError` raised with install hint if polars missing | N/A — `_full_scan_with_polars` raises on `pl is None` | ✅ |
+
+#### Stratified Sampling — `_stratified_reservoir_sample` and `ProbeConfig.stratify_by`
+
+##### Why stratified sampling exists
+* Default uniform reservoir sampling (`_reservoir_sample_with_audit`) is unbiased across all records but can **under-represent minority circuits or text_source types** in a 10K sample drawn from 1.46M opinions.
+* For example, the 1st Circuit produces far fewer federal appellate opinions than the 9th Circuit — a uniform 10K sample may include only a handful of 1st Circuit records, making gate results unreliable for that circuit.
+* `_stratified_reservoir_sample` ensures **every stratum** (e.g., every `court_id`) is represented in proportion to its actual corpus share, so gate A7 (text_source breakdown), A8 (text_length distribution), and A12 (citation anchor survival) reflect the true multi-circuit distribution rather than a 9th-Circuit-heavy sample.
+
+##### How `_stratified_reservoir_sample` works
+* Consumes the **full shard iterator** to group all records by the stratification field (`stratify_by`, e.g., `"court_id"` or `"text_source"`).
+* Computes proportional allocation: `stratum_n = max(1, round(n * |stratum| / |total|))` — every stratum gets at least 1 record.
+* Samples independently from each stratum using `random.Random(seed).sample()`.
+* If the total after proportional rounding exceeds `n`, shuffles and trims to exactly `n`.
+* Uses **Python stdlib `random.Random`** only — no additional dependencies beyond what is already pinned.
+
+##### Configuration via `ProbeConfig.stratify_by`
+* `ProbeConfig.stratify_by: str | None = None` — default `None` uses uniform reservoir sampling.
+* Set to `"court_id"` for circuit-proportional sampling (recommended for Tier B/C generation evaluation).
+* Set to `"text_source"` to ensure all 8 known source formats are represented.
+* The stratification field value is recorded in `shard_audit["stratified_by"]` for provenance.
+* When `stratify_by` is set, `run_probe()` routes to `_stratified_reservoir_sample` instead of `_reservoir_sample_with_audit` — the audit dict uses a simplified format (no `total_blank_lines` count, `total_parse_errors=0`) because the full iterable is consumed before sampling.
+
+##### Sampling mode routing in `run_probe()`
+| Condition | Sampling path | Provenance recorded |
+|-----------|--------------|---------------------|
+| `full_scan=True` | `_full_scan_with_polars()` — all 1.46M records via Polars | `provenance["full_scan"]=True`, `provenance["polars_version"]` |
+| `cfg.stratify_by` is set | `_stratified_reservoir_sample()` — proportional per stratum | `shard_audit["stratified_by"]=cfg.stratify_by` |
+| Default | `_reservoir_sample_with_audit()` — uniform reservoir | `provenance["full_scan"]=False` |
+
+##### Stratified sampling dependency provenance
+| Item | pyproject.toml | uv.lock pinned |
+|------|---------------|----------------|
+| `random.Random` (stdlib) | N/A — Python stdlib | ✅ Python 3.11.9 locked |
+| `ProbeConfig.stratify_by` field | N/A — dataclass field, no extra dep | ✅ |
+| No new third-party packages required | ✅ confirmed — `grep -n "stratify" pyproject.toml` returns no matches | ✅ |
 
 #### W&B Telemetry Contract
 * `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern**.
@@ -1003,7 +1039,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson (exact-vs-sampled, provenance["full_scan"]+provenance["polars_version"]); OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS / DOCUMENTED_FIELDS / STAGE3_REQUIRED_FIELDS; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson (exact-vs-sampled); proportional stratified sampling via ProbeConfig.stratify_by + _stratified_reservoir_sample (stdlib random only); OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS / DOCUMENTED_FIELDS / STAGE3_REQUIRED_FIELDS; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
@@ -1043,9 +1079,10 @@ cs1090b_HallucinationLegalRAGChatbots/
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported in dataset_probe.py — only loaded when gate A13 runs) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count — not at module top level |
-| Schema validation       | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; used for GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts; validate_schema + 5 composable sub-helpers (_check_presence, _check_types_and_ranges, _check_vocabulary, _check_consistency, _check_documented_coverage) are pure Python with no Pydantic dependency |
+| Schema validation       | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; used for GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts; validate_schema + 5 composable sub-helpers are pure Python with no Pydantic dependency |
+| Stratified sampling     | Python stdlib `random`                                                                               | `random.Random(seed)` — no third-party dependency; ProbeConfig.stratify_by field (default None) selects proportional stratified sampling by any record field (e.g. court_id, text_source); shard_audit["stratified_by"] records provenance; confirmed: grep -n "stratify" pyproject.toml returns no matches |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via _full_scan_with_polars(); pl.scan_ndjson per shard; provenance["full_scan"] + provenance["polars_version"] recorded in every ProbeReport; 16 locked entries in uv.lock; ImportError raised with install hint if polars missing at --full-scan invocation |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via _full_scan_with_polars(); pl.scan_ndjson per shard; provenance["full_scan"] + provenance["polars_version"] recorded in every ProbeReport; 16 locked entries in uv.lock |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; lazy imports in wandb_logger.py; optional try/except import in dataset_probe.py; --log-to-wandb flag exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
