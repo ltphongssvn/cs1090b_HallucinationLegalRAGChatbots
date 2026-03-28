@@ -550,12 +550,12 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.8 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3) | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
 | Evaluation (Tiers A/B/C) | ⏳ Not started | Sequential loading + repo-certified overflow windowing documented | Capped eval runs |
-| Experiment tracking | ⏳ Not started | `src/wandb_logger.py` implemented | W&B setup and per-phase VRAM logging integration pending |
+| Experiment tracking | ⏳ Not started | `src/wandb_logger.py` implemented; W&B lazily imported; `wandb>=0.16` pinned in uv.lock | W&B run init + per-phase VRAM logging integration pending |
 ---
 ## DL System Stack
 ### Stage 1 — Raw Data Acquisition
@@ -636,7 +636,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * A **SQLite citation index** is built from:
   * `data/raw/cl_federal_appellate_bulk`
   * via `src/extract.py`
-* **Dataset readiness probing** (`src/dataset_probe.py` v2.5.8) runs before chunking:
+* **Dataset readiness probing** (`src/dataset_probe.py` v2.5.11) runs before chunking:
   * **Sampling mode** (default): reservoir sampling via `_reservoir_sample_with_audit`
   * **Full-scan mode** (`--full-scan`): uses **Polars** `pl.scan_ndjson` for exact statistics on the full 1.46M-opinion corpus without loading into RAM
   * **Polars** (`polars 1.39.3`) is CPU-only — zero GPU memory contention
@@ -644,6 +644,47 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * A8 and A9 exclude malformed field values from distributions and report `text_length_parse_errors` / `citation_count_parse_errors`
   * Citation regex (`_LEGAL_CITATION_RE`) is OCR-resilient: handles `F. 3d` spacing artifacts from 1980s PDF scans
   * Gate A13 trusts the caller's pre-filtered record list (no internal re-filter)
+  * `run_probe()` returns a **typed `ProbeReport(BaseModel)`** — see Typed Report Contract below
+
+#### Typed Report Contract — `ProbeReport(BaseModel)`
+* `run_probe()` returns a **`ProbeReport`** Pydantic v2 model instead of a raw `dict[str, Any]`.
+* This is the **repo-certified typed return contract** for all probe consumers (notebooks, CI, W&B logger).
+* **Fields:**
+
+| Field             | Type               | Description                                              |
+|-------------------|--------------------|----------------------------------------------------------|
+| `gates`           | `dict[str, Any]`   | All gate results keyed by gate name (A7, A8, … B6)       |
+| `summary`         | `dict[str, Any]`   | passed / failed_blocking / failed_advisory / skipped     |
+| `provenance`      | `dict[str, Any]`   | probe_version, git_sha, timestamp, config snapshot       |
+| `quality_signals` | `dict[str, Any]`   | pct_clean, signal_counts, subsample_n                    |
+| `shard_audit`     | `dict[str, Any]`   | shard_count, total_records_decoded, parse_errors         |
+| `subset_n`        | `int`              | Actual number of records sampled or scanned              |
+| `seed`            | `int`              | RNG seed used for reservoir sampling                     |
+| `data_dir`        | `str`              | Path to corpus shard directory                           |
+
+* **Backward-compatible access:** `report["gates"]` and `"gates" in report` both work via `__getitem__` / `__contains__`.
+* **Attribute access** is also supported: `report.gates`, `report.summary`, etc.
+* `CourtListenerDatasetProbe.run()` and `main()` both return / consume `ProbeReport`.
+* `_log_report_to_wandb()` is **exclusively a `main()` concern** — never called from `run_probe()`.
+* W&B telemetry accesses report fields by key but never calls gate functions directly.
+
+#### Lazy Loading of Heavy NLP Dependencies
+* **`spaCy`** (`spacy>=3.7`, `en_core_web_sm-3.8.0`) and **`transformers.AutoTokenizer`** are **not imported at module top level** in `src/dataset_probe.py`.
+* They are imported **lazily inside the functions that use them**:
+  * `_load_spacy_nlp()` — imports `spacy` only when gate A13 runs sentence segmentation
+  * `gate_a11_tokenizer_chunk_count()` — imports `AutoTokenizer` only when the tokenizer gate runs
+  * `_load_spacy_pipeline()` in `run_probe()` — same lazy spaCy import path
+* **Why this matters:** Gates A7, A8, A9, A12, and B6 can execute in **minimal CI environments** without triggering 1GB+ model downloads. The `--skip-tokenizer` and `--skip-spacy` CLI flags skip the respective gates entirely, avoiding any import attempt.
+* **Dependency provenance:** Both `spacy` and `transformers` are declared in `pyproject.toml` and fully pinned in `uv.lock` — lazy loading does **not** remove them from the dependency graph; it only defers the import until the gate that needs them is actually invoked.
+* **Verified in `uv.lock`:** `spacy`, `en-core-web-sm`, `transformers`, and `polars` are all present and version-locked, confirming reproducibility across cluster nodes and CI runners.
+
+| Lazy-loaded dependency | Import location in code | Gate that triggers it | pyproject.toml entry | uv.lock pinned |
+|------------------------|-------------------------|-----------------------|----------------------|----------------|
+| `spacy` + `en_core_web_sm` | `_load_spacy_nlp()`, `_load_spacy_pipeline()` | A13 (sentence density) | `spacy>=3.7`, `en-core-web-sm @ ...whl` | ✅ |
+| `transformers.AutoTokenizer` | `gate_a11_tokenizer_chunk_count()` | A11 (chunk count, BGE-M3) | `transformers>=4.35,<4.41` | ✅ |
+| `transformers.AutoTokenizer` (generative) | `gate_a11_tokenizer_chunk_count()` | A11 secondary (Mistral advisory) | `transformers>=4.35,<4.41` | ✅ |
+| `polars` | `_full_scan_with_polars()` | `--full-scan` mode only | `polars>=1.39.3` | ✅ |
+
 ### Stage 4 — Index Generation *(not started)*
 * **BM25 (`bm25s`)** is indexed over the **pre-chunked payloads from Stage 3**, not over raw text.
 * The **FAISS dense index** uses two modes:
@@ -747,9 +788,64 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * CitationFound_NoLocalSupport rate
 * The projected peak VRAM usage remains within the **23.7GB** budget.
 ### Stage 7 — Experiment Tracking *(not started)*
-* `src/wandb_logger.py` is **ready**.
-* **W&B integration is still pending**.
-When integrated, the logger is intended to track:
+* `src/wandb_logger.py` is **implemented and ready**.
+* **W&B run initialization is still pending** — integration fires once LePaRD training begins.
+* `wandb` is declared as **`wandb>=0.16`** in `pyproject.toml` and fully pinned in `uv.lock` (13 locked entries covering wandb and its transitive dependencies).
+* In `src/dataset_probe.py`, `wandb` is imported at module level inside a **`try/except ImportError`** block — if wandb is unavailable the module degrades gracefully with `wandb = None` and skips telemetry without raising.
+* In `src/wandb_logger.py`, all W&B calls use **lazy imports inside each function** (`import wandb` at call site) — the module can be imported without triggering wandb initialization.
+
+#### W&B Authentication
+* Authentication is handled by `setup_wandb_auth()` in `src/wandb_logger.py`.
+* Call **once at process start** before any `wandb.init()`.
+* Auth priority:
+  * If `WANDB_API_KEY` is set in environment → `wandb.login(key=api_key, relogin=False)`
+  * If `WANDB_MODE=offline` or `WANDB_MODE=disabled` → skip login silently
+  * Otherwise → `wandb.login(relogin=False)` (interactive or cached credentials)
+
+#### W&B Telemetry Contract
+* `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern**.
+  * It is **never called from `run_probe()`** or any gate function.
+  * It receives a fully-populated `ProbeReport` and accesses fields by key only — no gate functions are called inside it.
+  * All metrics are consolidated into **one `wandb.log()` call** per run.
+  * The full JSON report is uploaded as a **W&B Artifact** of type `probe_report`.
+* `log_run_start()` in `src/wandb_logger.py` initializes a W&B run and logs dataset provenance to `wandb.summary`.
+* `log_dataset_stats()` logs token length histograms and court distribution as **W&B bar charts**.
+* `log_quality_signals()` logs `ModelQualitySignals` frequency counts under the `data/quality/` metric namespace.
+
+#### W&B Metrics Logged Per Phase
+| Namespace | Metric | Source |
+|-----------|--------|--------|
+| `probe/` | `all_passed`, `passed_count`, `failed_blocking_count`, `subset_n`, `parse_errors` | `_log_report_to_wandb` |
+| `gate/A8/` | `p5`, `p10`, `p25`, `p75`, `p90`, `p95`, `mean`, `median`, `below_provisional_pct` | A8 gate result |
+| `gate/A11/` | `median_chunks_per_doc`, `mean_chunks_per_doc`, `multi_chunk_pct`, `mean_token_length` | A11 gate result |
+| `gate/A12/` | `pct_with_citation_anchor`, `mean_anchors_per_doc`, `field_nonzero_regex_zero_pct` | A12 gate result |
+| `gate/A13/` | `median_sentences`, `below_threshold_pct`, `records_after_a8_filter` | A13 gate result |
+| `gate/B6/` | `p5`, `p10`, `p25`, `p75`, `mean`, `median`, `zero_entropy_count` | B6 gate result |
+| `data/` | `n_valid_samples`, `avg_token_length`, `token_length_distribution` (bar chart) | `log_dataset_stats` |
+| `data/quality/` | per-signal counts (`html_remnants`, `boilerplate`, `no_citations`, …) | `log_quality_signals` |
+
+#### W&B CLI Usage (dataset probe)
+```bash
+uv run python -m src.dataset_probe \
+    --data-dir data/raw/cl_federal_appellate_bulk \
+    --subset 10000 \
+    --output logs/dataset_probe_report.json \
+    --log-to-wandb \
+    --wandb-entity phl690-harvard-extension-schol \
+    --wandb-project cs1090b \
+    --wandb-name dataset_probe_v2.5.11_10k
+```
+* `--log-to-wandb` is the only flag that triggers W&B telemetry — omitting it runs the probe with zero W&B side effects.
+* `WANDB_API_KEY` must be set in `.env` before running with `--log-to-wandb` on the cluster.
+
+#### W&B Dependency Provenance
+| Item | pyproject.toml | uv.lock pinned |
+|------|---------------|----------------|
+| `wandb>=0.16` | ✅ line 24 | ✅ 13 locked entries |
+| Lazy import in `wandb_logger.py` | N/A — import deferred to call site | ✅ |
+| Optional import in `dataset_probe.py` | N/A — `try/except ImportError` fallback | ✅ |
+
+When integrated, the full logger tracks:
 * **Per-phase GPU hours**
 * **Peak CUDA memory**
 * **Allocator diagnostics**
@@ -829,12 +925,12 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.8: gates A7–A13+B6; --full-scan via Polars scan_ndjson; OCR-resilient citation regex; A8/A9 parse error counting; --skip-generative-tokenizer
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson; OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
 │   ├── drift_check.py           # Manifest drift detection
-│   ├── wandb_logger.py          # W&B tracking + per-phase GPU hours + VRAM
+│   ├── wandb_logger.py          # W&B tracking: setup_wandb_auth, log_run_start, log_dataset_stats, log_quality_signals; all wandb imports lazy (inside functions); wandb>=0.16 pinned in uv.lock
 │   ├── exceptions.py            # PipelineError
 │   └── timer.py                 # cell_timer
 ├── notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
@@ -867,11 +963,11 @@ cs1090b_HallucinationLegalRAGChatbots/
 | LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
-| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions) |
-| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT) |
+| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported in dataset_probe.py — only loaded when gate A13 runs) |
+| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count — not at module top level |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
 | DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via scan_ndjson for exact statistics on full 1.46M-opinion corpus; verified compatible with torch 2.0.1+cu117, spaCy 3.8.11, transformers 4.39.3 on 4× NVIDIA L4 cluster |
-| Experiment tracking     | W&B                                                                                                  | 0.25.1 |
+| Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; lazy imports in wandb_logger.py; optional try/except import in dataset_probe.py; --log-to-wandb flag exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
 | Linting                 | ruff                                                                                                 | lockfile-pinned |
@@ -976,4 +1072,3 @@ All experiments are reproducible via:
 main (production) ← develop (integration) ← feature/* (work)
 ```
 After cloning: `uv run pre-commit install && uv run pre-commit install --hook-type pre-push`
----
