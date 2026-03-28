@@ -550,7 +550,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer, composable schema helpers (validate_schema + 5 sub-helpers), STAGE3_REQUIRED_FIELDS gating | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -685,6 +685,115 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | `transformers.AutoTokenizer` (generative) | `gate_a11_tokenizer_chunk_count()` | A11 secondary (Mistral advisory) | `transformers>=4.35,<4.41` | ✅ |
 | `polars` | `_full_scan_with_polars()` | `--full-scan` mode only | `polars>=1.39.3` | ✅ |
 
+#### Schema Helpers — `validate_schema` and Composable Sub-helpers
+* `validate_schema()` is the **blocking schema gate** called by `run_probe()` before any other gate runs.
+* It is decomposed into **five composable pure-function helpers**, each independently testable and focused on one check category:
+
+| Helper | Responsibility | Blocks CI? |
+|--------|---------------|------------|
+| `_check_presence(records)` | Counts missing fields across `MIN_REQUIRED_FIELDS` (11 fields required for retrieval/NLI/citation) | Yes — any missing field is a blocking failure |
+| `_check_types_and_ranges(records)` | Validates types and non-negative ranges for `text_length`, `citation_count`, `citation_density`, `text_entropy`, `paragraph_count`, `token_count`, `is_precedential` | Yes |
+| `_check_vocabulary(records)` | Checks `text_source` values against `KNOWN_TEXT_SOURCES` frozenset (8 known formats) | Yes |
+| `_check_consistency(records, tolerance, relative_tolerance)` | Cross-validates `text_length` field vs `len(text)` using OR logic: fails if `abs_diff > 200` OR `rel_diff > 5%` | Yes |
+| `_check_documented_coverage(records)` | Counts missing fields across all 23 `DOCUMENTED_FIELDS` not in `MIN_REQUIRED_FIELDS` | Advisory only — never blocks |
+
+* **Three field-set constants** govern coverage checks:
+
+| Constant | Size | Purpose |
+|----------|------|---------|
+| `MIN_REQUIRED_FIELDS` | 11 fields | Minimum needed for pipeline to run — missing any is a blocking failure |
+| `DOCUMENTED_FIELDS` | 23 fields | Full schema documentation coverage — advisory gap reporting only |
+| `STAGE3_REQUIRED_FIELDS` | 17 fields | Fields explicitly required for Stage 3 chunking, metadata filtering, and citation lookup — `stage3_pass` reported separately |
+
+* **`validate_schema()` output contract:**
+  * `pass` — `True` only if all of: no missing required fields, no type errors, no range errors, no vocabulary errors, no consistency errors
+  * `stage3_pass` — separate boolean: `True` if all `STAGE3_REQUIRED_FIELDS` are present across all records
+  * `stage3_missing_counts` — per-field counts of missing Stage 3 fields (empty dict = Stage 3 ready)
+  * `missing_documented_fields` — advisory gap report for fields in `DOCUMENTED_FIELDS` not in `MIN_REQUIRED_FIELDS`
+  * `severity` — always `"blocking"` for the schema gate
+
+* **Why composable helpers matter for this pipeline:**
+  * Each helper can be unit-tested in isolation without running the full probe
+  * `_check_consistency` uses OR logic to handle both short docs (200 chars = 40% of a 500-char doc) and long docs (200 chars = 0.2% of a 100K-char doc) correctly
+  * `_check_documented_coverage` is advisory and never causes CI failure — it surfaces documentation drift without blocking the pipeline
+  * `STAGE3_REQUIRED_FIELDS` (17 fields) is a superset of `MIN_REQUIRED_FIELDS` (11 fields) — `stage3_pass` is reported separately so Stage 3 readiness is visible without re-blocking on already-passed checks
+
+* **Pydantic v2 dependency:** `validate_schema()` and all gate functions return plain `dict[str, Any]` — Pydantic v2 (`pydantic>=2.12.5`, 49 locked entries in `uv.lock`) is used for `GateResult(BaseModel)` and `ProbeReport(BaseModel)` typed contracts, not for the helper functions themselves. The helpers are pure Python with no Pydantic dependency, keeping them fast and minimal-import.
+
+#### W&B Telemetry Contract
+* `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern**.
+  * It is **never called from `run_probe()`** or any gate function.
+  * It receives a fully-populated `ProbeReport` and accesses fields by key only — no gate functions are called inside it.
+  * All metrics are consolidated into **one `wandb.log()` call** per run.
+  * The full JSON report is uploaded as a **W&B Artifact** of type `probe_report`.
+* `log_run_start()` in `src/wandb_logger.py` initializes a W&B run and logs dataset provenance to `wandb.summary`.
+* `log_dataset_stats()` logs token length histograms and court distribution as **W&B bar charts**.
+* `log_quality_signals()` logs `ModelQualitySignals` frequency counts under the `data/quality/` metric namespace.
+
+#### W&B Metrics Logged Per Phase
+| Namespace | Metric | Source |
+|-----------|--------|--------|
+| `probe/` | `all_passed`, `passed_count`, `failed_blocking_count`, `subset_n`, `parse_errors` | `_log_report_to_wandb` |
+| `gate/A8/` | `p5`, `p10`, `p25`, `p75`, `p90`, `p95`, `mean`, `median`, `below_provisional_pct` | A8 gate result |
+| `gate/A11/` | `median_chunks_per_doc`, `mean_chunks_per_doc`, `multi_chunk_pct`, `mean_token_length` | A11 gate result |
+| `gate/A12/` | `pct_with_citation_anchor`, `mean_anchors_per_doc`, `field_nonzero_regex_zero_pct` | A12 gate result |
+| `gate/A13/` | `median_sentences`, `below_threshold_pct`, `records_after_a8_filter` | A13 gate result |
+| `gate/B6/` | `p5`, `p10`, `p25`, `p75`, `mean`, `median`, `zero_entropy_count` | B6 gate result |
+| `data/` | `n_valid_samples`, `avg_token_length`, `token_length_distribution` (bar chart) | `log_dataset_stats` |
+| `data/quality/` | per-signal counts (`html_remnants`, `boilerplate`, `no_citations`, …) | `log_quality_signals` |
+
+#### W&B CLI Usage (dataset probe)
+```bash
+uv run python -m src.dataset_probe \
+    --data-dir data/raw/cl_federal_appellate_bulk \
+    --subset 10000 \
+    --output logs/dataset_probe_report.json \
+    --log-to-wandb \
+    --wandb-entity phl690-harvard-extension-schol \
+    --wandb-project cs1090b \
+    --wandb-name dataset_probe_v2.5.11_10k
+```
+* `--log-to-wandb` is the only flag that triggers W&B telemetry — omitting it runs the probe with zero W&B side effects.
+* `WANDB_API_KEY` must be set in `.env` before running with `--log-to-wandb` on the cluster.
+
+#### W&B Dependency Provenance
+| Item | pyproject.toml | uv.lock pinned |
+|------|---------------|----------------|
+| `wandb>=0.16` | ✅ line 24 | ✅ 13 locked entries |
+| Lazy import in `wandb_logger.py` | N/A — import deferred to call site | ✅ |
+| Optional import in `dataset_probe.py` | N/A — `try/except ImportError` fallback | ✅ |
+
+When integrated, the full logger tracks:
+* **Per-phase GPU hours**
+* **Peak CUDA memory**
+* **Allocator diagnostics**
+* **CUDA stream synchronization times**
+* **`allow_tf32` state** for each phase
+* **BGE-M3 pooling flags**
+* **Embedding norm distributions**
+* **Reranker score distributions**, including:
+  * minimum
+  * mean
+  * maximum
+  * entropy
+* **FAISS retrieval diagnostics**, including:
+  * Recall@k vs `nprobe`
+  * `nprobe`
+  * `nlist`
+* **NLI window count distributions**
+* **NLI confidence distributions**
+* **Window indices per label**
+* **Per-query claim counts**
+* **Claims per 1,000 tokens**
+* **Zero-claim rate**
+* **Hard Citation Hallucination counts**
+* **CitationFound_NoLocalSupport counts**
+* **Citation hashes**
+* **Citation anchor token offsets**
+* **Prompt token counts** using the Mistral tokenizer
+* **Completion token counts**
+* **Gradient norms**
+* **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
 ### Stage 4 — Index Generation *(not started)*
 * **BM25 (`bm25s`)** is indexed over the **pre-chunked payloads from Stage 3**, not over raw text.
 * The **FAISS dense index** uses two modes:
@@ -793,89 +902,6 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * `wandb` is declared as **`wandb>=0.16`** in `pyproject.toml` and fully pinned in `uv.lock` (13 locked entries covering wandb and its transitive dependencies).
 * In `src/dataset_probe.py`, `wandb` is imported at module level inside a **`try/except ImportError`** block — if wandb is unavailable the module degrades gracefully with `wandb = None` and skips telemetry without raising.
 * In `src/wandb_logger.py`, all W&B calls use **lazy imports inside each function** (`import wandb` at call site) — the module can be imported without triggering wandb initialization.
-
-#### W&B Authentication
-* Authentication is handled by `setup_wandb_auth()` in `src/wandb_logger.py`.
-* Call **once at process start** before any `wandb.init()`.
-* Auth priority:
-  * If `WANDB_API_KEY` is set in environment → `wandb.login(key=api_key, relogin=False)`
-  * If `WANDB_MODE=offline` or `WANDB_MODE=disabled` → skip login silently
-  * Otherwise → `wandb.login(relogin=False)` (interactive or cached credentials)
-
-#### W&B Telemetry Contract
-* `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern**.
-  * It is **never called from `run_probe()`** or any gate function.
-  * It receives a fully-populated `ProbeReport` and accesses fields by key only — no gate functions are called inside it.
-  * All metrics are consolidated into **one `wandb.log()` call** per run.
-  * The full JSON report is uploaded as a **W&B Artifact** of type `probe_report`.
-* `log_run_start()` in `src/wandb_logger.py` initializes a W&B run and logs dataset provenance to `wandb.summary`.
-* `log_dataset_stats()` logs token length histograms and court distribution as **W&B bar charts**.
-* `log_quality_signals()` logs `ModelQualitySignals` frequency counts under the `data/quality/` metric namespace.
-
-#### W&B Metrics Logged Per Phase
-| Namespace | Metric | Source |
-|-----------|--------|--------|
-| `probe/` | `all_passed`, `passed_count`, `failed_blocking_count`, `subset_n`, `parse_errors` | `_log_report_to_wandb` |
-| `gate/A8/` | `p5`, `p10`, `p25`, `p75`, `p90`, `p95`, `mean`, `median`, `below_provisional_pct` | A8 gate result |
-| `gate/A11/` | `median_chunks_per_doc`, `mean_chunks_per_doc`, `multi_chunk_pct`, `mean_token_length` | A11 gate result |
-| `gate/A12/` | `pct_with_citation_anchor`, `mean_anchors_per_doc`, `field_nonzero_regex_zero_pct` | A12 gate result |
-| `gate/A13/` | `median_sentences`, `below_threshold_pct`, `records_after_a8_filter` | A13 gate result |
-| `gate/B6/` | `p5`, `p10`, `p25`, `p75`, `mean`, `median`, `zero_entropy_count` | B6 gate result |
-| `data/` | `n_valid_samples`, `avg_token_length`, `token_length_distribution` (bar chart) | `log_dataset_stats` |
-| `data/quality/` | per-signal counts (`html_remnants`, `boilerplate`, `no_citations`, …) | `log_quality_signals` |
-
-#### W&B CLI Usage (dataset probe)
-```bash
-uv run python -m src.dataset_probe \
-    --data-dir data/raw/cl_federal_appellate_bulk \
-    --subset 10000 \
-    --output logs/dataset_probe_report.json \
-    --log-to-wandb \
-    --wandb-entity phl690-harvard-extension-schol \
-    --wandb-project cs1090b \
-    --wandb-name dataset_probe_v2.5.11_10k
-```
-* `--log-to-wandb` is the only flag that triggers W&B telemetry — omitting it runs the probe with zero W&B side effects.
-* `WANDB_API_KEY` must be set in `.env` before running with `--log-to-wandb` on the cluster.
-
-#### W&B Dependency Provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `wandb>=0.16` | ✅ line 24 | ✅ 13 locked entries |
-| Lazy import in `wandb_logger.py` | N/A — import deferred to call site | ✅ |
-| Optional import in `dataset_probe.py` | N/A — `try/except ImportError` fallback | ✅ |
-
-When integrated, the full logger tracks:
-* **Per-phase GPU hours**
-* **Peak CUDA memory**
-* **Allocator diagnostics**
-* **CUDA stream synchronization times**
-* **`allow_tf32` state** for each phase
-* **BGE-M3 pooling flags**
-* **Embedding norm distributions**
-* **Reranker score distributions**, including:
-  * minimum
-  * mean
-  * maximum
-  * entropy
-* **FAISS retrieval diagnostics**, including:
-  * Recall@k vs `nprobe`
-  * `nprobe`
-  * `nlist`
-* **NLI window count distributions**
-* **NLI confidence distributions**
-* **Window indices per label**
-* **Per-query claim counts**
-* **Claims per 1,000 tokens**
-* **Zero-claim rate**
-* **Hard Citation Hallucination counts**
-* **CitationFound_NoLocalSupport counts**
-* **Citation hashes**
-* **Citation anchor token offsets**
-* **Prompt token counts** using the Mistral tokenizer
-* **Completion token counts**
-* **Gradient norms**
-* **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
 ---
 ## Datasets
 | Dataset | Size | License | Role | Status |
@@ -925,7 +951,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson; OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson; OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS / DOCUMENTED_FIELDS / STAGE3_REQUIRED_FIELDS; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
@@ -965,6 +991,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported in dataset_probe.py — only loaded when gate A13 runs) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count — not at module top level |
+| Schema validation       | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; used for GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts; validate_schema + 5 composable sub-helpers (_check_presence, _check_types_and_ranges, _check_vocabulary, _check_consistency, _check_documented_coverage) are pure Python with no Pydantic dependency |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
 | DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via scan_ndjson for exact statistics on full 1.46M-opinion corpus; verified compatible with torch 2.0.1+cu117, spaCy 3.8.11, transformers 4.39.3 on 4× NVIDIA L4 cluster |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; lazy imports in wandb_logger.py; optional try/except import in dataset_probe.py; --log-to-wandb flag exclusively in main()) |
