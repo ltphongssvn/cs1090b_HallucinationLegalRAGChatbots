@@ -1760,6 +1760,7 @@ def run_probe(
     elif not full_scan:
         # full_scan=False explicitly requested: reservoir-subsample from loaded records.
         import random as _random
+
         rng = _random.Random(seed)
         if len(records) > subset:
             records = rng.sample(records, subset)
