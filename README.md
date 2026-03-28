@@ -551,7 +551,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines how probe evaluates corpus for downstream legal RAG), module-level constants as controlled measurement infrastructure, GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), stratify_by minority-group-preserving stratified subsampling, GATE_REGISTRY | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines corpus evaluation for downstream legal RAG), module-level constants, contract test suite (303 tests), GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), GATE_REGISTRY, stratify_by minority-group-preserving stratified subsampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -638,127 +638,154 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `data/raw/cl_federal_appellate_bulk`
   * via `src/extract.py`
 * **Dataset readiness probing** (`src/dataset_probe.py` v2.5.11) runs before chunking:
-  * **Polars is a mandatory hard dependency** — `import polars as pl` at module top level, no try/except fallback.
-  * `run_probe()` **always** calls `_full_scan_with_polars()` — population-level exact statistics guaranteed.
-  * All probe behaviour is governed by **`ProbeConfig`** — the single object that defines how the probe evaluates the CourtListener corpus for downstream legal RAG research.
+  * **Polars is a mandatory hard dependency** — `import polars as pl` at module top level.
+  * `run_probe()` **always** calls `_full_scan_with_polars()`.
+  * All probe behaviour is governed by **`ProbeConfig`** — the frozen dataclass that defines how the probe evaluates the CourtListener corpus for downstream legal RAG research.
+  * **Contract tests** in `tests/test_dataset_probe.py` ensure the probe's formal structure and behavior remain intact — see Contract Test Suite below.
   * `run_probe()` returns a **typed `ProbeReport(BaseModel)`**.
+
+#### Contract Test Suite — `tests/test_dataset_probe.py`
+
+##### Purpose
+* `tests/test_dataset_probe.py` is the **single authoritative contract test file** for `src/dataset_probe.py`.
+* Its role is to ensure that the dataset probe, its constants, its `ProbeConfig`, its gates, and its typed outputs continue to satisfy the **formal structure and behavior that downstream legal RAG research infrastructure relies on**.
+* The test file is organized into **over 60 named test classes** covering distinct contractual obligations. All tests run under the `pytest` + `hypothesis` framework and are enforced on every push via CI.
+* **303 tests pass** as of the current version (confirmed by `uv run pytest tests/test_dataset_probe.py -m "unit or contract" -q`).
+
+##### Contract test categories and what they protect
+
+**Constants contracts (`TestModuleLevelConstants`, `TestProbeVersion`)**
+* Assert that `PROVISIONAL_MIN_TEXT_LENGTH == 1500`, `CHUNK_SIZE_SUBWORDS == 1024`, `CHUNK_OVERLAP_SUBWORDS == 128`, `ENCODER_MODEL == "BAAI/bge-m3"`, `SPACY_MODEL == "en_core_web_sm"`, `MIN_SENTENCE_COUNT == 20` — all as integer or string literals with no type annotations.
+* Assert that the source file contains these literal assignments (e.g., `"CHUNK_SIZE_SUBWORDS = 1024" in source`) — preventing silent drift where a constant changes value without the test catching it.
+* Assert `PROBE_VERSION` is a string of length ≥ 3 — the instrument version recorded in every `ProbeReport`.
+
+**`ProbeConfig` contracts (`TestProbeConfig`, `TestA11ChunkCountFormula`)**
+* Assert `ProbeConfig()` is **frozen** — mutating a field raises `AttributeError` or `TypeError`.
+* Assert `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — the critical invariant that `ProbeConfig` defaults must equal module constants.
+* Assert `_probe_config_to_dict(ProbeConfig())` is JSON-serializable — guarantees the config snapshot in `provenance["probe_config"]` can always be written to disk and W&B.
+* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary Mistral tokenizer check.
+* Assert all new `ProbeConfig` fields appear in `report["provenance"]["probe_config"]` — confirms the config snapshot is complete in every `ProbeReport`.
+* Assert the A11 chunk count formula (`stride = chunk_size - overlap; n_chunks = max(1, ceil((total - overlap) / stride))`) matches `CHUNK_SIZE_SUBWORDS=1024` and `CHUNK_OVERLAP_SUBWORDS=128` — regression test against chunking formula drift.
+
+**`GateResult` contracts (`TestGateResultModel`)**
+* Assert `GateResult` is importable and is a Pydantic `BaseModel`.
+* Assert `GateResult` has required fields `gate` and `severity`.
+* Assert `GateResult.model_dump()` is JSON-serializable.
+* Assert `GateResult` is **frozen** — mutation raises `FrozenInstanceError`.
+
+**`ProbeReport` contracts (`TestProbeReportModel`)**
+* Assert `ProbeReport` is importable and is a Pydantic `BaseModel`.
+* Assert `run_probe()` returns a `ProbeReport` instance — not a raw dict.
+* Assert `report["gates"]` works via `__getitem__` (backward-compatible dict-style access).
+* Assert `"gates" in report` works via `__contains__`.
+* Assert `report.gates` attribute access works natively.
+* Assert `report.summary` has `all_passed` key.
+* Assert `json.dumps(report.model_dump())` succeeds — full JSON serializability.
+
+**`GATE_REGISTRY` contracts (`TestGateRegistry`)**
+* Assert registry is non-empty and iterable.
+* Assert all 7 core gates are present: A7, A8, A9, A11, A12, A13, B6.
+* Assert every entry has `"name"`, `"fn"` (callable), and `"severity"` keys.
+* Assert A7, A8, A11, A12, A13 are `"blocking"`; A9 and B6 are `"advisory"`.
+* Assert every non-tokenizer, non-spaCy gate function is callable with `(records, cfg)` and returns a dict with a `"gate"` key — live execution contract.
+
+**`STAGE3_REQUIRED_FIELDS` contracts (`TestStage3RequiredFields`)**
+* Assert `STAGE3_REQUIRED_FIELDS` is a `frozenset` and is exported.
+* Assert it is a subset of `DOCUMENTED_FIELDS`.
+* Assert it contains key Stage 3 fields: `id`, `court_id`, `text`, `text_length`, `text_source`, `date_filed`, `text_hash`.
+* Assert `validate_schema()` reports `stage3_pass` and `stage3_missing_counts` for records missing Stage 3 fields.
+* Assert `stage3_pass=True` appears in `report["provenance"]` when all 17 fields are present.
+
+**Stratified sampling contracts (`TestStratifiedSampling`)**
+* Assert `run_probe()` with `ProbeConfig(stratify_by="court_id")` does not crash.
+* Assert `report["subset_n"] <= subset` after stratified subsampling.
+
+**W&B isolation contracts (`TestLogReportToWandbIsolation`, `TestRunProbeNoLogToWandbParam`, `TestRunProbeNoInlineWandb`, `TestLogReportToWandbSingleCall`)**
+* Assert `run_probe()` signature does not include a `log_to_wandb` parameter — telemetry must stay in `main()`.
+* Assert `_log_report_to_wandb` is not called anywhere inside `run_probe()` — verified by inspecting the source AST.
+* Assert `wandb.log` is called **exactly once** per `_log_report_to_wandb` invocation — the single consolidated log call contract.
+
+**Lazy import contracts (`TestLazyImportBehavior`, `TestImportStyle`)**
+* Assert `spacy` is NOT imported at module top level (lazy import pattern).
+* Assert `transformers.AutoTokenizer` is NOT imported at module top level.
+* Assert the source contains `import polars as pl` at module level (mandatory hard import).
+
+**Full-scan and shard audit contracts (`TestFullScanCLI`, `TestShardAuditTotalRecordsDecoded`, `TestShardAuditOnePassStreaming`)**
+* Assert `--full-scan` CLI flag triggers Polars path and reports `full_scan=True` in provenance.
+* Assert `shard_audit["total_records_decoded"]` reflects the actual number of records loaded.
+* Assert the one-pass streaming audit correctly counts parse errors and blank lines.
+
+**Schema helper contracts (`TestValidateSchemaHelpers`, `TestValidateSchemaDocumentedFields`, `TestValidateSchemaTextLengthConsistency`)**
+* Assert each composable helper (`_check_presence`, `_check_types_and_ranges`, `_check_vocabulary`, `_check_consistency`, `_check_documented_coverage`) returns dicts with expected keys.
+* Assert `validate_schema()` `pass=True` when all required fields present and valid.
+* Assert consistency check uses OR logic — absolute tolerance OR relative tolerance.
+
+**Property-based tests (`TestPercentileProperty`, `TestGateA8Property`)**
+* Use `hypothesis` to assert `_percentile()` satisfies monotonicity and boundary conditions over arbitrary sorted lists.
+* Use `hypothesis` to assert A8 gate `pass` field is always a boolean regardless of input distribution.
+
+##### Contract test dependency provenance
+| Item | pyproject.toml | uv.lock pinned |
+|------|---------------|----------------|
+| `pytest>=9.0.2` | ✅ line 43 | ✅ lockfile-pinned |
+| `pytest-cov>=7.0.0` | ✅ line 44 | ✅ lockfile-pinned |
+| `hypothesis>=6.151.9` | ✅ line 41 | ✅ lockfile-pinned |
+| `pydantic>=2.12.5` — `GateResult` + `ProbeReport` contract assertions | ✅ line 37 | ✅ 49 locked entries |
+| `polars>=1.39.3` — full-scan contract assertions | ✅ line 36 | ✅ 16 locked entries |
+| Python stdlib `dataclasses` — `ProbeConfig` frozen assertion | N/A | ✅ Python 3.11.9 |
 
 #### `ProbeConfig` — Defines How the Probe Evaluates the Corpus for Downstream Legal RAG
 
 ##### What `ProbeConfig` is
-* `ProbeConfig` is a **frozen dataclass** (`@dataclasses.dataclass(frozen=True)`) that is the **single source of truth** for how `src/dataset_probe.py` evaluates the CourtListener corpus.
-* Every gate threshold, every subsample size, every model name, every quality signal pattern, and the stratification strategy are controlled by `ProbeConfig` fields — **no gate uses hardcoded values**.
-* The word "frozen" is significant: once a `ProbeConfig` is constructed, its values cannot change. This makes every probe run a **reproducible measurement** — the config that produced a `ProbeReport` is fully recorded in `provenance["probe_config"]` and cannot drift between construction and use.
-* `_probe_config_to_dict(cfg)` serializes `ProbeConfig` to a JSON-safe dict (frozensets → sorted lists, tuples → lists, None preserved) — ensuring the config snapshot is human-readable and diff-able across versions.
+* `ProbeConfig` is a **frozen dataclass** (`@dataclasses.dataclass(frozen=True)`) — the single source of truth for how `src/dataset_probe.py` evaluates the CourtListener corpus.
+* Every gate threshold, subsample size, model name, quality signal pattern, and stratification strategy are controlled by `ProbeConfig` fields — no gate uses hardcoded values.
+* **Frozen** means: once constructed, values cannot change. Every probe run is a reproducible measurement.
+* `_probe_config_to_dict(cfg)` serializes to a JSON-safe dict (frozensets → sorted lists, tuples → lists, None preserved) — recorded in `provenance["probe_config"]` and passed to `wandb.init(config=...)`.
 
-##### What `ProbeConfig` defines: the six evaluation dimensions
+##### The six evaluation dimensions `ProbeConfig` controls
 
-**Dimension 1 — Text viability for chunking (A8, A13 pre-filter)**
-* `min_text_length = 1500` — the minimum character count an opinion must have to be worth chunking. Records below this are excluded before Stage 3. This threshold reflects the minimum text needed to produce at least one meaningful 1024-subword chunk with BGE-M3.
-* `chunk_size_subwords = 1024` — the subword chunk window used to verify A11; must match the actual Stage 3 chunking tokenizer.
-* `chunk_overlap_subwords = 128` — ensures citation anchors at chunk boundaries are preserved across windows.
+| Dimension | Key fields | What it evaluates |
+|-----------|-----------|-------------------|
+| Text viability | `min_text_length=1500`, `chunk_size_subwords=1024`, `chunk_overlap_subwords=128` | Minimum chars for meaningful chunking; chunk window for A11 |
+| Source format | `a7_known_formats_pass_pct=80.0`, `a7_known_formats={"plain_text","html_with_citations"}` | % of records from formats confirmed to survive normalization |
+| Citation anchor | `a12_min_pct_with_anchor=60.0`, `a9_zero_citation_pass_pct=20.0` | SQLite Tier C viability |
+| Chunk count | `a11_min_median_chunks=2.0`, `encoder_model="BAAI/bge-m3"`, `a11_generative_model` | Multi-chunk splitting + Mistral context limit advisory |
+| Sentence density | `min_sentence_count=20`, `a13_max_below_threshold_pct=15.0`, `spacy_model` | NLI window coverage floor |
+| Entropy / quality | `b6_entropy_spot_check_tolerance=1.0`, `quality_signals_html_pattern`, `quality_signals_boilerplate_phrases` | Tokenization drift + boilerplate survival |
 
-**Dimension 2 — Source format distribution (A7)**
-* `a7_known_formats_pass_pct = 80.0` — at least 80% of records must come from known `text_source` formats for the corpus to be considered reliably normalized.
-* `a7_known_formats = {"plain_text", "html_with_citations"}` — the two formats confirmed to survive `row_normalizer.py` HTML stripping without information loss.
+Plus: schema consistency (`text_length_consistency_tolerance=200`, `text_length_relative_tolerance=0.05`) and stratified sampling (`stratify_by: str | None = None`).
 
-**Dimension 3 — Citation anchor viability (A9, A12)**
-* `a9_zero_citation_pass_pct = 20.0` — advisory: more than 20% zero-citation records signals the corpus may not support Tier C citation lookup at scale.
-* `a12_min_pct_with_anchor = 60.0` — at least 60% of records must contain a regex-extractable citation anchor for the SQLite citation index to be viable for Tier C.
-* `a12_text_cap_chars = 50_000` — citation regex scan capped per record to prevent quadratic backtracking on very long opinions.
+##### `ProbeConfig` contracts enforced by test suite
+* `ProbeConfig()` is frozen — mutation raises exception (`TestProbeConfig.test_is_frozen`)
+* `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — defaults equal module constants (`TestProbeConfig.test_default_min_text_length`)
+* `_probe_config_to_dict(ProbeConfig())` is JSON-serializable (`TestProbeConfig.test_is_json_serializable`)
+* All new fields appear in `report["provenance"]["probe_config"]` (`TestProbeConfig.test_all_new_fields_in_provenance`)
 
-**Dimension 4 — Chunk count and tokenizer alignment (A11)**
-* `a11_min_median_chunks = 2.0` — the corpus median must be ≥ 2 chunks per document to confirm multi-chunk splitting is working correctly.
-* `encoder_model = "BAAI/bge-m3"` — the tokenizer whose subword vocabulary is used to count chunks; this must match the actual Stage 3 encoder.
-* `a11_generative_model = "mistralai/Mistral-7B-Instruct-v0.2"` — secondary advisory check that no raw opinion exceeds Mistral's 32,768-token context limit.
-* `a11_subsample_n = 200` — records used for tokenizer chunk count gate.
-
-**Dimension 5 — Sentence density (A13)**
-* `min_sentence_count = 20` — records with fewer sentences are flagged as too sparse for reliable multi-window NLI evaluation.
-* `a13_max_below_threshold_pct = 15.0` — at most 15% of A8-filtered records may fall below the sentence density floor.
-* `spacy_model = "en_core_web_sm"` — lazily imported spaCy model for sentence segmentation.
-* `a13_subsample_n = 200`, `a13_text_cap_chars = 50_000` — subsample size and text cap for sentence density gate.
-
-**Dimension 6 — Text entropy and quality signals (B6, quality signals)**
-* `b6_entropy_spot_check_tolerance = 1.0` — maximum allowed deviation between the stored `text_entropy` field and a freshly recomputed Shannon entropy; deviations above 1 bit signal upstream tokenization drift.
-* `b6_entropy_spot_check_sample_n = 10` — number of records used for the B6 spot-check.
-* `quality_signals_html_pattern = r"<[a-zA-Z][^>]{0,100}>"` — HTML remnant detection regex applied after `row_normalizer.py` stripping.
-* `quality_signals_boilerplate_phrases` — 5 Westlaw/court boilerplate phrases that indicate non-opinion text survived normalization.
-* `quality_signals_sample_n = 500`, `quality_signals_text_cap_chars = 50_000` — soft-signal subsample and text cap.
-
-**Plus: schema consistency and stratified sampling**
-* `text_length_consistency_tolerance = 200` and `text_length_relative_tolerance = 0.05` — OR-logic cross-validation of `text_length` field vs `len(text)`.
-* `a12_subsample_n = 500` — records for citation anchor survival gate.
-* `stratify_by: str | None = None` — tells the probe which record attribute to use for minority-group-preserving post-scan stratified subsampling (e.g., `"court_id"` for circuit-proportional, `"text_source"` for format-proportional).
-
-##### How `ProbeConfig` connects to the measurement instrument constants
-* Module-level constants (`PROVISIONAL_MIN_TEXT_LENGTH`, `CHUNK_SIZE_SUBWORDS`, etc.) are **literal values with no type annotations** — they anchor the instrument's baseline calibration and are directly asserted by test suites.
-* `ProbeConfig` default field values **must equal** the corresponding module constants. This invariant is enforced by tests. If a `ProbeConfig` default and its module constant drift apart, the test suite catches it immediately.
-* The two-layer design separates **baseline calibration** (constants, test-assertable) from **deliberate recalibration** (injectable `ProbeConfig` for specific experimental conditions).
-
-##### `ProbeConfig` provenance and serialization
-* `_probe_config_to_dict(cfg)` converts to a JSON-safe dict — frozensets → sorted lists, tuples → lists, None preserved.
-* Full snapshot recorded in `provenance["probe_config"]` of every `ProbeReport` via `model_dump()`.
-* Passed to `wandb.init(config=...)` — every threshold traceable per W&B run.
-* `ProbeConfig` is **injectable** — callers can recalibrate any threshold without modifying source:
-```python
-from src.dataset_probe import ProbeConfig, run_probe
-
-# Tighten citation anchor requirement; use circuit-proportional sampling
-cfg = ProbeConfig(a12_min_pct_with_anchor=75.0, stratify_by="court_id")
-report = run_probe(data_dir=..., subset=10_000, output=..., config=cfg)
-```
-
-##### `ProbeConfig` dependency provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `@dataclasses.dataclass(frozen=True)` — stdlib | N/A | ✅ Python 3.11.9 |
-| `_probe_config_to_dict` serialization — pure Python | N/A | ✅ |
-| `provenance["probe_config"]` via `model_dump()` | `pydantic>=2.12.5` line 37 | ✅ 49 locked entries |
-| `wandb.init(config=...)` | `wandb>=0.16` line 24 | ✅ 13 locked entries |
-| `polars>=1.39.3` — loads corpus records ProbeConfig gates evaluate | line 36 | ✅ 16 locked entries |
-| No additional third-party dependency required | ✅ confirmed | ✅ |
-
-#### Module-Level Constants — Research Infrastructure for Controlled Measurement
-* Constants are **literal values with no type annotations** — must match `ProbeConfig` field defaults; enforced by test assertions.
-
-| Constant | Value | Role |
-|----------|-------|------|
-| `PROBE_VERSION` | `"2.5.11"` | Instrument version in every `ProbeReport.provenance` and W&B run name |
-| `PROVISIONAL_MIN_TEXT_LENGTH` | `1500` | A8 gate floor; Stage 3 pre-filter |
-| `CHUNK_SIZE_SUBWORDS` | `1024` | BGE-M3 + BM25 chunk window |
-| `CHUNK_OVERLAP_SUBWORDS` | `128` | Sliding window overlap |
-| `ENCODER_MODEL` | `"BAAI/bge-m3"` | A11 tokenizer; must match Stage 3 |
-| `SPACY_MODEL` | `"en_core_web_sm"` | A13 sentence segmentation model |
-| `SPACY_EXCLUDE` | `["ner", "parser", "lemmatizer"]` | Disabled pipeline components |
-| `MIN_SENTENCE_COUNT` | `20` | A13 sentence density floor |
+#### Module-Level Constants — Controlled Measurement Infrastructure
+| Constant | Value | Module constant → `ProbeConfig` field invariant |
+|----------|-------|------------------------------------------------|
+| `PROBE_VERSION` | `"2.5.11"` | N/A — instrument version |
+| `PROVISIONAL_MIN_TEXT_LENGTH` | `1500` | = `ProbeConfig().min_text_length` |
+| `CHUNK_SIZE_SUBWORDS` | `1024` | = `ProbeConfig().chunk_size_subwords` |
+| `CHUNK_OVERLAP_SUBWORDS` | `128` | = `ProbeConfig().chunk_overlap_subwords` |
+| `ENCODER_MODEL` | `"BAAI/bge-m3"` | = `ProbeConfig().encoder_model` |
+| `SPACY_MODEL` | `"en_core_web_sm"` | = `ProbeConfig().spacy_model` |
+| `MIN_SENTENCE_COUNT` | `20` | = `ProbeConfig().min_sentence_count` |
 | `DOCUMENTED_FIELDS` | 23-field frozenset | Full schema advisory coverage |
 | `KNOWN_TEXT_SOURCES` | 8-value frozenset | A7 vocabulary check |
 | `MIN_REQUIRED_FIELDS` | 11-field frozenset | Blocking CI gate minimum |
-| `REQUIRED_FIELDS` | alias for `MIN_REQUIRED_FIELDS` | Backward-compatible alias |
 | `STAGE3_REQUIRED_FIELDS` | 17-field frozenset | Stage 3 readiness gate |
 | `GATE_REGISTRY` | 7-entry ordered list | Self-describing gate manifest |
 
 #### `stratify_by` — Minority-Group-Preserving Stratified Subsampling
 * `ProbeConfig.stratify_by: str | None = None` — tells the probe which record attribute to use for proportional post-scan stratified subsampling.
-* `_stratified_reservoir_sample()` called **after** `_full_scan_with_polars()` — guarantees every stratum gets **at least 1 record**.
-* Recommended: `"court_id"` (circuit-proportional), `"text_source"` (format-proportional).
+* Called **after** `_full_scan_with_polars()` — guarantees every stratum gets **at least 1 record**.
 * `shard_audit["stratified_by"]` records provenance. Uses Python stdlib `random.Random`.
 
-#### Mandatory Exact Full-Corpus Scan — `_full_scan_with_polars()`
+#### Mandatory Exact Full-Corpus Scan
 * `import polars as pl` at module top level — no fallback.
 * `run_probe()` defaults `full_scan=True` — always scans all 1,465,484 opinions via `pl.scan_ndjson()` per shard.
 * `provenance["full_scan"]=True` and `provenance["polars_version"]` always recorded.
-
-#### Post-Scan Processing Pipeline
-| Step | Path | Records |
-|------|------|---------|
-| 1. Corpus load | `_full_scan_with_polars()` | All 1,465,484 opinions |
-| 2. Stratified subsample (if `stratify_by` set) | `_stratified_reservoir_sample()` — min 1 per stratum | `subset` records proportional per stratum |
-| 3. Gates A7/A8/A9/B6 | Full loaded (or post-subsample) record list | All loaded records |
-| 4. Gate A11 | Internal subsample | 200 records |
-| 5. Gate A12 | Internal subsample | 500 records |
-| 6. Gate A13 | A8-filtered internal subsample | 200 records |
 
 #### Stage 3 Readiness Gate — `STAGE3_REQUIRED_FIELDS` (17 fields)
 | Field | Stage 3 Role |
@@ -786,19 +813,18 @@ report = run_probe(data_dir=..., subset=10_000, output=..., config=cfg)
 * `ProbeReport(BaseModel)`: `extra=allow, frozen=False` — `__getitem__`/`__contains__` backward compat; `model_dump()` carries full `ProbeConfig` snapshot.
 * **pydantic>=2.12.5** — pyproject.toml line 37; 49 locked entries in uv.lock.
 
-#### Lazy Loading of Heavy NLP Dependencies
+#### Lazy Loading
 | Dependency | Import strategy | Triggered by |
 |------------|----------------|-------------|
-| `polars` | **Hard import at module top** | Always (corpus load) |
+| `polars` | **Hard import at module top** | Always |
 | `spacy` | Lazy — `_load_spacy_nlp()` | Gate A13 only |
-| `transformers.AutoTokenizer` | Lazy — `gate_a11_tokenizer_chunk_count()` | Gate A11 only |
+| `transformers.AutoTokenizer` | Lazy | Gate A11 only |
 | `wandb` | Optional `try/except ImportError` | `--log-to-wandb` in `main()` only |
 
 #### W&B Telemetry Contract
-* `_log_report_to_wandb()` is **exclusively a `main()` concern**.
-* All metrics consolidated into **one `wandb.log()` call** per run.
-* `ProbeConfig` snapshot passed to `wandb.init(config=...)` — every evaluation parameter traceable per W&B run.
-* `PROBE_VERSION` used in default W&B run name.
+* `_log_report_to_wandb()` is **exclusively a `main()` concern** — enforced by `TestLogReportToWandbIsolation`.
+* `wandb.log` called **exactly once** per invocation — enforced by `TestLogReportToWandbSingleCall`.
+* `ProbeConfig` snapshot passed to `wandb.init(config=...)`.
 
 #### W&B Metrics Logged Per Phase
 | Namespace | Metric | Source |
@@ -1011,7 +1037,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: ProbeConfig @dataclasses.dataclass(frozen=True) defines how probe evaluates CourtListener corpus for downstream legal RAG (6 evaluation dimensions: text viability, source format, citation anchor, chunk count, sentence density, entropy/quality; 27 fields; injectable; _probe_config_to_dict JSON-serializable; provenance["probe_config"] + wandb.init; defaults must equal module constants); module-level constants as controlled measurement infrastructure (PROBE_VERSION, PROVISIONAL_MIN_TEXT_LENGTH=1500, CHUNK_SIZE_SUBWORDS=1024, ENCODER_MODEL, SPACY_MODEL, MIN_SENTENCE_COUNT=20, DOCUMENTED_FIELDS/KNOWN_TEXT_SOURCES/MIN_REQUIRED_FIELDS/STAGE3_REQUIRED_FIELDS frozensets, GATE_REGISTRY 7-entry manifest); stratify_by minority-group-preserving post-scan stratified subsampling; mandatory Polars hard import; _full_scan_with_polars() always called; GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False (pydantic>=2.12.5); lazy-loaded spaCy + AutoTokenizer; 5 composable schema sub-helpers; wandb optional try/except; --log-to-wandb exclusively in main()
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: ProbeConfig frozen dataclass (6 evaluation dimensions, 27 fields, injectable, JSON-serializable); module constants as controlled measurement infrastructure; mandatory Polars hard import; _full_scan_with_polars() always called; GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False (pydantic>=2.12.5); STAGE3_REQUIRED_FIELDS (17 fields); GATE_REGISTRY 7-entry manifest; stratify_by minority-group-preserving post-scan subsampling; lazy-loaded spaCy + AutoTokenizer; 5 composable schema sub-helpers; wandb optional try/except; --log-to-wandb exclusively in main()
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
@@ -1020,7 +1046,8 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── exceptions.py            # PipelineError
 │   └── timer.py                 # cell_timer
 ├── notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
-├── tests/                       # test suite with coverage
+├── tests/
+│   └── test_dataset_probe.py    # Single authoritative contract test file — 60+ named test classes, 303 tests; contracts: module constants, ProbeConfig frozen+serializable, GateResult frozen, ProbeReport typed+backward-compat, GATE_REGISTRY callable, STAGE3_REQUIRED_FIELDS subset+readiness, stratified sampling, W&B isolation (no log_to_wandb in run_probe), single wandb.log call, lazy imports, full-scan provenance, schema helpers, property-based (hypothesis)
 ├── configs/                     # Hydra YAML
 ├── scripts/                     # setup.sh helpers
 ├── data/                        # GITIGNORED — DVC → S3 us-east-2
@@ -1051,16 +1078,16 @@ cs1090b_HallucinationLegalRAGChatbots/
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count |
-| Corpus evaluation config | Python stdlib dataclasses                                                                           | ProbeConfig @dataclasses.dataclass(frozen=True) — defines how probe evaluates CourtListener corpus for downstream legal RAG across 6 dimensions (text viability, source format, citation anchor, chunk count, sentence density, entropy/quality); 27 fields; frozen=immutable after construction; _probe_config_to_dict JSON-serializable; provenance["probe_config"] + wandb.init(config=...); injectable without source modification; defaults must equal module-level constants |
-| Measurement instrument constants | Python stdlib (module-level literals + frozensets)                                        | PROBE_VERSION="2.5.11"; PROVISIONAL_MIN_TEXT_LENGTH=1500; CHUNK_SIZE_SUBWORDS=1024; CHUNK_OVERLAP_SUBWORDS=128; ENCODER_MODEL="BAAI/bge-m3"; SPACY_MODEL; SPACY_EXCLUDE; MIN_SENTENCE_COUNT=20; DOCUMENTED_FIELDS(23)/KNOWN_TEXT_SOURCES(8)/MIN_REQUIRED_FIELDS(11)/STAGE3_REQUIRED_FIELDS(17) frozensets; GATE_REGISTRY 7-entry manifest; no type annotations — test-assertable; no extra dependency |
-| Stratified sampling     | Python stdlib `random`                                                                               | _stratified_reservoir_sample post-Polars-scan; ProbeConfig.stratify_by: str\|None; min 1 per stratum; shard_audit["stratified_by"]; no pyproject.toml entry needed |
+| Contract test suite     | pytest + hypothesis                                                                                  | pytest>=9.0.2 (pyproject.toml line 43); hypothesis>=6.151.9 (line 41); pytest-cov>=7.0.0 (line 44); lockfile-pinned; 303 tests in tests/test_dataset_probe.py across 60+ named test classes; covers: module constants literals, ProbeConfig frozen+serializable+defaults-equal-constants, GateResult frozen Pydantic, ProbeReport typed+backward-compat, GATE_REGISTRY callable+severity, STAGE3_REQUIRED_FIELDS subset+readiness, stratified sampling, W&B isolation (no log_to_wandb in run_probe signature), single wandb.log call, lazy imports (spaCy/AutoTokenizer not at top level; polars IS at top level), full-scan provenance, schema helpers, property-based percentile+A8 monotonicity |
+| Corpus evaluation config | Python stdlib dataclasses                                                                           | ProbeConfig @dataclasses.dataclass(frozen=True); 27 fields across 6 evaluation dimensions; defaults must equal module constants (enforced by TestProbeConfig + TestModuleLevelConstants); injectable; _probe_config_to_dict JSON-serializable; provenance["probe_config"] + wandb.init(config=...) |
+| Measurement instrument constants | Python stdlib (module-level literals + frozensets)                                        | PROBE_VERSION="2.5.11"; PROVISIONAL_MIN_TEXT_LENGTH=1500; CHUNK_SIZE_SUBWORDS=1024; CHUNK_OVERLAP_SUBWORDS=128; ENCODER_MODEL; SPACY_MODEL; MIN_SENTENCE_COUNT=20; frozensets; GATE_REGISTRY; no type annotations |
+| Stratified sampling     | Python stdlib `random`                                                                               | _stratified_reservoir_sample post-Polars-scan; min 1 per stratum; ProbeConfig.stratify_by; no pyproject.toml entry needed |
 | Stage 3 readiness gate  | Python stdlib (frozenset)                                                                            | STAGE3_REQUIRED_FIELDS: 17 fields; stage3_pass + stage3_missing_counts in validate_schema() |
-| Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; GateResult(BaseModel) frozen=True; ProbeReport(BaseModel) frozen=False; model_dump() carries full ProbeConfig snapshot |
+| Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; GateResult(BaseModel) frozen=True; ProbeReport(BaseModel) frozen=False; model_dump() carries ProbeConfig snapshot |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — mandatory hard dependency; import at module top level; _full_scan_with_polars() always called (full_scan=True default); pl.scan_ndjson per shard; CPU-only; zero GPU contention; provenance["full_scan"]=True always; 16 locked entries in uv.lock; 303 tests pass |
-| Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; ProbeConfig snapshot in wandb.init; PROBE_VERSION in run name; lazy imports in wandb_logger.py; optional try/except in dataset_probe.py; --log-to-wandb exclusively in main()) |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — mandatory hard dependency; import at module top level; _full_scan_with_polars() always called; pl.scan_ndjson per shard; CPU-only; 16 locked entries in uv.lock; 303 tests pass |
+| Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; ProbeConfig in wandb.init; PROBE_VERSION in run name; lazy imports; optional try/except; --log-to-wandb exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
-| Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
 | Linting                 | ruff                                                                                                 | lockfile-pinned |
 | Type checking           | mypy                                                                                                 | lockfile-pinned |
 ---
