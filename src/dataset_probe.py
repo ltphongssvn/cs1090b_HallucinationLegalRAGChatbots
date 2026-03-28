@@ -76,10 +76,7 @@ try:
 except ImportError:
     wandb = None  # type: ignore[assignment]
 
-try:
-    import polars as pl  # type: ignore[import]
-except ImportError:
-    pl = None  # type: ignore[assignment]
+import polars as pl  # type: ignore[import]  # mandatory — full-corpus scan always uses Polars
 
 # spacy and transformers.AutoTokenizer are lazily imported inside the
 # functions that use them (_load_spacy_nlp, gate_a11_tokenizer_chunk_count).
@@ -629,10 +626,10 @@ def _reservoir_sample_with_audit(
 def _full_scan_with_polars(data_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Load all records from all shards using Polars scan_ndjson for exact statistics.
-    Used by run_probe when full_scan=True.
+    Polars is a mandatory hard dependency — imported at module top level.
+    This is the default and only corpus loading path; reservoir sampling is
+    used only for gate subsamples (A11, A12, A13), not for corpus loading.
     """
-    if pl is None:
-        raise ImportError("polars is required for --full-scan mode. Install with: uv add polars")
     shard_files = sorted(data_dir.glob("*.jsonl"))
     if not shard_files:
         raise FileNotFoundError(f"No .jsonl shards found in {data_dir}")
@@ -1486,7 +1483,7 @@ class CourtListenerDatasetProbe:
         seed: int = 0,
         skip_tokenizer: bool = False,
         skip_spacy: bool = False,
-        full_scan: bool = False,
+        full_scan: bool = True,
     ) -> "ProbeReport":
         """
         Run all gates. log_to_wandb removed — W&B is exclusively a main() concern.
@@ -1732,7 +1729,7 @@ def run_probe(
     skip_tokenizer: bool = False,
     skip_spacy: bool = False,
     config: ProbeConfig | None = None,
-    full_scan: bool = False,
+    full_scan: bool = True,
 ) -> ProbeReport:
     """
     Run all gates on a record subset. Returns a typed ProbeReport.
@@ -1744,31 +1741,30 @@ def run_probe(
     """
     cfg = config or ProbeConfig()
 
-    if full_scan:
-        print(f"[dataset_probe] Full scan mode — loading all records from {data_dir} via Polars ...")
-        records, audit = _full_scan_with_polars(data_dir)
-        print(f"[dataset_probe] Full scan loaded {len(records)} records.")
-    elif cfg.stratify_by:
-        print(f"[dataset_probe] Stratified sampling by '{cfg.stratify_by}' ({subset} records) from {data_dir} ...")
+    # Always load the full corpus via Polars — mandatory hard dependency.
+    print(f"[dataset_probe] Full scan mode — loading all records from {data_dir} via Polars ...")
+    records, audit = _full_scan_with_polars(data_dir)
+    print(f"[dataset_probe] Full scan loaded {len(records)} records.")
+    if cfg.stratify_by:
+        # Post-scan stratified subsample: proportional per stratum from full corpus.
+        print(f"[dataset_probe] Stratified subsample by '{cfg.stratify_by}' ({subset} records) ...")
         records = _stratified_reservoir_sample(
-            iter_shards(data_dir),
+            iter(records),
             n=subset,
             stratify_by=cfg.stratify_by,
             seed=seed,
         )
-        audit = {
-            "shard_count": len(sorted(data_dir.glob("*.jsonl"))),
-            "total_records_decoded": len(records),
-            "total_parse_errors": 0,
-            "total_blank_lines": 0,
-            "shard_errors": {},
-            "stratified_by": cfg.stratify_by,
-        }
-        print(f"[dataset_probe] Loaded {len(records)} stratified records.")
-    else:
-        print(f"[dataset_probe] Sampling {subset} records from {data_dir} ...")
-        records, audit = _reservoir_sample_with_audit(data_dir, n=subset, seed=seed)
-        print(f"[dataset_probe] Loaded {len(records)} records.")
+        audit["stratified_by"] = cfg.stratify_by
+        audit["total_records_decoded"] = len(records)
+        print(f"[dataset_probe] Stratified subset: {len(records)} records.")
+    elif not full_scan:
+        # full_scan=False explicitly requested: reservoir-subsample from loaded records.
+        import random as _random
+        rng = _random.Random(seed)
+        if len(records) > subset:
+            records = rng.sample(records, subset)
+        audit["total_records_decoded"] = len(records)
+        print(f"[dataset_probe] Subset to {len(records)} records.")
 
     a11_sample, a12_sample, a13_sample = _prepare_samples(records, cfg, seed)
     nlp_pipeline, spacy_version, spacy_model_version = _load_spacy_pipeline(cfg, skip_spacy)
