@@ -550,7 +550,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), ProbeReport(BaseModel) typed return contract, lazy-loaded spaCy + AutoTokenizer, composable schema helpers, STAGE3_REQUIRED_FIELDS gating, exact-vs-sampled analysis via --full-scan, proportional stratified sampling via ProbeConfig.stratify_by | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with OCR-resilient citation regex, A8/A9 parse error counting, --full-scan via Polars scan_ndjson (polars 1.39.3), GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts (pydantic>=2.12.5), lazy-loaded spaCy + AutoTokenizer, composable schema helpers, STAGE3_REQUIRED_FIELDS gating, exact-vs-sampled analysis, proportional stratified sampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -645,46 +645,67 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * A8 and A9 exclude malformed field values from distributions and report `text_length_parse_errors` / `citation_count_parse_errors`
   * Citation regex (`_LEGAL_CITATION_RE`) is OCR-resilient: handles `F. 3d` spacing artifacts from 1980s PDF scans
   * Gate A13 trusts the caller's pre-filtered record list (no internal re-filter)
-  * `run_probe()` returns a **typed `ProbeReport(BaseModel)`** — see Typed Report Contract below
+  * `run_probe()` returns a **typed `ProbeReport(BaseModel)`** — see Typed Contracts below
 
-#### Typed Report Contract — `ProbeReport(BaseModel)`
-* `run_probe()` returns a **`ProbeReport`** Pydantic v2 model instead of a raw `dict[str, Any]`.
-* This is the **repo-certified typed return contract** for all probe consumers (notebooks, CI, W&B logger).
-* **Fields:**
+#### Typed Contracts — `GateResult(BaseModel)` and `ProbeReport(BaseModel)`
+
+##### Overview
+* `src/dataset_probe.py` uses **Pydantic v2** (`pydantic>=2.12.5`, 49 locked entries in `uv.lock`) for two typed contracts:
+  * **`GateResult(BaseModel)`** — minimum output contract enforced on every gate result dict
+  * **`ProbeReport(BaseModel)`** — typed return value of `run_probe()`, replacing raw `dict[str, Any]`
+* `pydantic` is imported **at module top level** (`from pydantic import BaseModel`) — it is a hard dependency, not lazy-loaded, because the typed contracts are used at module definition time.
+
+##### `GateResult(BaseModel)` — gate output contract
+* Defined with `model_config = {"extra": "allow", "frozen": True}`.
+* **`extra="allow"`**: every gate can return additional gate-specific fields (e.g., `breakdown`, `mean`, `p95`) beyond the minimum contract — Pydantic does not reject them.
+* **`frozen=True`**: gate result objects are **immutable after construction** — prevents accidental mutation of gate outputs during report assembly.
+* **Minimum required fields:**
+
+| Field      | Type  | Description                                      |
+|------------|-------|--------------------------------------------------|
+| `gate`     | `str` | Gate name string (e.g., `"A7_text_source_breakdown"`) |
+| `severity` | `str` | `"blocking"` or `"advisory"`                    |
+
+* All gate functions (`gate_a7_*`, `gate_a8_*`, … `gate_b6_*`, `validate_schema`) return plain `dict[str, Any]` — `GateResult` is the **contract documentation and validation target**, not a mandatory wrapper for every dict. This keeps gate functions fast and minimal-import.
+
+##### `ProbeReport(BaseModel)` — `run_probe()` return contract
+* Defined with `model_config = {"extra": "allow", "frozen": False}`.
+* **`extra="allow"`**: additional fields can be attached without schema rejection — forward-compatible for future probe extensions.
+* **`frozen=False`**: report objects are **mutable** — allows post-construction field updates if needed (e.g., appending W&B run URLs).
+* **Required fields:**
 
 | Field             | Type               | Description                                              |
 |-------------------|--------------------|----------------------------------------------------------|
-| `gates`           | `dict[str, Any]`   | All gate results keyed by gate name (A7, A8, … B6)       |
-| `summary`         | `dict[str, Any]`   | passed / failed_blocking / failed_advisory / skipped     |
-| `provenance`      | `dict[str, Any]`   | probe_version, git_sha, timestamp, config snapshot       |
-| `quality_signals` | `dict[str, Any]`   | pct_clean, signal_counts, subsample_n                    |
-| `shard_audit`     | `dict[str, Any]`   | shard_count, total_records_decoded, parse_errors         |
-| `subset_n`        | `int`              | Actual number of records sampled or scanned              |
-| `seed`            | `int`              | RNG seed used for reservoir sampling                     |
-| `data_dir`        | `str`              | Path to corpus shard directory                           |
+| `gates`           | `dict[str, Any]`   | All gate results keyed by gate name (A7, A8, … B6, schema) |
+| `summary`         | `dict[str, Any]`   | passed / failed_blocking / failed_advisory / skipped lists + `all_passed` bool |
+| `provenance`      | `dict[str, Any]`   | probe_version, git_sha, timestamp, full_scan flag, polars_version, probe_config snapshot |
+| `quality_signals` | `dict[str, Any]`   | pct_clean, signal_counts, subsample_n, records_text_capped |
+| `shard_audit`     | `dict[str, Any]`   | shard_count, total_records_decoded, total_parse_errors, total_blank_lines, shard_errors |
+| `subset_n`        | `int`              | Actual number of records sampled, scanned, or stratified |
+| `seed`            | `int`              | RNG seed used for reservoir or stratified sampling       |
+| `data_dir`        | `str`              | Path to corpus shard directory (str, not Path)           |
 
-* **Backward-compatible access:** `report["gates"]` and `"gates" in report` both work via `__getitem__` / `__contains__`.
-* **Attribute access** is also supported: `report.gates`, `report.summary`, etc.
-* `CourtListenerDatasetProbe.run()` and `main()` both return / consume `ProbeReport`.
-* `_log_report_to_wandb()` is **exclusively a `main()` concern** — never called from `run_probe()`.
-* W&B telemetry accesses report fields by key but never calls gate functions directly.
+* **Backward-compatible dict-style access** is implemented via two dunder methods:
+  * `__getitem__(key)` → `self.model_dump()[key]` — enables `report["gates"]`
+  * `__contains__(key)` → `key in self.model_dump()` — enables `"gates" in report`
+* **Attribute access** is also supported natively: `report.gates`, `report.summary`, `report.provenance`, etc.
+* **JSON serialization:** `report.model_dump()` produces a fully JSON-serializable dict — used by `run_probe()` to write the output JSON file: `json.dump(report.model_dump(), fh, indent=2)`.
+* **`CourtListenerDatasetProbe.run()`** returns `ProbeReport` — the OOP interface and the functional `run_probe()` share the same typed return contract.
+* **`_log_report_to_wandb()`** receives a `ProbeReport` and accesses it by key (`report["gates"]`, `report["summary"]`) — exclusively called from `main()`, never from `run_probe()`.
 
-#### Lazy Loading of Heavy NLP Dependencies
-* **`spaCy`** (`spacy>=3.7`, `en_core_web_sm-3.8.0`) and **`transformers.AutoTokenizer`** are **not imported at module top level** in `src/dataset_probe.py`.
-* They are imported **lazily inside the functions that use them**:
-  * `_load_spacy_nlp()` — imports `spacy` only when gate A13 runs sentence segmentation
-  * `gate_a11_tokenizer_chunk_count()` — imports `AutoTokenizer` only when the tokenizer gate runs
-  * `_load_spacy_pipeline()` in `run_probe()` — same lazy spaCy import path
-* **Why this matters:** Gates A7, A8, A9, A12, and B6 can execute in **minimal CI environments** without triggering 1GB+ model downloads. The `--skip-tokenizer` and `--skip-spacy` CLI flags skip the respective gates entirely, avoiding any import attempt.
-* **Dependency provenance:** Both `spacy` and `transformers` are declared in `pyproject.toml` and fully pinned in `uv.lock` — lazy loading does **not** remove them from the dependency graph; it only defers the import until the gate that needs them is actually invoked.
-* **Verified in `uv.lock`:** `spacy`, `en-core-web-sm`, `transformers`, and `polars` are all present and version-locked, confirming reproducibility across cluster nodes and CI runners.
+##### Frozen vs mutable design rationale
+| Contract | `frozen` | Rationale |
+|----------|----------|-----------|
+| `GateResult` | `True` | Gate outputs are terminal — immutable once produced; prevents silent mutation during report assembly |
+| `ProbeReport` | `False` | Report is assembled incrementally across phases; mutable allows post-construction augmentation (e.g., W&B run URL injection) |
 
-| Lazy-loaded dependency | Import location in code | Gate that triggers it | pyproject.toml entry | uv.lock pinned |
-|------------------------|-------------------------|-----------------------|----------------------|----------------|
-| `spacy` + `en_core_web_sm` | `_load_spacy_nlp()`, `_load_spacy_pipeline()` | A13 (sentence density) | `spacy>=3.7`, `en-core-web-sm @ ...whl` | ✅ |
-| `transformers.AutoTokenizer` | `gate_a11_tokenizer_chunk_count()` | A11 (chunk count, BGE-M3) | `transformers>=4.35,<4.41` | ✅ |
-| `transformers.AutoTokenizer` (generative) | `gate_a11_tokenizer_chunk_count()` | A11 secondary (Mistral advisory) | `transformers>=4.35,<4.41` | ✅ |
-| `polars` | `_full_scan_with_polars()` | `--full-scan` mode only | `polars>=1.39.3` | ✅ |
+##### Pydantic v2 dependency provenance
+| Item | pyproject.toml | uv.lock pinned |
+|------|---------------|----------------|
+| `pydantic>=2.12.5` | ✅ line 37 | ✅ 49 locked entries (pydantic + pydantic-core + annotated-types) |
+| Top-level import (`from pydantic import BaseModel`) | Hard dependency — not lazy | ✅ |
+| `model_config = {"extra": "allow", "frozen": True/False}` | Pydantic v2 API | ✅ |
+| `report.model_dump()` for JSON serialization | Pydantic v2 API | ✅ |
 
 #### Schema Helpers — `validate_schema` and Composable Sub-helpers
 * `validate_schema()` is the **blocking schema gate** called by `run_probe()` before any other gate runs.
@@ -706,117 +727,58 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | `DOCUMENTED_FIELDS` | 23 fields | Full schema documentation coverage — advisory gap reporting only |
 | `STAGE3_REQUIRED_FIELDS` | 17 fields | Fields explicitly required for Stage 3 chunking, metadata filtering, and citation lookup — `stage3_pass` reported separately |
 
-* **`validate_schema()` output contract:**
-  * `pass` — `True` only if all of: no missing required fields, no type errors, no range errors, no vocabulary errors, no consistency errors
-  * `stage3_pass` — separate boolean: `True` if all `STAGE3_REQUIRED_FIELDS` are present across all records
-  * `stage3_missing_counts` — per-field counts of missing Stage 3 fields (empty dict = Stage 3 ready)
-  * `missing_documented_fields` — advisory gap report for fields in `DOCUMENTED_FIELDS` not in `MIN_REQUIRED_FIELDS`
-  * `severity` — always `"blocking"` for the schema gate
+#### Lazy Loading of Heavy NLP Dependencies
+* **`spaCy`** and **`transformers.AutoTokenizer`** are **not imported at module top level** in `src/dataset_probe.py`.
+* They are imported **lazily inside the functions that use them**:
+  * `_load_spacy_nlp()` — imports `spacy` only when gate A13 runs
+  * `gate_a11_tokenizer_chunk_count()` — imports `AutoTokenizer` only when gate A11 runs
+* **Why this matters:** Gates A7, A8, A9, A12, and B6 can execute in **minimal CI environments** without triggering 1GB+ model downloads.
 
-* **Pydantic v2 dependency:** `validate_schema()` and all gate functions return plain `dict[str, Any]` — Pydantic v2 (`pydantic>=2.12.5`, 49 locked entries in `uv.lock`) is used for `GateResult(BaseModel)` and `ProbeReport(BaseModel)` typed contracts, not for the helper functions themselves. The helpers are pure Python with no Pydantic dependency, keeping them fast and minimal-import.
+| Lazy-loaded dependency | Import location in code | Gate that triggers it | pyproject.toml entry | uv.lock pinned |
+|------------------------|-------------------------|-----------------------|----------------------|----------------|
+| `spacy` + `en_core_web_sm` | `_load_spacy_nlp()`, `_load_spacy_pipeline()` | A13 (sentence density) | `spacy>=3.7`, `en-core-web-sm @ ...whl` | ✅ |
+| `transformers.AutoTokenizer` | `gate_a11_tokenizer_chunk_count()` | A11 (chunk count, BGE-M3) | `transformers>=4.35,<4.41` | ✅ |
+| `transformers.AutoTokenizer` (generative) | `gate_a11_tokenizer_chunk_count()` | A11 secondary (Mistral advisory) | `transformers>=4.35,<4.41` | ✅ |
+| `polars` | `_full_scan_with_polars()` | `--full-scan` mode only | `polars>=1.39.3` | ✅ |
 
 #### Exact-vs-Sampled Analysis — `--full-scan` via Polars `scan_ndjson`
 
 ##### Why two modes exist
-* **Sampled mode** (default): `_reservoir_sample_with_audit()` streams shards and keeps a uniform random reservoir of `--subset` records (default 10,000). This is fast (seconds) and sufficient for iterative development and CI gate validation.
-* **Full-scan mode** (`--full-scan`): `_full_scan_with_polars()` loads **every record from every shard** using `pl.scan_ndjson().collect()`, yielding population-level exact statistics with zero sampling bias. This is the authoritative pre-Stage-3 corpus audit for final runs.
-
-##### How `_full_scan_with_polars()` works
-* Iterates over all 159 sorted `.jsonl` shards in `data/raw/cl_federal_appellate_bulk/`.
-* For each shard, calls `pl.scan_ndjson(shard_path).collect()` — Polars lazy evaluation plan is executed shard-by-shard, keeping peak RAM bounded rather than loading the entire 7.6GB corpus at once.
-* Converts each shard DataFrame to a list of dicts and appends to `all_records`.
-* Per-shard `Exception` is caught, logged to `shard_errors`, and counted in `total_parse_errors` — a single bad shard does not abort the scan.
-* Returns `(all_records, audit)` with the same audit contract as the sampled path: `shard_count`, `total_records_decoded`, `total_parse_errors`, `total_blank_lines` (always 0 for Polars path), `shard_errors`.
+* **Sampled mode** (default): `_reservoir_sample_with_audit()` streams shards and keeps a uniform random reservoir of `--subset` records (default 10,000). Fast (seconds), sufficient for CI gate validation.
+* **Full-scan mode** (`--full-scan`): `_full_scan_with_polars()` loads **every record from every shard** using `pl.scan_ndjson().collect()`, yielding population-level exact statistics. Authoritative pre-Stage-3 corpus audit for final runs.
 
 ##### Provenance recorded in every ProbeReport
-* `provenance["full_scan"]` — boolean flag: `True` when `--full-scan` was used, `False` for reservoir sampling.
-* `provenance["polars_version"]` — `pl.__version__` when Polars is available, `None` otherwise. Recorded even in sampled mode so the installed version is always traceable.
-* `shard_audit["total_records_decoded"]` — exact corpus size when `full_scan=True` (expected: 1,465,484); reservoir size when `full_scan=False`.
-
-##### Exact-vs-sampled comparison use cases
-| Use case | Recommended mode | Why |
-|----------|-----------------|-----|
-| Iterative development, CI gate smoke tests | Sampled (`--subset 10000`) | Fast; statistically sufficient for gate pass/fail |
-| Pre-Stage-3 corpus audit before chunking | `--full-scan` | Population-level text_length, citation_count, entropy distributions; no sampling artifacts |
-| Verifying 1,465,484 opinion count | `--full-scan` | `shard_audit["total_records_decoded"]` is exact only in full-scan mode |
-| Diagnosing rare OCR artifacts or parse errors | `--full-scan` | Rare shard-level errors may not appear in a 10K sample |
-| W&B provenance logging for final runs | `--full-scan` + `--log-to-wandb` | `probe/total_records_decoded` reflects true corpus size |
+* `provenance["full_scan"]` — `True` when `--full-scan` was used, `False` for reservoir sampling.
+* `provenance["polars_version"]` — `pl.__version__` when Polars is available, `None` otherwise.
+* `shard_audit["total_records_decoded"]` — exact corpus size when `full_scan=True` (expected: 1,465,484).
 
 ##### `--full-scan` CLI usage
 ```bash
-# Full corpus audit — exact statistics on all 1,465,484 opinions
 uv run python -m src.dataset_probe \
     --data-dir data/raw/cl_federal_appellate_bulk \
     --full-scan \
     --output logs/dataset_probe_full_scan.json \
     --skip-tokenizer \
     --skip-spacy
-
-# Full corpus audit with W&B telemetry
-uv run python -m src.dataset_probe \
-    --data-dir data/raw/cl_federal_appellate_bulk \
-    --full-scan \
-    --output logs/dataset_probe_full_scan.json \
-    --log-to-wandb \
-    --wandb-entity phl690-harvard-extension-schol \
-    --wandb-project cs1090b \
-    --wandb-name dataset_probe_full_scan_v2.5.11
 ```
-* `--skip-tokenizer` and `--skip-spacy` are recommended with `--full-scan` to avoid running A11/A13 gates over all 1.46M records — these gates use their own subsamples regardless and do not benefit from full-scan input.
-* `--full-scan` does **not** affect which gates run — all enabled gates receive the full record list and apply their own subsampling internally where appropriate (A11: 200 records, A12: 500 records, A13: 200 A8-filtered records).
-
-##### Polars dependency provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `polars>=1.39.3` | ✅ line 36 | ✅ 16 locked entries |
-| CPU-only — zero GPU memory contention | N/A — no CUDA dependency | ✅ |
-| `pl.__version__` logged to `provenance["polars_version"]` | N/A | ✅ |
-| `ImportError` raised with install hint if polars missing | N/A — `_full_scan_with_polars` raises on `pl is None` | ✅ |
 
 #### Stratified Sampling — `_stratified_reservoir_sample` and `ProbeConfig.stratify_by`
-
-##### Why stratified sampling exists
-* Default uniform reservoir sampling (`_reservoir_sample_with_audit`) is unbiased across all records but can **under-represent minority circuits or text_source types** in a 10K sample drawn from 1.46M opinions.
-* For example, the 1st Circuit produces far fewer federal appellate opinions than the 9th Circuit — a uniform 10K sample may include only a handful of 1st Circuit records, making gate results unreliable for that circuit.
-* `_stratified_reservoir_sample` ensures **every stratum** (e.g., every `court_id`) is represented in proportion to its actual corpus share, so gate A7 (text_source breakdown), A8 (text_length distribution), and A12 (citation anchor survival) reflect the true multi-circuit distribution rather than a 9th-Circuit-heavy sample.
-
-##### How `_stratified_reservoir_sample` works
-* Consumes the **full shard iterator** to group all records by the stratification field (`stratify_by`, e.g., `"court_id"` or `"text_source"`).
-* Computes proportional allocation: `stratum_n = max(1, round(n * |stratum| / |total|))` — every stratum gets at least 1 record.
-* Samples independently from each stratum using `random.Random(seed).sample()`.
-* If the total after proportional rounding exceeds `n`, shuffles and trims to exactly `n`.
-* Uses **Python stdlib `random.Random`** only — no additional dependencies beyond what is already pinned.
-
-##### Configuration via `ProbeConfig.stratify_by`
 * `ProbeConfig.stratify_by: str | None = None` — default `None` uses uniform reservoir sampling.
-* Set to `"court_id"` for circuit-proportional sampling (recommended for Tier B/C generation evaluation).
-* Set to `"text_source"` to ensure all 8 known source formats are represented.
-* The stratification field value is recorded in `shard_audit["stratified_by"]` for provenance.
-* When `stratify_by` is set, `run_probe()` routes to `_stratified_reservoir_sample` instead of `_reservoir_sample_with_audit` — the audit dict uses a simplified format (no `total_blank_lines` count, `total_parse_errors=0`) because the full iterable is consumed before sampling.
+* Set to `"court_id"` for circuit-proportional sampling; set to `"text_source"` to ensure all 8 source formats are represented.
+* Uses **Python stdlib `random.Random`** only — no additional third-party dependencies.
+* `shard_audit["stratified_by"]` records the stratification field for provenance.
 
 ##### Sampling mode routing in `run_probe()`
 | Condition | Sampling path | Provenance recorded |
 |-----------|--------------|---------------------|
-| `full_scan=True` | `_full_scan_with_polars()` — all 1.46M records via Polars | `provenance["full_scan"]=True`, `provenance["polars_version"]` |
-| `cfg.stratify_by` is set | `_stratified_reservoir_sample()` — proportional per stratum | `shard_audit["stratified_by"]=cfg.stratify_by` |
-| Default | `_reservoir_sample_with_audit()` — uniform reservoir | `provenance["full_scan"]=False` |
-
-##### Stratified sampling dependency provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `random.Random` (stdlib) | N/A — Python stdlib | ✅ Python 3.11.9 locked |
-| `ProbeConfig.stratify_by` field | N/A — dataclass field, no extra dep | ✅ |
-| No new third-party packages required | ✅ confirmed — `grep -n "stratify" pyproject.toml` returns no matches | ✅ |
+| `full_scan=True` | `_full_scan_with_polars()` | `provenance["full_scan"]=True`, `provenance["polars_version"]` |
+| `cfg.stratify_by` is set | `_stratified_reservoir_sample()` | `shard_audit["stratified_by"]=cfg.stratify_by` |
+| Default | `_reservoir_sample_with_audit()` | `provenance["full_scan"]=False` |
 
 #### W&B Telemetry Contract
-* `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern**.
-  * It is **never called from `run_probe()`** or any gate function.
-  * It receives a fully-populated `ProbeReport` and accesses fields by key only — no gate functions are called inside it.
-  * All metrics are consolidated into **one `wandb.log()` call** per run.
-  * The full JSON report is uploaded as a **W&B Artifact** of type `probe_report`.
-* `log_run_start()` in `src/wandb_logger.py` initializes a W&B run and logs dataset provenance to `wandb.summary`.
-* `log_dataset_stats()` logs token length histograms and court distribution as **W&B bar charts**.
-* `log_quality_signals()` logs `ModelQualitySignals` frequency counts under the `data/quality/` metric namespace.
+* `_log_report_to_wandb()` in `src/dataset_probe.py` is **exclusively a `main()` concern** — never called from `run_probe()`.
+* All metrics consolidated into **one `wandb.log()` call** per run.
+* Full JSON report uploaded as a **W&B Artifact** of type `probe_report`.
 
 #### W&B Metrics Logged Per Phase
 | Namespace | Metric | Source |
@@ -841,15 +803,6 @@ uv run python -m src.dataset_probe \
     --wandb-project cs1090b \
     --wandb-name dataset_probe_v2.5.11_10k
 ```
-* `--log-to-wandb` is the only flag that triggers W&B telemetry — omitting it runs the probe with zero W&B side effects.
-* `WANDB_API_KEY` must be set in `.env` before running with `--log-to-wandb` on the cluster.
-
-#### W&B Dependency Provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `wandb>=0.16` | ✅ line 24 | ✅ 13 locked entries |
-| Lazy import in `wandb_logger.py` | N/A — import deferred to call site | ✅ |
-| Optional import in `dataset_probe.py` | N/A — `try/except ImportError` fallback | ✅ |
 
 When integrated, the full logger tracks:
 * **Per-phase GPU hours**
@@ -987,9 +940,9 @@ When integrated, the full logger tracks:
 ### Stage 7 — Experiment Tracking *(not started)*
 * `src/wandb_logger.py` is **implemented and ready**.
 * **W&B run initialization is still pending** — integration fires once LePaRD training begins.
-* `wandb` is declared as **`wandb>=0.16`** in `pyproject.toml` and fully pinned in `uv.lock` (13 locked entries covering wandb and its transitive dependencies).
-* In `src/dataset_probe.py`, `wandb` is imported at module level inside a **`try/except ImportError`** block — if wandb is unavailable the module degrades gracefully with `wandb = None` and skips telemetry without raising.
-* In `src/wandb_logger.py`, all W&B calls use **lazy imports inside each function** (`import wandb` at call site) — the module can be imported without triggering wandb initialization.
+* `wandb` is declared as **`wandb>=0.16`** in `pyproject.toml` and fully pinned in `uv.lock` (13 locked entries).
+* In `src/dataset_probe.py`, `wandb` is imported at module level inside a **`try/except ImportError`** block — degrades gracefully with `wandb = None` if unavailable.
+* In `src/wandb_logger.py`, all W&B calls use **lazy imports inside each function** — the module can be imported without triggering wandb initialization.
 ---
 ## Datasets
 | Dataset | Size | License | Role | Status |
@@ -1039,12 +992,12 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; --full-scan via Polars scan_ndjson (exact-vs-sampled); proportional stratified sampling via ProbeConfig.stratify_by + _stratified_reservoir_sample (stdlib random only); OCR-resilient citation regex; A8/A9 parse error counting; ProbeReport(BaseModel) typed return contract; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS / DOCUMENTED_FIELDS / STAGE3_REQUIRED_FIELDS; wandb optional import (try/except); --log-to-wandb exclusively in main(); --skip-generative-tokenizer
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: gates A7–A13+B6; GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False typed contracts (pydantic>=2.12.5, top-level import); __getitem__/__contains__ backward compat; model_dump() JSON serialization; --full-scan via Polars scan_ndjson; proportional stratified sampling (stdlib random); OCR-resilient citation regex; A8/A9 parse error counting; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS/DOCUMENTED_FIELDS/STAGE3_REQUIRED_FIELDS; wandb optional try/except import; --log-to-wandb exclusively in main()
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
 │   ├── drift_check.py           # Manifest drift detection
-│   ├── wandb_logger.py          # W&B tracking: setup_wandb_auth, log_run_start, log_dataset_stats, log_quality_signals; all wandb imports lazy (inside functions); wandb>=0.16 pinned in uv.lock
+│   ├── wandb_logger.py          # W&B tracking: setup_wandb_auth, log_run_start, log_dataset_stats, log_quality_signals; all wandb imports lazy; wandb>=0.16 pinned in uv.lock
 │   ├── exceptions.py            # PipelineError
 │   └── timer.py                 # cell_timer
 ├── notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
@@ -1077,12 +1030,12 @@ cs1090b_HallucinationLegalRAGChatbots/
 | LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
-| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported in dataset_probe.py — only loaded when gate A13 runs) |
-| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count — not at module top level |
-| Schema validation       | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; used for GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts; validate_schema + 5 composable sub-helpers are pure Python with no Pydantic dependency |
-| Stratified sampling     | Python stdlib `random`                                                                               | `random.Random(seed)` — no third-party dependency; ProbeConfig.stratify_by field (default None) selects proportional stratified sampling by any record field (e.g. court_id, text_source); shard_audit["stratified_by"] records provenance; confirmed: grep -n "stratify" pyproject.toml returns no matches |
+| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
+| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count |
+| Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock (pydantic + pydantic-core + annotated-types); top-level import (hard dependency); GateResult(BaseModel) extra=allow frozen=True; ProbeReport(BaseModel) extra=allow frozen=False; __getitem__/__contains__ backward compat; model_dump() for JSON serialization |
+| Stratified sampling     | Python stdlib `random`                                                                               | random.Random(seed) — no third-party dependency; ProbeConfig.stratify_by (default None); shard_audit["stratified_by"] provenance; confirmed no pyproject.toml entry needed |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; used in src/dataset_probe.py --full-scan mode via _full_scan_with_polars(); pl.scan_ndjson per shard; provenance["full_scan"] + provenance["polars_version"] recorded in every ProbeReport; 16 locked entries in uv.lock |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — CPU-only; zero GPU memory contention; _full_scan_with_polars() via pl.scan_ndjson per shard; provenance["full_scan"] + provenance["polars_version"] in every ProbeReport; 16 locked entries in uv.lock |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; lazy imports in wandb_logger.py; optional try/except import in dataset_probe.py; --log-to-wandb flag exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
