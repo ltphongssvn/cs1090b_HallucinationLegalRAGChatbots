@@ -1,7 +1,7 @@
 # Reducing Hallucination in Legal RAG Chatbots
 ### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
-- **Author:** PHONG LE — phl690@g.harvard.edu
+- **Author:** Alex Oort Alonso, Allan Korir, and PHONG LE
 - **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 > - Although compute nodes physically contain 4× NVIDIA L4/A10G GPUs, student jobs are allocated a
@@ -97,7 +97,7 @@
 | Generation | Mistral-7B-Instruct-v0.2                    | ~14–15GB + KV cache                                                                                          | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache                                                                                                                        |
 | Citation   | SQLite                                      | 0GB                                                                                                          | CPU only (read-only; check_same_thread=False)                                                                                                                                                              |
-| Corpus scan | Polars scan_ndjson                         | 0GB GPU (CPU-only)                                                                                           | **Mandatory** exact full-corpus scan in `src/dataset_probe.py` — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention                                                   |
+| Corpus scan | Polars scan_ndjson                         | 0GB GPU (CPU-only)                                                                                           | **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention                                                                             |
 Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
 ---
 ## Methodology Strengths
@@ -551,7 +551,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan (hard import, full_scan=True default), GateResult(BaseModel) + ProbeReport(BaseModel) typed contracts, lazy-loaded spaCy + AutoTokenizer, composable schema helpers, STAGE3_REQUIRED_FIELDS gating, proportional stratified sampling post-scan | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields) Stage 3 readiness gating, lazy-loaded spaCy + AutoTokenizer, composable schema helpers, proportional stratified sampling post-scan | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -638,97 +638,110 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `data/raw/cl_federal_appellate_bulk`
   * via `src/extract.py`
 * **Dataset readiness probing** (`src/dataset_probe.py` v2.5.11) runs before chunking:
-  * **Polars is a mandatory hard dependency** — imported at module top level, never optional.
-  * `run_probe()` **always** calls `_full_scan_with_polars()` to load every record from every shard before any gate runs.
-  * This guarantees population-level exact statistics on all 1,465,484 opinions with zero sampling bias at the corpus level.
-  * Gates A7, A8, A9, A12, B6 receive the full record set; A11 and A13 apply their own internal subsamples (200 and 200 A8-filtered records respectively); A12 uses 500 records.
-  * A8 and A9 exclude malformed field values from distributions and report `text_length_parse_errors` / `citation_count_parse_errors`
-  * Citation regex (`_LEGAL_CITATION_RE`) is OCR-resilient: handles `F. 3d` spacing artifacts from 1980s PDF scans
-  * Gate A13 trusts the caller's pre-filtered record list (no internal re-filter)
-  * `run_probe()` returns a **typed `ProbeReport(BaseModel)`** — see Typed Contracts below
+  * **Polars is a mandatory hard dependency** — `import polars as pl` at module top level, no try/except fallback.
+  * `run_probe()` **always** calls `_full_scan_with_polars()` to load every record from every shard before any gate runs — population-level exact statistics guaranteed.
+  * Gates A7, A8, A9, A12, B6 receive the full record set; A11 and A13 apply their own internal subsamples.
+  * A8 and A9 exclude malformed field values from distributions and report parse error counts.
+  * Citation regex (`_LEGAL_CITATION_RE`) is OCR-resilient: handles `F. 3d` spacing artifacts from 1980s PDF scans.
+  * Gate A13 trusts the caller's pre-filtered record list (no internal re-filter).
+  * `run_probe()` returns a **typed `ProbeReport(BaseModel)`**.
+
+#### Stage 3 Readiness Gate — `STAGE3_REQUIRED_FIELDS`
+
+##### Purpose
+* Before Stage 3 (tokenizer-aware chunking, metadata filtering, SQLite citation index build) can begin, every opinion record must pass a **Stage 3 readiness check** encoded in `STAGE3_REQUIRED_FIELDS`.
+* This check is performed inside `validate_schema()` — the blocking gate that runs first in every `run_probe()` call.
+* The result is reported as `stage3_pass` (boolean) and `stage3_missing_counts` (per-field missing counts) in the `ProbeReport.gates["schema"]` dict.
+* A record is considered **Stage 3 ready** only if all 17 fields below are present.
+
+##### The 17 `STAGE3_REQUIRED_FIELDS`
+Each field's role in downstream Stage 3 processing is documented below:
+
+| Field | Type | Stage 3 Role |
+|-------|------|-------------|
+| `id` | str | Primary key for chunk metadata and SQLite citation index lookup |
+| `court_id` | str | Metadata filter for circuit-stratified evaluation; chunk metadata field |
+| `court_name` | str | Human-readable circuit label for W&B logging and report provenance |
+| `text` | str | Source text for tokenizer-aware chunking (1024-subword chunks, 128 overlap) |
+| `text_length` | int | Pre-filter gate: records with `text_length < 1500` are excluded before chunking |
+| `text_source` | str | Determines preprocessing path in `row_normalizer.py` (HTML strip vs plain text) |
+| `citation_count` | int | Fast-iteration corpus filter: `citation_count > 5` maximises Tier C utility |
+| `citation_density` | float | Quality signal for corpus audit; logged in W&B per-probe run |
+| `is_precedential` | bool | Chunk metadata field; used to weight retrieval results by precedential status |
+| `text_entropy` | float | B6 gate input; p10 used as provisional low-entropy corpus filter before chunking |
+| `token_count` | int | A11 gate cross-validation input; compared against tokenizer chunk count |
+| `paragraph_count` | int | A13 sentence density proxy; records with low paragraph_count may fail A13 gate |
+| `date_filed` | str | Chunk metadata field; used for temporal filtering and circuit-year analysis |
+| `opinion_type` | str | Chunk metadata field; distinguishes majority / concurrence / dissent opinions |
+| `precedential_status` | str | Vocabulary-checked against known status values; gates chunking of non-binding opinions |
+| `text_hash` | str | Deduplication key; prevents duplicate chunks in FAISS index and BM25 index |
+| `source` | str | Provenance field for DVC artifact lineage; logged in manifest and W&B |
+
+##### How `STAGE3_REQUIRED_FIELDS` relates to `MIN_REQUIRED_FIELDS`
+* `MIN_REQUIRED_FIELDS` (11 fields) is the **minimum set needed for any gate to run** — missing any is a blocking CI failure.
+* `STAGE3_REQUIRED_FIELDS` (17 fields) is a **superset** — it adds 6 fields needed specifically for Stage 3 downstream processing:
+
+| Field added in STAGE3 vs MIN | Reason not in MIN_REQUIRED |
+|-----------------------------|---------------------------|
+| `court_name` | Not needed for gate computation; needed for chunk metadata |
+| `date_filed` | Not needed for gate computation; needed for temporal filtering |
+| `opinion_type` | Not needed for gate computation; needed for chunk metadata |
+| `precedential_status` | Not needed for gate computation; needed for vocabulary check + chunking gate |
+| `text_hash` | Not needed for gate computation; needed for deduplication |
+| `source` | Not needed for gate computation; needed for DVC provenance |
+
+* `stage3_pass` is reported **separately** from the main schema gate `pass` field — this allows Stage 3 readiness to be visible without re-blocking on already-passed minimum checks.
+* If `stage3_pass=False`, `stage3_missing_counts` reports exactly which fields are missing and how many records are affected — enabling targeted corpus repair before Stage 3 begins.
+
+##### Three field-set constants in `src/dataset_probe.py`
+| Constant | Size | Blocks CI? | Purpose |
+|----------|------|-----------|---------|
+| `MIN_REQUIRED_FIELDS` | 11 fields | Yes — blocking | Minimum for any pipeline gate to run |
+| `STAGE3_REQUIRED_FIELDS` | 17 fields | Reported separately as `stage3_pass` | Gate for Stage 3 downstream readiness |
+| `DOCUMENTED_FIELDS` | 23 fields | Advisory only | Full 23-field schema coverage audit |
+
+##### Dependency provenance for Stage 3 field gating
+* `validate_schema()` and the `STAGE3_REQUIRED_FIELDS` check are **pure Python** — no Pydantic, no Polars, no spaCy dependency.
+* `ProbeReport.gates["schema"]["stage3_pass"]` and `["stage3_missing_counts"]` are serialized via `report.model_dump()` into the output JSON and logged to W&B.
+* `pydantic>=2.12.5` (pyproject.toml line 37; 49 locked entries in uv.lock) provides the `ProbeReport(BaseModel)` typed container that carries these results.
+* `polars>=1.39.3` (pyproject.toml line 36; 16 locked entries in uv.lock) loads the corpus records that are checked against `STAGE3_REQUIRED_FIELDS`.
 
 #### Mandatory Exact Full-Corpus Scan — `_full_scan_with_polars()`
+* Polars is a **mandatory hard dependency** — `import polars as pl` at module top level, no try/except fallback.
+* `run_probe()` and `CourtListenerDatasetProbe.run()` both default to `full_scan=True`.
+* `_full_scan_with_polars()` iterates all 159 sorted `.jsonl` shards, calls `pl.scan_ndjson(shard_path).collect()` per shard, converts to dicts, appends to `all_records`.
+* Per-shard exceptions are caught and logged without aborting the scan.
+* `provenance["full_scan"]=True` and `provenance["polars_version"]` always recorded.
+* `shard_audit["total_records_decoded"]` = exact corpus size (expected: 1,465,484).
 
-##### Design decision: mandatory, not optional
-* Polars was previously an optional dependency with a `try/except ImportError` fallback and `--full-scan` CLI flag.
-* It is now a **mandatory hard dependency** — `import polars as pl` appears at module top level in `src/dataset_probe.py` with no fallback.
-* `run_probe()` and `CourtListenerDatasetProbe.run()` both default to `full_scan=True` — the full-corpus scan is **always executed**, not gated behind a CLI flag.
-* **Why mandatory:** Sampling bias in a 10K reservoir from 1.46M opinions risks missing minority circuits, rare `text_source` formats, and low-frequency OCR artifacts — all of which are critical inputs to downstream chunking and citation indexing decisions. Population-level statistics are the only defensible pre-Stage-3 corpus audit.
-
-##### How `_full_scan_with_polars()` works
-* Iterates over all 159 sorted `.jsonl` shards in `data/raw/cl_federal_appellate_bulk/`.
-* For each shard calls `pl.scan_ndjson(shard_path).collect()` — Polars lazy evaluation keeps peak RAM bounded shard-by-shard rather than loading the full 7.6GB corpus at once.
-* Converts each shard DataFrame to a list of dicts and appends to `all_records`.
-* Per-shard `Exception` is caught, logged to `shard_errors`, counted in `total_parse_errors` — a single bad shard does not abort the scan.
-* Returns `(all_records, audit)` with: `shard_count`, `total_records_decoded`, `total_parse_errors`, `total_blank_lines` (always 0 for Polars path), `shard_errors`.
-
-##### Post-scan subsampling for gates and stratification
-* After the full corpus is loaded, gate-level subsampling is applied **inside `run_probe()`** — not during corpus loading:
-  * If `cfg.stratify_by` is set: `_stratified_reservoir_sample(iter(records), n=subset, ...)` applied post-scan
-  * If `full_scan=False` explicitly: reservoir subsample applied to the already-loaded records
-  * Gates A11, A12, A13 always use their own internal subsamples regardless
-
-| Step | What happens | Records involved |
-|------|-------------|-----------------|
-| 1. Corpus load | `_full_scan_with_polars()` via Polars `scan_ndjson` | All 1,465,484 opinions |
-| 2. Stratified subsample (optional) | `_stratified_reservoir_sample()` on loaded records | `subset` records, proportional per stratum |
-| 3. Gates A7/A8/A9/A12/B6 | Run on full loaded (or post-subsample) record list | All loaded records |
-| 4. Gate A11 | Internal subsample | 200 records |
-| 5. Gate A12 | Internal subsample | 500 records |
-| 6. Gate A13 | Internal subsample of A8-filtered records | 200 records |
-
-##### Provenance recorded in every ProbeReport
-* `provenance["full_scan"]` — always `True` (corpus always fully scanned via Polars)
-* `provenance["polars_version"]` — `pl.__version__` — always present since Polars is mandatory
-* `shard_audit["total_records_decoded"]` — exact corpus size (expected: 1,465,484)
-
-##### Polars dependency provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `polars>=1.39.3` | ✅ line 36 | ✅ 16 locked entries |
-| Hard import at module top level | `import polars as pl` — no try/except | ✅ |
-| CPU-only — zero GPU memory contention | N/A — no CUDA dependency | ✅ |
-| `pl.__version__` always logged to `provenance["polars_version"]` | N/A | ✅ |
-| `full_scan=True` default in `run_probe()` and `CourtListenerDatasetProbe.run()` | N/A — code default | ✅ 303 tests pass |
+#### Post-Scan Subsampling
+| Step | Path | Records |
+|------|------|---------|
+| Corpus load | `_full_scan_with_polars()` | All 1,465,484 opinions |
+| Stratified subsample (if `stratify_by` set) | `_stratified_reservoir_sample()` on loaded records | `subset` records proportional per stratum |
+| Gates A7/A8/A9/B6 | Full loaded record list | All loaded records |
+| Gate A11 | Internal subsample | 200 records |
+| Gate A12 | Internal subsample | 500 records |
+| Gate A13 | Internal subsample of A8-filtered records | 200 records |
 
 #### Typed Contracts — `GateResult(BaseModel)` and `ProbeReport(BaseModel)`
-
-##### `GateResult(BaseModel)` — gate output contract
-* `model_config = {"extra": "allow", "frozen": True}` — immutable after construction, extra gate-specific fields allowed.
-* Minimum required fields: `gate: str`, `severity: str`.
-
-##### `ProbeReport(BaseModel)` — `run_probe()` return contract
-* `model_config = {"extra": "allow", "frozen": False}` — mutable, forward-compatible.
-* Required fields: `gates`, `summary`, `provenance`, `quality_signals`, `shard_audit`, `subset_n`, `seed`, `data_dir`.
+* `GateResult`: `model_config = {"extra": "allow", "frozen": True}` — immutable; minimum fields `gate: str`, `severity: str`.
+* `ProbeReport`: `model_config = {"extra": "allow", "frozen": False}` — mutable; required fields: `gates`, `summary`, `provenance`, `quality_signals`, `shard_audit`, `subset_n`, `seed`, `data_dir`.
 * `__getitem__` / `__contains__` for backward-compatible dict-style access.
 * `model_dump()` for JSON serialization.
-
-##### Pydantic v2 dependency provenance
-| Item | pyproject.toml | uv.lock pinned |
-|------|---------------|----------------|
-| `pydantic>=2.12.5` | ✅ line 37 | ✅ 49 locked entries |
-| Hard top-level import | `from pydantic import BaseModel` | ✅ |
+* **pydantic>=2.12.5** — pyproject.toml line 37; 49 locked entries in uv.lock.
 
 #### Schema Helpers — `validate_schema` and Composable Sub-helpers
-* `validate_schema()` is the **blocking schema gate** called first in `run_probe()`.
 * Five composable pure-function helpers: `_check_presence`, `_check_types_and_ranges`, `_check_vocabulary`, `_check_consistency`, `_check_documented_coverage`.
-* Three field-set constants: `MIN_REQUIRED_FIELDS` (11), `DOCUMENTED_FIELDS` (23), `STAGE3_REQUIRED_FIELDS` (17).
+* `validate_schema()` output includes `stage3_pass` and `stage3_missing_counts` in addition to the main `pass` field.
 
 #### Lazy Loading of Heavy NLP Dependencies
-* `spaCy` and `transformers.AutoTokenizer` are lazily imported — only when gate A13 or A11 runs respectively.
-* Polars is **not** lazy — it is a mandatory hard import.
-
 | Dependency | Import strategy | Triggered by |
 |------------|----------------|-------------|
 | `polars` | **Hard import at module top** — mandatory | Always (corpus load) |
 | `spacy` | Lazy — inside `_load_spacy_nlp()` | Gate A13 only |
 | `transformers.AutoTokenizer` | Lazy — inside `gate_a11_tokenizer_chunk_count()` | Gate A11 only |
 | `wandb` | Optional `try/except ImportError` | `--log-to-wandb` in `main()` only |
-
-#### Stratified Sampling — Post-Scan Proportional Subsampling
-* `ProbeConfig.stratify_by: str | None = None` — when set, applies `_stratified_reservoir_sample()` **after** the mandatory full Polars scan.
-* Uses Python stdlib `random.Random` — no additional dependencies.
-* `shard_audit["stratified_by"]` records the stratification field for provenance.
 
 #### W&B Telemetry Contract
 * `_log_report_to_wandb()` is **exclusively a `main()` concern** — never called from `run_probe()`.
@@ -757,9 +770,6 @@ uv run python -m src.dataset_probe \
     --wandb-project cs1090b \
     --wandb-name dataset_probe_v2.5.11_full
 ```
-* `--subset` is still accepted but only used for post-scan stratified subsampling — the full corpus is always loaded first.
-* `--log-to-wandb` is the only flag that triggers W&B telemetry.
-* `WANDB_API_KEY` must be set in `.env` before running with `--log-to-wandb` on the cluster.
 
 When integrated, the full logger tracks:
 * **Per-phase GPU hours**
@@ -949,7 +959,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
 │   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
-│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: mandatory Polars hard import (no try/except); _full_scan_with_polars() always called (full_scan=True default); gates A7–A13+B6; GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False (pydantic>=2.12.5); __getitem__/__contains__ backward compat; model_dump() JSON serialization; proportional stratified sampling post-scan (stdlib random); OCR-resilient citation regex; A8/A9 parse error counting; lazy-loaded spaCy + AutoTokenizer; validate_schema + 5 composable sub-helpers; MIN_REQUIRED_FIELDS/DOCUMENTED_FIELDS/STAGE3_REQUIRED_FIELDS; wandb optional try/except; --log-to-wandb exclusively in main()
+│   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: mandatory Polars hard import; _full_scan_with_polars() always called (full_scan=True default); STAGE3_REQUIRED_FIELDS (17 fields: id, court_id, court_name, text, text_length, text_source, citation_count, citation_density, is_precedential, text_entropy, token_count, paragraph_count, date_filed, opinion_type, precedential_status, text_hash, source) + stage3_pass/stage3_missing_counts in validate_schema(); GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False (pydantic>=2.12.5); MIN_REQUIRED_FIELDS(11)/DOCUMENTED_FIELDS(23)/STAGE3_REQUIRED_FIELDS(17); lazy-loaded spaCy + AutoTokenizer; 5 composable schema sub-helpers; wandb optional try/except; --log-to-wandb exclusively in main()
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
 │   ├── hf_export.py             # HuggingFace Hub export
@@ -989,10 +999,11 @@ cs1090b_HallucinationLegalRAGChatbots/
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
 | Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count |
-| Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; hard top-level import; GateResult(BaseModel) extra=allow frozen=True; ProbeReport(BaseModel) extra=allow frozen=False; __getitem__/__contains__ backward compat; model_dump() JSON serialization |
-| Stratified sampling     | Python stdlib `random`                                                                               | random.Random(seed) — post-scan proportional subsampling; ProbeConfig.stratify_by (default None); shard_audit["stratified_by"] provenance; no pyproject.toml entry needed |
+| Stage 3 readiness gate  | Python stdlib (frozenset)                                                                            | STAGE3_REQUIRED_FIELDS: 17 fields (id, court_id, court_name, text, text_length, text_source, citation_count, citation_density, is_precedential, text_entropy, token_count, paragraph_count, date_filed, opinion_type, precedential_status, text_hash, source); stage3_pass + stage3_missing_counts in validate_schema() output; pure Python — no extra dependencies |
+| Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; hard top-level import; GateResult(BaseModel) extra=allow frozen=True; ProbeReport(BaseModel) extra=allow frozen=False; __getitem__/__contains__ backward compat; model_dump() JSON serialization carries stage3_pass result |
+| Stratified sampling     | Python stdlib `random`                                                                               | random.Random(seed) post-scan proportional subsampling; ProbeConfig.stratify_by (default None); no pyproject.toml entry needed |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — **mandatory hard dependency**; `import polars as pl` at module top level (no try/except fallback); `_full_scan_with_polars()` always called (full_scan=True default in run_probe + CourtListenerDatasetProbe.run); pl.scan_ndjson per shard; CPU-only; zero GPU contention; provenance["full_scan"]=True + provenance["polars_version"] always recorded; 16 locked entries in uv.lock; 303 tests pass |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — mandatory hard dependency; `import polars as pl` at module top level; _full_scan_with_polars() always called (full_scan=True default); pl.scan_ndjson per shard; CPU-only; zero GPU contention; provenance["full_scan"]=True always; 16 locked entries in uv.lock; 303 tests pass |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; lazy imports in wandb_logger.py; optional try/except import in dataset_probe.py; --log-to-wandb flag exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Test framework          | pytest + hypothesis                                                                                  | lockfile-pinned |
