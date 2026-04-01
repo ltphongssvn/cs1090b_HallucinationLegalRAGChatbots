@@ -281,3 +281,84 @@ class TestAuditDataset:
         result = audit_dataset(tmp_path)
         assert result.nan_lines == 0
         assert result.gate_verdict() == "CLEAN"
+
+
+# ---------------------------------------------------------------------------
+# RED: refactor contracts — must FAIL before implementation
+# ---------------------------------------------------------------------------
+
+
+class TestOutputFormatters:
+    """#1 — main() split: output helpers must be importable as top-level functions."""
+
+    def test_write_csv_importable(self):
+        from scripts.audit_jsonl_nan import _write_csv
+
+        assert callable(_write_csv)
+
+    def test_emit_json_importable(self):
+        from scripts.audit_jsonl_nan import _emit_json
+
+        assert callable(_emit_json)
+
+    def test_emit_text_importable(self):
+        from scripts.audit_jsonl_nan import _emit_text
+
+        assert callable(_emit_text)
+
+    def test_write_csv_produces_file(self, tmp_path):
+        from scripts.audit_jsonl_nan import DatasetHealth, _write_csv
+
+        health = DatasetHealth(100, 5, 1, 5, {"case_name": 5}, ["s.jsonl"])
+        out = tmp_path / "out.csv"
+        _write_csv(health, out)
+        assert out.exists()
+        content = out.read_text()
+        assert "case_name" in content
+
+    def test_emit_json_outputs_valid_json(self, capsys):
+        from scripts.audit_jsonl_nan import DatasetHealth, _emit_json
+
+        health = DatasetHealth(100, 0, 0, 5, {}, [])
+        _emit_json(health)
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert "gate_verdict" in parsed
+
+    def test_emit_text_outputs_verdict(self, capsys):
+        from scripts.audit_jsonl_nan import DatasetHealth, _emit_text
+
+        health = DatasetHealth(100, 0, 0, 5, {}, [])
+        _emit_text(health, emit_shard_ids=False)
+        captured = capsys.readouterr()
+        assert "verdict" in captured.out
+
+
+class TestRepairShardStreaming:
+    """#3 — tmp file must not persist after repair_shard completes."""
+
+    def test_tmp_file_cleaned_up_after_repair(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+        assert not (tmp_path / "s.jsonl.tmp").exists()
+
+    def test_tmp_file_cleaned_up_on_dry_run(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        repair_shard(shard, dry_run=True)
+        assert not (tmp_path / "s.jsonl.tmp").exists()
+
+
+class TestLogging:
+    """#4 — repair_dataset must emit log records, not print() to stdout."""
+
+    def test_repair_dataset_uses_logging_not_stdout(self, tmp_path, capsys):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        repair_dataset(tmp_path, dry_run=True)
+        captured = capsys.readouterr()
+        # stdout must be empty — progress goes to logging/stderr, not print()
+        assert captured.out == ""
