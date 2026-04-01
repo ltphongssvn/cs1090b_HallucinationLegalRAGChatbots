@@ -55,6 +55,7 @@ dev = [
     "dvc-s3>=3.3.0",
 ]
 [tool.pytest.ini_options]
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning:importlib._bootstrap",
     "ignore:builtin type swigvarlink:DeprecationWarning",
