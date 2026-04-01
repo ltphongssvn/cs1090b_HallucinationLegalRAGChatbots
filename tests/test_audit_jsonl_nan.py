@@ -362,3 +362,232 @@ class TestLogging:
         captured = capsys.readouterr()
         # stdout must be empty — progress goes to logging/stderr, not print()
         assert captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# RED: Bug B — regex corrupts quoted legal text containing spaced NaN/Infinity
+# ---------------------------------------------------------------------------
+
+
+class TestRepairRegexSafety:
+    def test_nan_inside_quoted_string_not_modified(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        original = '{"text": "The court rejected NaN as evidence"}\n'
+        shard.write_text(original, encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+        assert shard.read_text(encoding="utf-8") == original
+
+    def test_infinity_inside_quoted_string_not_modified(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        original = '{"text": "score was Infinity points"}\n'
+        shard.write_text(original, encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+        assert shard.read_text(encoding="utf-8") == original
+
+    def test_bare_nan_value_still_repaired(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"case_name": NaN}\n', encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+        obj = json.loads(shard.read_text(encoding="utf-8"))
+        assert obj["case_name"] is None
+
+    def test_repaired_output_is_valid_strict_json(self, tmp_path):
+        """After repair, json.loads with parse_constant rejection must succeed."""
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"case_name": NaN, "score": Infinity}\n', encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+
+        def reject(tok):
+            raise ValueError(f"non-finite token: {tok}")
+
+        obj = json.loads(shard.read_text(encoding="utf-8"), parse_constant=reject)
+        assert obj["case_name"] is None
+        assert obj["score"] is None
+
+
+# ---------------------------------------------------------------------------
+# RED: Bug C — gate_verdict misclassifies parse failures with empty nan_fields
+# ---------------------------------------------------------------------------
+
+
+class TestGateVerdictParseFailure:
+    def test_parse_failures_with_empty_nan_fields_not_repairable(self):
+        """Dataset with decode errors but no recorded fields must NOT be REPAIRABLE."""
+        h = DatasetHealth(
+            total_lines=100,
+            nan_lines=5,  # 5 JSONDecodeError lines
+            nan_shards=1,
+            total_shards=5,
+            nan_fields={},  # empty — no field names recorded
+            contaminated_shards=["s.jsonl"],
+        )
+        assert "REPAIRABLE" not in h.gate_verdict()
+        assert "PARSE_FAILURE" in h.gate_verdict()
+
+    def test_zero_nan_lines_still_clean(self):
+        h = DatasetHealth(100, 0, 0, 5, {}, [])
+        assert h.gate_verdict() == "CLEAN"
+
+
+# ---------------------------------------------------------------------------
+# RED: Bug D — split nan_lines into typed counters on DatasetHealth
+# ---------------------------------------------------------------------------
+
+
+class TestTypedContaminationCounters:
+    def test_dataset_health_has_nonfinite_lines(self):
+        h = DatasetHealth(100, 0, 0, 5, {}, [])
+        assert hasattr(h, "nonfinite_lines")
+
+    def test_dataset_health_has_string_sentinel_lines(self):
+        h = DatasetHealth(100, 0, 0, 5, {}, [])
+        assert hasattr(h, "string_sentinel_lines")
+
+    def test_dataset_health_has_decode_error_lines(self):
+        h = DatasetHealth(100, 0, 0, 5, {}, [])
+        assert hasattr(h, "decode_error_lines")
+
+    def test_shard_health_has_typed_counters(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0"}) + "\n", encoding="utf-8")
+        h = audit_shard(shard)
+        assert hasattr(h, "nonfinite_lines")
+        assert hasattr(h, "decode_error_lines")
+
+
+# ---------------------------------------------------------------------------
+# RED: Feature E — --workers configurable on audit_dataset
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurableWorkers:
+    def test_audit_dataset_accepts_workers_param(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0", "case_name": "Smith v. Jones"}) + "\n")
+        result = audit_dataset(tmp_path, workers=1)
+        assert isinstance(result, DatasetHealth)
+
+    def test_repair_dataset_accepts_workers_param(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        repair_dataset(tmp_path, dry_run=True, workers=1)
+
+
+# ---------------------------------------------------------------------------
+# RED: Hypothesis property tests for _has_nan
+# ---------------------------------------------------------------------------
+
+
+class TestHasNanProperties:
+    def test_finite_floats_never_flagged(self):
+        from hypothesis import given, settings
+        from hypothesis import strategies as st
+
+        @given(st.floats(allow_nan=False, allow_infinity=False))
+        @settings(max_examples=200)
+        def inner(f):
+            assert _has_nan(f) is False
+
+        inner()
+
+    def test_nan_inf_always_flagged(self):
+        import math
+
+        from hypothesis import given, settings
+        from hypothesis import strategies as st
+
+        @given(st.floats(allow_nan=True, allow_infinity=True))
+        @settings(max_examples=200)
+        def inner(f):
+            if math.isnan(f) or math.isinf(f):
+                assert _has_nan(f) is True
+
+        inner()
+
+    def test_arbitrary_nested_dict_consistent(self):
+        import math
+
+        from hypothesis import given, settings
+        from hypothesis import strategies as st
+
+        @given(st.dictionaries(st.text(max_size=10), st.floats(allow_nan=True, allow_infinity=True)))
+        @settings(max_examples=100)
+        def inner(d):
+            result = _has_nan(d)
+            has_bad = any(math.isnan(v) or math.isinf(v) for v in d.values())
+            assert result == has_bad
+
+        inner()
+
+
+# ---------------------------------------------------------------------------
+# RED: pydantic-settings AuditSettings importable and used by audit_dataset
+# ---------------------------------------------------------------------------
+
+
+class TestAuditSettings:
+    def test_audit_settings_importable(self):
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        assert callable(AuditSettings)
+
+    def test_audit_settings_has_advisory_fields(self):
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        cfg = AuditSettings()
+        assert "case_name" in cfg.advisory_fields
+
+    def test_audit_settings_has_workers(self):
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        cfg = AuditSettings()
+        assert isinstance(cfg.workers, int) and cfg.workers > 0
+
+    def test_audit_settings_workers_env_override(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_WORKERS", "2")
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        cfg = AuditSettings()
+        assert cfg.workers == 2
+
+
+# ---------------------------------------------------------------------------
+# RED: OmegaConf — load_audit_config importable from module
+# ---------------------------------------------------------------------------
+
+
+class TestOmegaConf:
+    def test_load_audit_config_importable(self):
+        from scripts.audit_jsonl_nan import load_audit_config
+
+        assert callable(load_audit_config)
+
+    def test_load_audit_config_returns_advisory_fields(self, tmp_path):
+        from scripts.audit_jsonl_nan import load_audit_config
+
+        cfg_file = tmp_path / "audit.yaml"
+        cfg_file.write_text("advisory_fields:\n  - case_name\n  - raw_text\n  - cleaning_flags\n")
+        cfg = load_audit_config(cfg_file)
+        assert "case_name" in cfg.advisory_fields
+
+
+# ---------------------------------------------------------------------------
+# RED: W&B — log_health_to_wandb importable and callable
+# ---------------------------------------------------------------------------
+
+
+class TestWandb:
+    def test_log_health_to_wandb_importable(self):
+        from scripts.audit_jsonl_nan import log_health_to_wandb
+
+        assert callable(log_health_to_wandb)
+
+    def test_log_health_to_wandb_runs_offline(self, monkeypatch):
+        monkeypatch.setenv("WANDB_MODE", "offline")
+        from scripts.audit_jsonl_nan import log_health_to_wandb
+
+        health = DatasetHealth(100, 0, 0, 5, {}, [])
+        # must not raise
+        log_health_to_wandb(health, project="test-probe")
