@@ -85,6 +85,12 @@ import polars as pl  # type: ignore[import]  # mandatory — full-corpus scan al
 
 # ---------------------------------------------------------------------------
 # Probe version
+# CHANGED 2.5.12:
+#   - All gate functions now return instantiated GateResult objects (not dicts).
+#   - GateResult is the mandatory concrete return type for every gate.
+#   - _summarize_gates updated to use model_dump() for GateResult values.
+#   - Skipped gate entries use GateResult(..., skipped=True).
+#   - validate_schema returns GateResult.
 # CHANGED 2.5.11:
 #   - Specific exception types: OSError + CalledProcessError (obs 6)
 #   - sample_records() public utility API docstring (obs 8)
@@ -95,7 +101,7 @@ import polars as pl  # type: ignore[import]  # mandatory — full-corpus scan al
 #   - _log_report_to_wandb docstring: main()-only, no gate function calls (obs 3/13)
 # ---------------------------------------------------------------------------
 
-PROBE_VERSION = "2.5.11"
+PROBE_VERSION = "2.5.12"
 
 # ---------------------------------------------------------------------------
 # Shared legal citation regex — OCR-resilient F\s*\.\s*\d+ pattern
@@ -280,14 +286,33 @@ MIN_SENTENCE_COUNT = 20
 
 class GateResult(BaseModel):
     """
-    Typed contract for gate results. All gates return dicts that satisfy
-    this minimum contract. Extra gate-specific fields are allowed.
+    Typed contract for gate results. Every gate must return an instantiated
+    GateResult object — plain dicts are not permitted as gate return values.
+    Required fields: gate (str), severity (str).
+    Extra gate-specific fields are explicitly allowed via extra="allow".
     frozen=True enforces immutability after construction.
+    Downstream retrieval, chunking, citation, and NLI pipeline stages
+    depend on this stable typed interface.
     """
 
     gate: str
     severity: str
     model_config = {"extra": "allow", "frozen": True}
+
+    def __getitem__(self, key: str) -> Any:
+        """Dict-style access for backward compatibility."""
+        d = self.model_dump()
+        if key not in d:
+            raise KeyError(key)
+        return d[key]
+
+    def __contains__(self, key: object) -> bool:
+        """Support 'key in result' for backward compatibility."""
+        return key in self.model_dump()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-style get for backward compatibility."""
+        return self.model_dump().get(key, default)
 
 
 # ---------------------------------------------------------------------------
@@ -778,29 +803,32 @@ def _check_documented_coverage(records: list[dict[str, Any]]) -> dict[str, int]:
 def validate_schema(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     Check required field presence, type, range, vocabulary, consistency, and
     documented field coverage. Also reports stage3_pass and stage3_missing_counts.
+    Returns a GateResult instance.
     """
     cfg = config or ProbeConfig()
 
     if not records:
-        return {
-            "gate": "schema_validation",
-            "severity": "blocking",
-            "required_fields": sorted(MIN_REQUIRED_FIELDS),
-            "missing_counts": {},
-            "type_errors": {},
-            "range_errors": {},
-            "vocabulary_errors": {},
-            "consistency_errors": {},
-            "missing_documented_fields": {},
-            "stage3_pass": True,
-            "stage3_missing_counts": {},
-            "pass": True,
-            "note": "No records to validate.",
-        }
+        return GateResult(
+            **{
+                "gate": "schema_validation",
+                "severity": "blocking",
+                "required_fields": sorted(MIN_REQUIRED_FIELDS),
+                "missing_counts": {},
+                "type_errors": {},
+                "range_errors": {},
+                "vocabulary_errors": {},
+                "consistency_errors": {},
+                "missing_documented_fields": {},
+                "stage3_pass": True,
+                "stage3_missing_counts": {},
+                "pass": True,
+                "note": "No records to validate.",
+            }
+        )
 
     missing_by_field = _check_presence(records)
     type_errors, range_errors = _check_types_and_ranges(records)
@@ -823,41 +851,47 @@ def validate_schema(
     passed = (
         not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
     )
-    return {
-        "gate": "schema_validation",
-        "severity": "blocking",
-        "required_fields": sorted(MIN_REQUIRED_FIELDS),
-        "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
-        "type_errors": type_errors,
-        "range_errors": range_errors,
-        "vocabulary_errors": vocabulary_errors,
-        "consistency_errors": consistency_errors,
-        "missing_documented_fields": missing_documented,
-        "stage3_pass": stage3_pass,
-        "stage3_missing_counts": stage3_missing,
-        "pass": passed,
-    }
+    return GateResult(
+        **{
+            "gate": "schema_validation",
+            "severity": "blocking",
+            "required_fields": sorted(MIN_REQUIRED_FIELDS),
+            "missing_counts": {k: v for k, v in missing_by_field.items() if v > 0},
+            "type_errors": type_errors,
+            "range_errors": range_errors,
+            "vocabulary_errors": vocabulary_errors,
+            "consistency_errors": consistency_errors,
+            "missing_documented_fields": missing_documented,
+            "stage3_pass": stage3_pass,
+            "stage3_missing_counts": stage3_missing,
+            "pass": passed,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
-# Gates
+# Gates — every gate returns a GateResult instance (not a plain dict).
+# GateResult has extra="allow" so gate-specific metrics are fully supported.
+# Use GateResult(**{...}) to avoid Python reserved keyword conflict with "pass".
 # ---------------------------------------------------------------------------
 
 
 def gate_a7_text_source_breakdown(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """A7 — text_source breakdown. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A7_text_source_breakdown",
-            "severity": "blocking",
-            "sample_n": 0,
-            "pass": False,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A7_text_source_breakdown",
+                "severity": "blocking",
+                "sample_n": 0,
+                "pass": False,
+                "note": "No records.",
+            }
+        )
 
     counts: dict[str, int] = {}
     for r in records:
@@ -869,26 +903,28 @@ def gate_a7_text_source_breakdown(
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
     known_pct = sum(v["pct"] for k, v in breakdown.items() if k in cfg.a7_known_formats)
-    return {
-        "gate": "A7_text_source_breakdown",
-        "severity": "blocking",
-        "sample_n": total,
-        "total_records": total,
-        "breakdown": breakdown,
-        "known_formats_pct": round(known_pct, 2),
-        "unknown_formats_pct": round(100.0 - known_pct, 2),
-        "pass": known_pct >= cfg.a7_known_formats_pass_pct,
-        "note": (
-            "Inspect records from any source outside a7_known_formats "
-            "to verify row_normalizer.py strips them cleanly before Stage 3."
-        ),
-    }
+    return GateResult(
+        **{
+            "gate": "A7_text_source_breakdown",
+            "severity": "blocking",
+            "sample_n": total,
+            "total_records": total,
+            "breakdown": breakdown,
+            "known_formats_pct": round(known_pct, 2),
+            "unknown_formats_pct": round(100.0 - known_pct, 2),
+            "pass": known_pct >= cfg.a7_known_formats_pass_pct,
+            "note": (
+                "Inspect records from any source outside a7_known_formats "
+                "to verify row_normalizer.py strips them cleanly before Stage 3."
+            ),
+        }
+    )
 
 
 def gate_a8_text_length_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     A8 — text_length distribution. severity=blocking.
     Malformed text_length values are EXCLUDED from the distribution.
@@ -897,14 +933,16 @@ def gate_a8_text_length_distribution(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A8_text_length_distribution",
-            "severity": "blocking",
-            "sample_n": 0,
-            "text_length_parse_errors": 0,
-            "pass": False,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A8_text_length_distribution",
+                "severity": "blocking",
+                "sample_n": 0,
+                "text_length_parse_errors": 0,
+                "pass": False,
+                "note": "No records.",
+            }
+        )
 
     lengths: list[int] = []
     parse_errors = 0
@@ -916,49 +954,53 @@ def gate_a8_text_length_distribution(
             parse_errors += 1
 
     if not lengths:
-        return {
-            "gate": "A8_text_length_distribution",
-            "severity": "blocking",
-            "count": 0,
-            "sample_n": 0,
-            "text_length_parse_errors": parse_errors,
-            "pass": False,
-            "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
-        }
+        return GateResult(
+            **{
+                "gate": "A8_text_length_distribution",
+                "severity": "blocking",
+                "count": 0,
+                "sample_n": 0,
+                "text_length_parse_errors": parse_errors,
+                "pass": False,
+                "note": (f"All {parse_errors} records have unparseable text_length — cannot compute distribution."),
+            }
+        )
 
     lengths_sorted = sorted(lengths)
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
-    return {
-        "gate": "A8_text_length_distribution",
-        "severity": "blocking",
-        "count": len(lengths),
-        "sample_n": len(lengths),
-        "text_length_parse_errors": parse_errors,
-        "mean": round(statistics.mean(lengths), 1),
-        "median": statistics.median(lengths),
-        "min": min(lengths),
-        "max": max(lengths),
-        "p5": _percentile(lengths_sorted, 5),
-        "p10": _percentile(lengths_sorted, 10),
-        "p25": _percentile(lengths_sorted, 25),
-        "p75": _percentile(lengths_sorted, 75),
-        "p90": _percentile(lengths_sorted, 90),
-        "p95": _percentile(lengths_sorted, 95),
-        "provisional_min_chars": cfg.min_text_length,
-        "below_provisional_count": below_provisional,
-        "below_provisional_pct": round(100.0 * below_provisional / len(lengths), 2),
-        "pass": below_provisional / len(lengths) < cfg.a8_below_threshold_pass_pct / 100.0,
-        "note": (
-            "~20% short-doc tail is expected (summary dispositions). "
-            "Stage 3 applies text_length >= 1500 filter before chunking."
-        ),
-    }
+    return GateResult(
+        **{
+            "gate": "A8_text_length_distribution",
+            "severity": "blocking",
+            "count": len(lengths),
+            "sample_n": len(lengths),
+            "text_length_parse_errors": parse_errors,
+            "mean": round(statistics.mean(lengths), 1),
+            "median": statistics.median(lengths),
+            "min": min(lengths),
+            "max": max(lengths),
+            "p5": _percentile(lengths_sorted, 5),
+            "p10": _percentile(lengths_sorted, 10),
+            "p25": _percentile(lengths_sorted, 25),
+            "p75": _percentile(lengths_sorted, 75),
+            "p90": _percentile(lengths_sorted, 90),
+            "p95": _percentile(lengths_sorted, 95),
+            "provisional_min_chars": cfg.min_text_length,
+            "below_provisional_count": below_provisional,
+            "below_provisional_pct": round(100.0 * below_provisional / len(lengths), 2),
+            "pass": below_provisional / len(lengths) < cfg.a8_below_threshold_pass_pct / 100.0,
+            "note": (
+                "~20% short-doc tail is expected (summary dispositions). "
+                "Stage 3 applies text_length >= 1500 filter before chunking."
+            ),
+        }
+    )
 
 
 def gate_a9_citation_count_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     A9 — citation_count distribution. severity=advisory.
     Malformed citation_count values are EXCLUDED from the distribution.
@@ -967,14 +1009,16 @@ def gate_a9_citation_count_distribution(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A9_citation_count_distribution",
-            "severity": "advisory",
-            "sample_n": 0,
-            "citation_count_parse_errors": 0,
-            "pass": False,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A9_citation_count_distribution",
+                "severity": "advisory",
+                "sample_n": 0,
+                "citation_count_parse_errors": 0,
+                "pass": False,
+                "note": "No records.",
+            }
+        )
 
     counts: list[int] = []
     parse_errors = 0
@@ -986,51 +1030,55 @@ def gate_a9_citation_count_distribution(
             parse_errors += 1
 
     if not counts:
-        return {
-            "gate": "A9_citation_count_distribution",
-            "severity": "advisory",
-            "count": 0,
-            "sample_n": 0,
-            "citation_count_parse_errors": parse_errors,
-            "pass": False,
-            "note": (
-                f"All {parse_errors} records have unparseable citation_count — "
-                "cannot compute distribution. Advisory gate only."
-            ),
-        }
+        return GateResult(
+            **{
+                "gate": "A9_citation_count_distribution",
+                "severity": "advisory",
+                "count": 0,
+                "sample_n": 0,
+                "citation_count_parse_errors": parse_errors,
+                "pass": False,
+                "note": (
+                    f"All {parse_errors} records have unparseable citation_count — "
+                    "cannot compute distribution. Advisory gate only."
+                ),
+            }
+        )
 
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
     above_5 = sum(1 for c in counts if c > 5)
-    return {
-        "gate": "A9_citation_count_distribution",
-        "severity": "advisory",
-        "count": n,
-        "sample_n": n,
-        "citation_count_parse_errors": parse_errors,
-        "mean": round(statistics.mean(counts), 2),
-        "median": statistics.median(counts),
-        "min": min(counts),
-        "max": max(counts),
-        "zero_citation_count": zero,
-        "zero_citation_pct": round(100.0 * zero / n, 2),
-        "above_5_count": above_5,
-        "above_5_pct": round(100.0 * above_5 / n, 2),
-        "pass": zero / n < cfg.a9_zero_citation_pass_pct / 100.0,
-        "note": (
-            "Advisory probe only — does not hard-filter the corpus. "
-            "Full 1.46M-opinion corpus is used unfiltered for final runs. "
-            "Fast-iteration subset (~150K) may optionally filter citation_count > 5 "
-            "to maximise Tier C utility."
-        ),
-    }
+    return GateResult(
+        **{
+            "gate": "A9_citation_count_distribution",
+            "severity": "advisory",
+            "count": n,
+            "sample_n": n,
+            "citation_count_parse_errors": parse_errors,
+            "mean": round(statistics.mean(counts), 2),
+            "median": statistics.median(counts),
+            "min": min(counts),
+            "max": max(counts),
+            "zero_citation_count": zero,
+            "zero_citation_pct": round(100.0 * zero / n, 2),
+            "above_5_count": above_5,
+            "above_5_pct": round(100.0 * above_5 / n, 2),
+            "pass": zero / n < cfg.a9_zero_citation_pass_pct / 100.0,
+            "note": (
+                "Advisory probe only — does not hard-filter the corpus. "
+                "Full 1.46M-opinion corpus is used unfiltered for final runs. "
+                "Fast-iteration subset (~150K) may optionally filter citation_count > 5 "
+                "to maximise Tier C utility."
+            ),
+        }
+    )
 
 
 def gate_a11_tokenizer_chunk_count(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
     tokenizer: Any | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     A11 — Tokenizer-aware chunk count. severity=blocking.
 
@@ -1048,12 +1096,14 @@ def gate_a11_tokenizer_chunk_count(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A11_tokenizer_chunk_count",
-            "severity": "blocking",
-            "pass": False,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A11_tokenizer_chunk_count",
+                "severity": "blocking",
+                "pass": False,
+                "note": "No records.",
+            }
+        )
 
     if tokenizer is None:
         try:
@@ -1062,13 +1112,15 @@ def gate_a11_tokenizer_chunk_count(
             tokenizer = AutoTokenizer.from_pretrained(cfg.encoder_model)
             tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
         except OSError as exc:
-            return {
-                "gate": "A11_tokenizer_chunk_count",
-                "severity": "blocking",
-                "pass": False,
-                "error": str(exc),
-                "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
-            }
+            return GateResult(
+                **{
+                    "gate": "A11_tokenizer_chunk_count",
+                    "severity": "blocking",
+                    "pass": False,
+                    "error": str(exc),
+                    "note": "AutoTokenizer load failed — check HF_TOKEN and network.",
+                }
+            )
     else:
         tokenizer_revision = getattr(tokenizer, "name_or_path", cfg.encoder_model)
 
@@ -1087,7 +1139,7 @@ def gate_a11_tokenizer_chunk_count(
         if n_chunks > 1:
             multi_chunk += 1
 
-    result: dict[str, Any] = {
+    result_fields: dict[str, Any] = {
         "gate": "A11_tokenizer_chunk_count",
         "severity": "blocking",
         "encoder_model": cfg.encoder_model,
@@ -1118,7 +1170,7 @@ def gate_a11_tokenizer_chunk_count(
                 gen_lengths.append(len(gen_ids))
                 if len(gen_ids) > mistral_limit:
                     over_limit += 1
-            result["generative_token_check"] = {
+            result_fields["generative_token_check"] = {
                 "severity": "advisory",
                 "model": cfg.a11_generative_model,
                 "mean_tokens": round(statistics.mean(gen_lengths), 1),
@@ -1129,33 +1181,35 @@ def gate_a11_tokenizer_chunk_count(
                 "note": "README asserts max(prompt_tokens) < 32768 using Mistral tokenizer.",
             }
         except OSError as exc:
-            result["generative_token_check"] = {
+            result_fields["generative_token_check"] = {
                 "severity": "advisory",
                 "model": cfg.a11_generative_model,
                 "error": str(exc),
                 "note": "Generative tokenizer load failed — skipping secondary check.",
             }
 
-    return result
+    return GateResult(**result_fields)
 
 
 def gate_a12_citation_anchor_survival(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     A12 — Citation anchor survival. severity=blocking.
     Reports records_text_capped — count of records where text > cap.
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A12_citation_anchor_survival",
-            "severity": "blocking",
-            "records_text_capped": 0,
-            "pass": False,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A12_citation_anchor_survival",
+                "severity": "blocking",
+                "records_text_capped": 0,
+                "pass": False,
+                "note": "No records.",
+            }
+        )
 
     has_anchor = 0
     citation_counts_found: list[int] = []
@@ -1184,32 +1238,34 @@ def gate_a12_citation_anchor_survival(
         round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
     )
 
-    return {
-        "gate": "A12_citation_anchor_survival",
-        "severity": "blocking",
-        "subsample_n": len(records),
-        "text_cap_chars": cfg.a12_text_cap_chars,
-        "records_text_capped": records_text_capped,
-        "records_with_citation_anchor": has_anchor,
-        "pct_with_citation_anchor": round(pct_with_anchor, 2),
-        "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
-        "citation_field_vs_regex": {
-            "field_nonzero_total": field_nonzero_total,
-            "field_nonzero_regex_zero_count": field_nonzero_regex_zero,
-            "field_nonzero_regex_zero_pct": field_nonzero_regex_zero_pct,
+    return GateResult(
+        **{
+            "gate": "A12_citation_anchor_survival",
+            "severity": "blocking",
+            "subsample_n": len(records),
+            "text_cap_chars": cfg.a12_text_cap_chars,
+            "records_text_capped": records_text_capped,
+            "records_with_citation_anchor": has_anchor,
+            "pct_with_citation_anchor": round(pct_with_anchor, 2),
+            "mean_anchors_per_doc": round(statistics.mean(citation_counts_found), 2),
+            "citation_field_vs_regex": {
+                "field_nonzero_total": field_nonzero_total,
+                "field_nonzero_regex_zero_count": field_nonzero_regex_zero,
+                "field_nonzero_regex_zero_pct": field_nonzero_regex_zero_pct,
+                "note": (
+                    "Records where citation_count > 0 but regex finds 0 matches — "
+                    "may indicate normalization destroying citation anchors."
+                ),
+            },
+            "pass": pct_with_anchor >= cfg.a12_min_pct_with_anchor,
             "note": (
-                "Records where citation_count > 0 but regex finds 0 matches — "
-                "may indicate normalization destroying citation anchors."
+                "Heuristic approximation via regex — not a precision extractor. "
+                ">=60% of records must contain extractable citation anchors "
+                "for Tier C SQLite lookup to be viable. "
+                f"Text capped at {cfg.a12_text_cap_chars} chars before scan."
             ),
-        },
-        "pass": pct_with_anchor >= cfg.a12_min_pct_with_anchor,
-        "note": (
-            "Heuristic approximation via regex — not a precision extractor. "
-            ">=60% of records must contain extractable citation anchors "
-            "for Tier C SQLite lookup to be viable. "
-            f"Text capped at {cfg.a12_text_cap_chars} chars before scan."
-        ),
-    }
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1324,7 @@ def gate_a13_sentence_density(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
     nlp: Any | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """
     A13 — Sentence density. severity=blocking.
     Trusts the caller's pre-filtered record list — no internal re-filter.
@@ -1276,62 +1332,70 @@ def gate_a13_sentence_density(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "records_after_a8_filter": 0,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "A13_sentence_density",
+                "severity": "blocking",
+                "pass": False,
+                "records_after_a8_filter": 0,
+                "note": "No records.",
+            }
+        )
 
     nlp_obj, spacy_version = _load_spacy_nlp(cfg, nlp)
     if nlp_obj is None:
-        return {
-            "gate": "A13_sentence_density",
-            "severity": "blocking",
-            "pass": False,
-            "records_after_a8_filter": len(records),
-            "error": "spaCy model load failed",
-            "note": "spaCy model load failed — check spacy_model in ProbeConfig.",
-        }
+        return GateResult(
+            **{
+                "gate": "A13_sentence_density",
+                "severity": "blocking",
+                "pass": False,
+                "records_after_a8_filter": len(records),
+                "error": "spaCy model load failed",
+                "note": "spaCy model load failed — check spacy_model in ProbeConfig.",
+            }
+        )
 
     sent_counts, below_threshold = _compute_sentence_counts(records, nlp_obj, cfg)
 
-    return {
-        "gate": "A13_sentence_density",
-        "severity": "blocking",
-        "spacy_model": cfg.spacy_model,
-        "spacy_version": spacy_version,
-        "min_sentence_threshold": cfg.min_sentence_count,
-        "subsample_n": len(records),
-        "records_after_a8_filter": len(records),
-        "mean_sentences": round(statistics.mean(sent_counts), 1),
-        "median_sentences": statistics.median(sent_counts),
-        "min_sentences": min(sent_counts),
-        "below_threshold_count": below_threshold,
-        "below_threshold_pct": round(100.0 * below_threshold / len(records), 2),
-        "pass": below_threshold / len(records) < cfg.a13_max_below_threshold_pct / 100.0,
-        "note": (
-            "Caller pre-filters to text_length >= 1500 records before passing here. "
-            "Pass threshold: <15% below 20 sentences."
-        ),
-    }
+    return GateResult(
+        **{
+            "gate": "A13_sentence_density",
+            "severity": "blocking",
+            "spacy_model": cfg.spacy_model,
+            "spacy_version": spacy_version,
+            "min_sentence_threshold": cfg.min_sentence_count,
+            "subsample_n": len(records),
+            "records_after_a8_filter": len(records),
+            "mean_sentences": round(statistics.mean(sent_counts), 1),
+            "median_sentences": statistics.median(sent_counts),
+            "min_sentences": min(sent_counts),
+            "below_threshold_count": below_threshold,
+            "below_threshold_pct": round(100.0 * below_threshold / len(records), 2),
+            "pass": below_threshold / len(records) < cfg.a13_max_below_threshold_pct / 100.0,
+            "note": (
+                "Caller pre-filters to text_length >= 1500 records before passing here. "
+                "Pass threshold: <15% below 20 sentences."
+            ),
+        }
+    )
 
 
 def gate_b6_text_entropy_distribution(
     records: list[dict[str, Any]],
     config: ProbeConfig | None = None,
-) -> dict[str, Any]:
+) -> GateResult:
     """B6 — text_entropy distribution. severity=advisory — always passes."""
     cfg = config or ProbeConfig()
     if not records:
-        return {
-            "gate": "B6_text_entropy_distribution",
-            "severity": "advisory",
-            "sample_n": 0,
-            "pass": True,
-            "note": "No records.",
-        }
+        return GateResult(
+            **{
+                "gate": "B6_text_entropy_distribution",
+                "severity": "advisory",
+                "sample_n": 0,
+                "pass": True,
+                "note": "No records.",
+            }
+        )
 
     entropies = [float(r.get("text_entropy", 0.0)) for r in records]
     entropies_sorted = sorted(entropies)
@@ -1345,32 +1409,34 @@ def gate_b6_text_entropy_distribution(
         deviations.append(abs(computed - stored))
     max_deviation = max(deviations) if deviations else 0.0
 
-    return {
-        "gate": "B6_text_entropy_distribution",
-        "severity": "advisory",
-        "sample_n": len(entropies),
-        "count": len(entropies),
-        "mean": round(statistics.mean(entropies), 4),
-        "median": round(float(statistics.median(entropies)), 4),
-        "min": round(min(entropies), 4),
-        "max": round(max(entropies), 4),
-        "p5": _percentile(entropies_sorted, 5),
-        "p10": _percentile(entropies_sorted, 10),
-        "p25": _percentile(entropies_sorted, 25),
-        "p75": _percentile(entropies_sorted, 75),
-        "p90": _percentile(entropies_sorted, 90),
-        "p95": _percentile(entropies_sorted, 95),
-        "zero_entropy_count": zero_entropy,
-        "zero_entropy_pct": round(100.0 * zero_entropy / len(entropies), 2),
-        "spot_check": {
-            "consistent": max_deviation <= cfg.b6_entropy_spot_check_tolerance,
-            "max_deviation": round(max_deviation, 4),
-            "tolerance": cfg.b6_entropy_spot_check_tolerance,
-            "sample_n": len(spot_sample),
-        },
-        "pass": True,
-        "note": "Use p10 as provisional low-entropy filter cutoff for Stage 3.",
-    }
+    return GateResult(
+        **{
+            "gate": "B6_text_entropy_distribution",
+            "severity": "advisory",
+            "sample_n": len(entropies),
+            "count": len(entropies),
+            "mean": round(statistics.mean(entropies), 4),
+            "median": round(float(statistics.median(entropies)), 4),
+            "min": round(min(entropies), 4),
+            "max": round(max(entropies), 4),
+            "p5": _percentile(entropies_sorted, 5),
+            "p10": _percentile(entropies_sorted, 10),
+            "p25": _percentile(entropies_sorted, 25),
+            "p75": _percentile(entropies_sorted, 75),
+            "p90": _percentile(entropies_sorted, 90),
+            "p95": _percentile(entropies_sorted, 95),
+            "zero_entropy_count": zero_entropy,
+            "zero_entropy_pct": round(100.0 * zero_entropy / len(entropies), 2),
+            "spot_check": {
+                "consistent": max_deviation <= cfg.b6_entropy_spot_check_tolerance,
+                "max_deviation": round(max_deviation, 4),
+                "tolerance": cfg.b6_entropy_spot_check_tolerance,
+                "sample_n": len(spot_sample),
+            },
+            "pass": True,
+            "note": "Use p10 as provisional low-entropy filter cutoff for Stage 3.",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1581,6 +1647,7 @@ def _build_provenance(
 def _summarize_gates(gates: dict[str, Any]) -> dict[str, Any]:
     """
     Partition gate results into passed/failed_blocking/failed_advisory/skipped.
+    Accepts GateResult instances or plain dicts (backward compat for skipped entries).
     Returns summary dict with all_passed = (no blocking failures).
     """
     passed: list[str] = []
@@ -1589,12 +1656,13 @@ def _summarize_gates(gates: dict[str, Any]) -> dict[str, Any]:
     skipped: list[str] = []
 
     for k, v in gates.items():
-        if v.get("skipped"):
+        v_dict = v.model_dump() if isinstance(v, GateResult) else (v if isinstance(v, dict) else {})
+        if v_dict.get("skipped"):
             skipped.append(k)
-        elif v.get("pass") is True:
+        elif v_dict.get("pass") is True:
             passed.append(k)
-        elif v.get("pass") is False:
-            if v.get("severity") == "advisory":
+        elif v_dict.get("pass") is False:
+            if v_dict.get("severity") == "advisory":
                 failed_advisory.append(k)
             else:
                 failed_blocking.append(k)
@@ -1789,13 +1857,25 @@ def run_probe(
         print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
         gates["A11"] = gate_a11_tokenizer_chunk_count(a11_sample, config=cfg)
     else:
-        gates["A11"] = {"gate": "A11_tokenizer_chunk_count", "skipped": True}
+        gates["A11"] = GateResult(
+            **{
+                "gate": "A11_tokenizer_chunk_count",
+                "severity": "blocking",
+                "skipped": True,
+            }
+        )
 
     if not skip_spacy:
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
         gates["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
     else:
-        gates["A13"] = {"gate": "A13_sentence_density", "skipped": True}
+        gates["A13"] = GateResult(
+            **{
+                "gate": "A13_sentence_density",
+                "severity": "blocking",
+                "skipped": True,
+            }
+        )
 
     print("[dataset_probe] Quality signals ...")
     quality_signals = ModelQualitySignals.summarize(records, sample_n=cfg.quality_signals_sample_n, config=cfg)

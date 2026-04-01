@@ -128,6 +128,227 @@ def sample_shard_dir(tmp_path: Path) -> Path:
 
 
 # ===========================================================================
+# CONTRACT — GateResult instance enforcement
+# Every gate must return an instantiated GateResult object, not a plain dict.
+# These tests enforce nominal typing at the gate-return boundary so that
+# downstream retrieval, chunking, citation, and NLI pipeline stages can rely
+# on a stable typed interface.
+# ===========================================================================
+
+
+class TestGateResultInstanceContract:
+    """
+    Contract: every gate function must return a GateResult instance.
+    Plain dicts are not permitted. isinstance(result, GateResult) must be True.
+    """
+
+    def test_gate_a7_returns_gate_result_instance(self):
+        result = gate_a7_text_source_breakdown(_make_records(10))
+        assert isinstance(result, GateResult), f"gate_a7 must return GateResult, got {type(result)}"
+
+    def test_gate_a7_empty_returns_gate_result_instance(self):
+        result = gate_a7_text_source_breakdown([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a8_returns_gate_result_instance(self):
+        result = gate_a8_text_length_distribution(_make_records(10))
+        assert isinstance(result, GateResult), f"gate_a8 must return GateResult, got {type(result)}"
+
+    def test_gate_a8_empty_returns_gate_result_instance(self):
+        result = gate_a8_text_length_distribution([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a8_all_invalid_returns_gate_result_instance(self):
+        result = gate_a8_text_length_distribution(_make_records(5, text_length="N/A"))
+        assert isinstance(result, GateResult)
+
+    def test_gate_a9_returns_gate_result_instance(self):
+        result = gate_a9_citation_count_distribution(_make_records(10))
+        assert isinstance(result, GateResult), f"gate_a9 must return GateResult, got {type(result)}"
+
+    def test_gate_a9_empty_returns_gate_result_instance(self):
+        result = gate_a9_citation_count_distribution([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a11_empty_returns_gate_result_instance(self):
+        result = gate_a11_tokenizer_chunk_count([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a11_with_mock_tokenizer_returns_gate_result_instance(self):
+        mock_tok = MagicMock()
+        mock_tok.side_effect = lambda text, **kw: {"input_ids": list(range(3000))}
+        mock_tok.name_or_path = "fake"
+        result = gate_a11_tokenizer_chunk_count(
+            _make_records(5), config=ProbeConfig(a11_generative_model=""), tokenizer=mock_tok
+        )
+        assert isinstance(result, GateResult)
+
+    def test_gate_a11_tokenizer_load_error_returns_gate_result_instance(self):
+        with patch("transformers.AutoTokenizer") as mock_cls:
+            mock_cls.from_pretrained.side_effect = OSError("not found")
+            result = gate_a11_tokenizer_chunk_count(_make_records(5), config=ProbeConfig(a11_generative_model=""))
+        assert isinstance(result, GateResult)
+
+    def test_gate_a12_returns_gate_result_instance(self):
+        result = gate_a12_citation_anchor_survival(_make_records(10))
+        assert isinstance(result, GateResult), f"gate_a12 must return GateResult, got {type(result)}"
+
+    def test_gate_a12_empty_returns_gate_result_instance(self):
+        result = gate_a12_citation_anchor_survival([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a13_returns_gate_result_instance(self):
+        long_text = "The court held this point clearly. " * 100
+        result = gate_a13_sentence_density(_make_records(5, text=long_text))
+        assert isinstance(result, GateResult), f"gate_a13 must return GateResult, got {type(result)}"
+
+    def test_gate_a13_empty_returns_gate_result_instance(self):
+        result = gate_a13_sentence_density([])
+        assert isinstance(result, GateResult)
+
+    def test_gate_a13_spacy_load_failure_returns_gate_result_instance(self):
+        with patch("spacy.load", side_effect=OSError("model not found")):
+            result = gate_a13_sentence_density(_make_records(5))
+        assert isinstance(result, GateResult)
+
+    def test_gate_b6_returns_gate_result_instance(self):
+        result = gate_b6_text_entropy_distribution(_make_records(10))
+        assert isinstance(result, GateResult), f"gate_b6 must return GateResult, got {type(result)}"
+
+    def test_gate_b6_empty_returns_gate_result_instance(self):
+        result = gate_b6_text_entropy_distribution([])
+        assert isinstance(result, GateResult)
+
+    def test_validate_schema_returns_gate_result_instance(self):
+        result = validate_schema(_make_records(5))
+        assert isinstance(result, GateResult), f"validate_schema must return GateResult, got {type(result)}"
+
+    def test_validate_schema_empty_returns_gate_result_instance(self):
+        result = validate_schema([])
+        assert isinstance(result, GateResult)
+
+    def test_all_registry_gates_return_gate_result_instance(self):
+        """Every non-tokenizer non-spacy gate in GATE_REGISTRY must return GateResult."""
+        records = _make_records(5)
+        cfg = ProbeConfig()
+        skip_gates = {"A11", "A13"}
+        for entry in GATE_REGISTRY:
+            if entry["name"] in skip_gates:
+                continue
+            result = entry["fn"](records, cfg)
+            assert isinstance(result, GateResult), (
+                f"GATE_REGISTRY entry '{entry['name']}' must return GateResult, got {type(result)}"
+            )
+
+    def test_gate_result_is_not_a_plain_dict(self):
+        """Verify that gate returns are model objects, never plain dicts."""
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert not isinstance(result, dict), "gate_a8 must return GateResult, not a plain dict"
+
+    def test_gate_result_has_gate_attribute_not_just_key(self):
+        """GateResult.gate must be accessible as a typed attribute."""
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert isinstance(result, GateResult)
+        assert result.gate == "A8_text_length_distribution"
+
+    def test_gate_result_has_severity_attribute_not_just_key(self):
+        """GateResult.severity must be accessible as a typed attribute."""
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert isinstance(result, GateResult)
+        assert result.severity == "blocking"
+
+    def test_gate_result_model_dump_is_json_serializable(self):
+        """GateResult.model_dump() must always be JSON-serializable."""
+        for fn in [
+            lambda: gate_a7_text_source_breakdown(_make_records(5)),
+            lambda: gate_a8_text_length_distribution(_make_records(5)),
+            lambda: gate_a9_citation_count_distribution(_make_records(5)),
+            lambda: gate_a12_citation_anchor_survival(_make_records(5)),
+            lambda: gate_b6_text_entropy_distribution(_make_records(5)),
+        ]:
+            result = fn()
+            assert isinstance(result, GateResult)
+            json.dumps(result.model_dump())
+
+    def test_skipped_gate_entries_in_run_probe_are_gate_result_instances(self, sample_shard_dir, tmp_path):
+        """Skipped gate entries set in run_probe must also be GateResult instances."""
+        report = run_probe(
+            data_dir=sample_shard_dir,
+            subset=20,
+            output=tmp_path / "r.json",
+            skip_tokenizer=True,
+            skip_spacy=True,
+        )
+        # Access raw gates before model_dump serialization
+        for gate_name in ("A11", "A13"):
+            gate_val = report.gates[gate_name]
+            assert isinstance(gate_val, GateResult), (
+                f"Skipped gate '{gate_name}' must be GateResult, got {type(gate_val)}"
+            )
+
+    def test_gate_result_frozen_immutable(self):
+        """GateResult must be immutable after construction."""
+        from pydantic import ValidationError
+
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert isinstance(result, GateResult)
+        with pytest.raises((ValidationError, TypeError)):
+            result.gate = "changed"  # type: ignore[misc]
+
+
+# ===========================================================================
+# CONTRACT — GateResult backward-compat dict-style access
+# GateResult must support dict-style access for backward compatibility with
+# downstream code that already uses result["key"], "key" in result, result.get()
+# ===========================================================================
+
+
+class TestGateResultDictCompat:
+    """
+    Contract: GateResult must support dict-style access via __getitem__,
+    __contains__, and get() for backward compatibility with existing tests
+    and downstream pipeline code.
+    """
+
+    def test_gate_result_supports_getitem(self):
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert result["gate"] == "A8_text_length_distribution"
+        assert result["severity"] == "blocking"
+
+    def test_gate_result_supports_contains(self):
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert "gate" in result
+        assert "severity" in result
+        assert "pass" in result
+
+    def test_gate_result_supports_get(self):
+        result = gate_a8_text_length_distribution(_make_records(5))
+        assert result.get("severity") == "blocking"
+        assert result.get("nonexistent_key", "default") == "default"
+
+    def test_gate_result_get_returns_none_for_missing(self):
+        result = gate_a7_text_source_breakdown(_make_records(5))
+        assert result.get("nonexistent") is None
+
+    def test_gate_result_getitem_raises_key_error_for_missing(self):
+        result = gate_a7_text_source_breakdown(_make_records(5))
+        with pytest.raises(KeyError):
+            _ = result["nonexistent_key_xyz"]
+
+    def test_gate_result_extra_fields_accessible_via_getitem(self):
+        result = gate_a8_text_length_distribution(_make_records(10))
+        assert isinstance(result["count"], int)
+        assert isinstance(result["sample_n"], int)
+
+    def test_validate_schema_result_supports_dict_access(self):
+        result = validate_schema(_make_records(5))
+        assert isinstance(result, GateResult)
+        assert result["pass"] is True
+        assert "stage3_pass" in result
+        assert result.get("stage3_pass") is True
+
+
+# ===========================================================================
 # NEW — obs 6: specific exception handling (no bare except Exception)
 # ===========================================================================
 
@@ -366,7 +587,6 @@ class TestStratifiedSampling:
 
 # ===========================================================================
 # NEW — obs 3/13: _log_report_to_wandb isolation (2-file constraint)
-# Verifies W&B logic is cleanly separated from gate logic within the module.
 # ===========================================================================
 
 
@@ -874,7 +1094,10 @@ class TestGateResultModel:
 
     def test_gate_a8_output_compatible_with_gate_result(self):
         result = gate_a8_text_length_distribution(_make_records(5))
-        gr = GateResult(**{k: v for k, v in result.items() if k in ("gate", "severity")})
+        assert isinstance(result, GateResult)
+        # Use model_dump() to extract fields for constructing a new GateResult
+        d = result.model_dump()
+        gr = GateResult(**{k: v for k, v in d.items() if k in ("gate", "severity")})
         assert gr.gate == "A8_text_length_distribution"
 
     def test_gate_result_extra_fields_allowed(self):
@@ -947,6 +1170,7 @@ class TestGateRegistry:
                 continue
             result = entry["fn"](records, cfg)
             assert "gate" in result
+            assert isinstance(result, GateResult), f"GATE_REGISTRY '{entry['name']}' must return GateResult"
 
 
 class TestImportStyle:
