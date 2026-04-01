@@ -315,6 +315,13 @@ class GateResult(BaseModel):
         return self.model_dump().get(key, default)
 
 
+def _gate(**kwargs: Any) -> GateResult:
+    """Factory for GateResult — isolates mypy arg-type suppression to one place.
+    All gate functions call _gate(**{...}) instead of _gate(**{...}) directly
+    to avoid mypy arg-type errors from unpacking dict[str, object]."""
+    return GateResult(**kwargs)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # ProbeReport — Pydantic v2 model for run_probe return value (obs 7/14)
 # ---------------------------------------------------------------------------
@@ -812,8 +819,7 @@ def validate_schema(
     cfg = config or ProbeConfig()
 
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "schema_validation",
                 "severity": "blocking",
                 "required_fields": sorted(MIN_REQUIRED_FIELDS),
@@ -851,8 +857,7 @@ def validate_schema(
     passed = (
         not any_missing and not type_errors and not range_errors and not vocabulary_errors and not consistency_errors
     )
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "schema_validation",
             "severity": "blocking",
             "required_fields": sorted(MIN_REQUIRED_FIELDS),
@@ -872,7 +877,7 @@ def validate_schema(
 # ---------------------------------------------------------------------------
 # Gates — every gate returns a GateResult instance (not a plain dict).
 # GateResult has extra="allow" so gate-specific metrics are fully supported.
-# Use GateResult(**{...}) to avoid Python reserved keyword conflict with "pass".
+# Use _gate(**{...}) to avoid Python reserved keyword conflict with "pass".
 # ---------------------------------------------------------------------------
 
 
@@ -883,8 +888,7 @@ def gate_a7_text_source_breakdown(
     """A7 — text_source breakdown. severity=blocking."""
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A7_text_source_breakdown",
                 "severity": "blocking",
                 "sample_n": 0,
@@ -903,8 +907,7 @@ def gate_a7_text_source_breakdown(
         for src, cnt in sorted(counts.items(), key=lambda x: -x[1])
     }
     known_pct = sum(v["pct"] for k, v in breakdown.items() if k in cfg.a7_known_formats)
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "A7_text_source_breakdown",
             "severity": "blocking",
             "sample_n": total,
@@ -933,8 +936,7 @@ def gate_a8_text_length_distribution(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A8_text_length_distribution",
                 "severity": "blocking",
                 "sample_n": 0,
@@ -954,8 +956,7 @@ def gate_a8_text_length_distribution(
             parse_errors += 1
 
     if not lengths:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A8_text_length_distribution",
                 "severity": "blocking",
                 "count": 0,
@@ -968,8 +969,7 @@ def gate_a8_text_length_distribution(
 
     lengths_sorted = sorted(lengths)
     below_provisional = sum(1 for length in lengths if length < cfg.min_text_length)
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "A8_text_length_distribution",
             "severity": "blocking",
             "count": len(lengths),
@@ -1009,8 +1009,7 @@ def gate_a9_citation_count_distribution(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A9_citation_count_distribution",
                 "severity": "advisory",
                 "sample_n": 0,
@@ -1030,8 +1029,7 @@ def gate_a9_citation_count_distribution(
             parse_errors += 1
 
     if not counts:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A9_citation_count_distribution",
                 "severity": "advisory",
                 "count": 0,
@@ -1048,8 +1046,7 @@ def gate_a9_citation_count_distribution(
     n = len(counts)
     zero = sum(1 for c in counts if c == 0)
     above_5 = sum(1 for c in counts if c > 5)
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "A9_citation_count_distribution",
             "severity": "advisory",
             "count": n,
@@ -1096,8 +1093,7 @@ def gate_a11_tokenizer_chunk_count(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A11_tokenizer_chunk_count",
                 "severity": "blocking",
                 "pass": False,
@@ -1201,8 +1197,7 @@ def gate_a12_citation_anchor_survival(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A12_citation_anchor_survival",
                 "severity": "blocking",
                 "records_text_capped": 0,
@@ -1238,8 +1233,7 @@ def gate_a12_citation_anchor_survival(
         round(100.0 * field_nonzero_regex_zero / field_nonzero_total, 2) if field_nonzero_total > 0 else 0.0
     )
 
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "A12_citation_anchor_survival",
             "severity": "blocking",
             "subsample_n": len(records),
@@ -1332,8 +1326,7 @@ def gate_a13_sentence_density(
     """
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A13_sentence_density",
                 "severity": "blocking",
                 "pass": False,
@@ -1344,8 +1337,7 @@ def gate_a13_sentence_density(
 
     nlp_obj, spacy_version = _load_spacy_nlp(cfg, nlp)
     if nlp_obj is None:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "A13_sentence_density",
                 "severity": "blocking",
                 "pass": False,
@@ -1357,8 +1349,7 @@ def gate_a13_sentence_density(
 
     sent_counts, below_threshold = _compute_sentence_counts(records, nlp_obj, cfg)
 
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "A13_sentence_density",
             "severity": "blocking",
             "spacy_model": cfg.spacy_model,
@@ -1387,8 +1378,7 @@ def gate_b6_text_entropy_distribution(
     """B6 — text_entropy distribution. severity=advisory — always passes."""
     cfg = config or ProbeConfig()
     if not records:
-        return GateResult(
-            **{
+        return _gate(**{
                 "gate": "B6_text_entropy_distribution",
                 "severity": "advisory",
                 "sample_n": 0,
@@ -1409,8 +1399,7 @@ def gate_b6_text_entropy_distribution(
         deviations.append(abs(computed - stored))
     max_deviation = max(deviations) if deviations else 0.0
 
-    return GateResult(
-        **{
+    return _gate(**{
             "gate": "B6_text_entropy_distribution",
             "severity": "advisory",
             "sample_n": len(entropies),
@@ -1857,8 +1846,7 @@ def run_probe(
         print("[dataset_probe] Gate A11: tokenizer-aware chunk count (BAAI/bge-m3) ...")
         gates["A11"] = gate_a11_tokenizer_chunk_count(a11_sample, config=cfg)
     else:
-        gates["A11"] = GateResult(
-            **{
+        gates["A11"] = _gate(**{
                 "gate": "A11_tokenizer_chunk_count",
                 "severity": "blocking",
                 "skipped": True,
@@ -1869,8 +1857,7 @@ def run_probe(
         print("[dataset_probe] Gate A13: sentence density (spaCy) ...")
         gates["A13"] = gate_a13_sentence_density(a13_sample, config=cfg, nlp=nlp_pipeline)
     else:
-        gates["A13"] = GateResult(
-            **{
+        gates["A13"] = _gate(**{
                 "gate": "A13_sentence_density",
                 "severity": "blocking",
                 "skipped": True,
