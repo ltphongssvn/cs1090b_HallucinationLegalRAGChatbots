@@ -20,6 +20,8 @@ Repair strategy:
   - Streams line-by-line into .jsonl.tmp then atomic rename — peak RAM
     is O(1) regardless of shard size (shards reach ~422 MB on this dataset).
   - Repair is idempotent: a clean shard touched twice changes 0 lines.
+  - Post-repair Polars validation confirmed: bare NaN rejected before,
+    null accepted after (confirmed in testing 2026-04).
 
 Configuration:
   - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
@@ -52,7 +54,7 @@ import math
 import multiprocessing
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,10 +73,10 @@ _STRING_NAN_VALUES: frozenset[str] = frozenset(
     {"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"}
 )
 
-# Retained for regex contract tests — NOT used in repair path.
-# Repair uses semantic parse->walk->reserialize instead of regex because
-# the regex is not quote-context aware: tokens surrounded by spaces inside
-# quoted strings are corrupted (confirmed in testing 2026-04).
+# Retained for regex contract tests only — NOT used in repair path.
+# Repair uses semantic parse->walk->reserialize because this regex is not
+# quote-context aware: tokens surrounded by spaces inside quoted strings
+# are corrupted (confirmed in testing 2026-04).
 _NAN_REPAIR_PATTERN = re.compile(r"(?<![\"'\w])(?:NaN|-?Infinity|-?Inf)(?![\"'\w])")
 
 # ---------------------------------------------------------------------------
@@ -124,7 +126,7 @@ def load_audit_config(config_path: Path) -> AuditSettings:
 class ShardHealth:
     shard: str
     total_lines: int
-    nan_lines: int           # total contaminated lines (backward compat)
+    nan_lines: int                 # total contaminated lines (backward compat)
     nan_fields: dict[str, int]
     nonfinite_lines: int = 0       # float nan/inf
     string_sentinel_lines: int = 0 # stringified "NaN" / "Infinity" etc.
@@ -156,20 +158,22 @@ class DatasetHealth:
         Classify contamination as CLEAN, REPAIRABLE, HARD_FAILURE, or
         PARSE_FAILURE.
 
-        Bug fix: empty nan_fields with nan_lines > 0 previously returned
-        REPAIRABLE via vacuous-truth all(). Now correctly returns PARSE_FAILURE
-        when decode errors are present but no field names were recorded.
+        Fix: empty nan_fields with nan_lines > 0 previously returned REPAIRABLE
+        via vacuous-truth all(). Now returns PARSE_FAILURE when nan_lines > 0
+        but no field names were recorded — regardless of decode_error_lines
+        value — because the caller may not have set that counter explicitly.
         """
         _advisory = advisory or frozenset({"case_name", "raw_text", "cleaning_flags"})
 
         if self.nan_lines == 0:
             return "CLEAN"
 
-        # Decode errors with no field mapping — cannot be classified as advisory
-        if self.decode_error_lines > 0 and not self.nan_fields:
+        # nan_lines > 0 but no field mapping recorded — could be decode errors
+        # or any unclassified contamination; cannot safely call it advisory
+        if not self.nan_fields:
             return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
 
-        if self.nan_fields and all(f in _advisory for f in self.nan_fields):
+        if all(f in _advisory for f in self.nan_fields):
             return "REPAIRABLE — NaN only in advisory fields; does not block Stage 3"
 
         return "HARD_FAILURE — NaN in required fields; blocks Stage 3 pipeline"
@@ -534,13 +538,16 @@ def main() -> None:
         "--dry-run", action="store_true", help="With --fix: preview without writing."
     )
     parser.add_argument(
-        "--workers", type=int, default=None, help="Worker processes (default: cpu_count)."
+        "--workers", type=int, default=None,
+        help="Worker processes (default: cpu_count)."
     )
     parser.add_argument(
-        "--wandb", action="store_true", help="Log health metrics to Weights & Biases."
+        "--wandb", action="store_true",
+        help="Log health metrics to Weights & Biases."
     )
     parser.add_argument(
-        "--config", type=Path, default=None, help="YAML config for advisory_fields etc."
+        "--config", type=Path, default=None,
+        help="YAML config for advisory_fields etc."
     )
     args = parser.parse_args()
 
