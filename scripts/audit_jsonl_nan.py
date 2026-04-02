@@ -34,6 +34,14 @@ Aggregation:
     the 8-counter mutable loop. sum(results, start=DatasetHealth.zero())
     makes aggregation testable in isolation.
 
+Schema-driven advisory policy:
+  - derive_advisory_from_schema(dataclass): returns frozenset of field
+    names typed Optional[...] in the schema. Only Optional fields can be
+    REPAIRABLE; required fields with NaN are HARD_FAILURE.
+  - --schema-advisory CLI flag enables strict 2026 schema-native gating.
+  - Default advisory (_DEFAULT_ADVISORY_FIELDS) preserved for backward
+    compatibility with existing pipelines.
+
 Configuration:
   - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
     Override via AUDIT_* env vars.
@@ -55,6 +63,7 @@ Usage
     uv run python scripts/audit_jsonl_nan.py --workers 4
     uv run python scripts/audit_jsonl_nan.py --fix --validate
     uv run python scripts/audit_jsonl_nan.py --strict-encoding
+    uv run python scripts/audit_jsonl_nan.py --schema-advisory
 """
 
 from __future__ import annotations
@@ -69,7 +78,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
@@ -101,6 +110,35 @@ _NAN_REPAIR_PATTERN = re.compile(r"(?<![\"'\w])(?:NaN|-?Infinity|-?Inf)(?![\"'\w
 # ---------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema-driven advisory policy
+# ---------------------------------------------------------------------------
+
+
+def derive_advisory_from_schema(schema_cls: type) -> frozenset[str]:
+    """
+    Derive advisory fields from a dataclass or Pydantic schema by inspecting
+    type annotations. Only fields typed Optional[...] (i.e. Union[X, None])
+    are considered advisory — NaN in these fields is REPAIRABLE.
+
+    Required fields with NaN become HARD_FAILURE under this policy.
+
+    This implements Dependency Inversion for data quality gating: policy
+    depends on the schema abstraction (OpinionRecord) not on string literals.
+    When new Optional fields are added, the advisory set updates automatically.
+
+    Example:
+        advisory = derive_advisory_from_schema(OpinionRecord)
+        verdict = health.gate_verdict(advisory=advisory)
+    """
+    hints = get_type_hints(schema_cls)
+    return frozenset(
+        field
+        for field, typ in hints.items()
+        if get_origin(typ) is Union and type(None) in get_args(typ)
+    )
+
 
 # ---------------------------------------------------------------------------
 # Configuration — pydantic-settings + OmegaConf
@@ -178,8 +216,6 @@ class DatasetHealth:
         """
         Accumulate a ShardHealth into this DatasetHealth.
         Enables: sum(shard_results, start=DatasetHealth.zero(total_shards))
-        which replaces the 8-counter mutable loop and makes aggregation
-        testable in isolation.
         """
         merged = dict(self.nan_fields)
         for f, c in other.nan_fields.items():
@@ -212,9 +248,10 @@ class DatasetHealth:
         Classify contamination as CLEAN, REPAIRABLE, HARD_FAILURE, or
         PARSE_FAILURE.
 
-        Fix: empty nan_fields with nan_lines > 0 previously returned REPAIRABLE
-        via vacuous-truth all(). Now returns PARSE_FAILURE when nan_lines > 0
-        but no field names were recorded — cannot safely call it advisory.
+        advisory: frozenset of field names considered non-blocking.
+          - Default: _DEFAULT_ADVISORY_FIELDS (backward compatible)
+          - Schema-driven: derive_advisory_from_schema(OpinionRecord)
+            which returns only Optional fields — stricter 2026 policy.
         """
         _advisory = advisory or _DEFAULT_ADVISORY_FIELDS
 
@@ -238,8 +275,7 @@ class DatasetHealth:
 def _has_nan(value: Any) -> bool:
     """
     Recursively detect float nan/inf OR stringified NaN variants.
-    Only exact membership in _STRING_NAN_VALUES — no substring heuristics —
-    so legal text never triggers false positives.
+    Only exact membership in _STRING_NAN_VALUES — no substring heuristics.
     """
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return True
@@ -335,18 +371,12 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
 
 
 def audit_shard(shard_path: Path) -> ShardHealth:
-    """
-    Scan a single shard with lenient encoding (errors='replace').
-    Safe to call from multiprocessing worker.
-    """
+    """Scan shard with lenient encoding (errors='replace'). Safe for multiprocessing."""
     return _audit_shard_impl(shard_path, encoding_errors="replace")
 
 
 def audit_shard_strict(shard_path: Path) -> ShardHealth:
-    """
-    Scan a single shard with strict encoding (errors='strict').
-    UnicodeDecodeError counted in decode_error_lines for honest gating.
-    """
+    """Scan shard with strict encoding (errors='strict'). Surfaces encoding corruption."""
     return _audit_shard_impl(shard_path, encoding_errors="strict")
 
 
@@ -356,10 +386,7 @@ def audit_shard_strict(shard_path: Path) -> ShardHealth:
 
 
 def validate_shard_polars(shard_path: Path) -> tuple[bool, str | None]:
-    """
-    Validate a shard with the actual downstream consumer (Polars read_ndjson).
-    Returns (True, None) on success, (False, error_message) on rejection.
-    """
+    """Validate shard with Polars read_ndjson. Returns (ok, error_or_None)."""
     try:
         import polars as pl
         pl.read_ndjson(shard_path)
@@ -387,13 +414,8 @@ def _replace_nonfinite(obj: Any) -> Any:
 def _semantic_repair_line(line: str) -> tuple[str, bool]:
     """
     Repair a single raw JSON line via parse -> walk -> reserialize.
-
-    parse_constant intercepts bare NaN/Infinity during json.loads and
-    converts them to float('nan') so _replace_nonfinite can nullify them.
-    json.dumps(allow_nan=False) guarantees strict JSON output.
-
-    Returns (repaired_line, was_changed).
-    Raises json.JSONDecodeError for truly malformed lines.
+    parse_constant intercepts bare NaN/Infinity; _replace_nonfinite nullifies.
+    Returns (repaired_line, was_changed). Raises JSONDecodeError if malformed.
     """
     def _intercept(token: str) -> float:
         return float("nan") if "nan" in token.lower() else float("inf")
@@ -406,14 +428,8 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
 
 def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     """
-    Repair bare NaN/Infinity tokens -> null in a single shard.
-
-    Uses semantic parse->walk->reserialize (not regex) so quoted legal
-    strings containing NaN/Infinity are never modified.
-    Streams line-by-line into .jsonl.tmp — peak RAM O(1).
-    Atomic rename; .bak backup before overwrite. Idempotent.
-
-    Returns (total_lines, repaired_lines).
+    Repair bare NaN/Infinity -> null. Semantic, quote-context safe, streaming.
+    Atomic rename; .bak backup; idempotent. Returns (total_lines, repaired).
     """
     total, repaired = 0, 0
     tmp = shard_path.with_suffix(".jsonl.tmp")
@@ -471,8 +487,6 @@ def audit_dataset(
             )
         )
 
-    # DatasetHealth.__add__ accumulates ShardHealth results — replaces the
-    # 8-counter mutable loop; aggregation is now testable in isolation.
     return sum(results, start=DatasetHealth.zero(total_shards=len(shards)))
 
 
@@ -522,7 +536,7 @@ def _write_csv(health: DatasetHealth, csv_path: Path) -> None:
     log.info("CSV written -> %s", csv_path)
 
 
-def _emit_json(health: DatasetHealth) -> None:
+def _emit_json(health: DatasetHealth, advisory: frozenset[str] | None = None) -> None:
     print(
         json.dumps(
             {
@@ -535,7 +549,7 @@ def _emit_json(health: DatasetHealth) -> None:
                 "total_shards": health.total_shards,
                 "clean_pct": round(health.clean_pct, 4),
                 "nan_fields": health.nan_fields,
-                "gate_verdict": health.gate_verdict(),
+                "gate_verdict": health.gate_verdict(advisory=advisory),
                 "contaminated_shards": health.contaminated_shards,
             },
             indent=2,
@@ -543,7 +557,11 @@ def _emit_json(health: DatasetHealth) -> None:
     )
 
 
-def _emit_text(health: DatasetHealth, emit_shard_ids: bool = False) -> None:
+def _emit_text(
+    health: DatasetHealth,
+    emit_shard_ids: bool = False,
+    advisory: frozenset[str] | None = None,
+) -> None:
     print(f"\ntotal lines:          {health.total_lines:,}")
     print(f"nan lines:            {health.nan_lines:,}")
     print(f"  nonfinite_lines:    {health.nonfinite_lines:,}")
@@ -552,7 +570,7 @@ def _emit_text(health: DatasetHealth, emit_shard_ids: bool = False) -> None:
     print(f"nan shards:           {health.nan_shards}/{health.total_shards}")
     print(f"clean pct:            {health.clean_pct:.4f}%")
     print(f"nan fields:           {health.nan_fields}")
-    print(f"verdict:              {health.gate_verdict()}")
+    print(f"verdict:              {health.gate_verdict(advisory=advisory)}")
     if emit_shard_ids:
         print("\ncontaminated shards:")
         for s in health.contaminated_shards:
@@ -568,11 +586,9 @@ def log_health_to_wandb(
     health: DatasetHealth,
     project: str = "audit-jsonl-nan",
     run_name: str | None = None,
+    advisory: frozenset[str] | None = None,
 ) -> None:
-    """
-    Log DatasetHealth fields to a W&B run. Safe in offline mode.
-    Set WANDB_MODE=offline to avoid network calls in CI/HPC environments.
-    """
+    """Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline)."""
     import wandb
 
     run = wandb.init(project=project, name=run_name)
@@ -586,7 +602,7 @@ def log_health_to_wandb(
             "data/nan_shards": health.nan_shards,
             "data/total_shards": health.total_shards,
             "data/clean_pct": round(health.clean_pct, 4),
-            "data/gate_verdict": health.gate_verdict(),
+            "data/gate_verdict": health.gate_verdict(advisory=advisory),
         }
     )
     run.finish()
@@ -598,7 +614,11 @@ def log_health_to_wandb(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=__import__("sys").stderr)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(levelname)s] %(message)s",
+        stream=__import__("sys").stderr,
+    )
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -626,6 +646,14 @@ def main() -> None:
         help="Use errors='strict' to surface encoding corruption (default: replace)."
     )
     parser.add_argument(
+        "--schema-advisory", action="store_true",
+        help=(
+            "Derive advisory fields from OpinionRecord schema (Optional fields only). "
+            "Stricter 2026 policy: required fields with NaN become HARD_FAILURE. "
+            "Default policy keeps case_name/raw_text/cleaning_flags as REPAIRABLE."
+        ),
+    )
+    parser.add_argument(
         "--workers", type=int, default=None,
         help="Worker processes (default: cpu_count)."
     )
@@ -638,6 +666,13 @@ def main() -> None:
         help="YAML config for advisory_fields etc."
     )
     args = parser.parse_args()
+
+    # Resolve advisory policy
+    advisory: frozenset[str] | None = None
+    if args.schema_advisory:
+        from src.schemas import OpinionRecord
+        advisory = derive_advisory_from_schema(OpinionRecord)
+        log.info("Schema-driven advisory policy: %s", sorted(advisory))
 
     if args.fix:
         repair_dataset(
@@ -658,13 +693,13 @@ def main() -> None:
         _write_csv(health, args.csv)
 
     if args.wandb:
-        log_health_to_wandb(health)
+        log_health_to_wandb(health, advisory=advisory)
 
     if args.json:
-        _emit_json(health)
+        _emit_json(health, advisory=advisory)
         return
 
-    _emit_text(health, emit_shard_ids=args.emit_shard_ids)
+    _emit_text(health, emit_shard_ids=args.emit_shard_ids, advisory=advisory)
 
 
 if __name__ == "__main__":
