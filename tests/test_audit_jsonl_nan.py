@@ -591,3 +591,71 @@ class TestWandb:
         health = DatasetHealth(100, 0, 0, 5, {}, [])
         # must not raise
         log_health_to_wandb(health, project="test-probe")
+
+
+# ---------------------------------------------------------------------------
+# RED: strict encoding mode — errors="strict" surfaces corruption
+# ---------------------------------------------------------------------------
+
+
+class TestStrictEncoding:
+    def test_audit_shard_strict_catches_corrupt_bytes(self, tmp_path):
+        from scripts.audit_jsonl_nan import audit_shard_strict
+
+        shard = tmp_path / "s.jsonl"
+        corrupt = b'{"id": "0", "case_name": "Smith \xff\xfe Jones"}\n'
+        shard.write_bytes(corrupt)
+        health = audit_shard_strict(shard)
+        assert health.decode_error_lines >= 1
+
+    def test_audit_shard_strict_clean_shard_passes(self, tmp_path):
+        from scripts.audit_jsonl_nan import audit_shard_strict
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": "Smith v. Jones"}\n', encoding="utf-8")
+        health = audit_shard_strict(shard)
+        assert health.decode_error_lines == 0
+        assert health.nan_lines == 0
+
+
+# ---------------------------------------------------------------------------
+# RED: post-repair Polars validation
+# ---------------------------------------------------------------------------
+
+
+class TestPolarsValidation:
+    def test_validate_shard_importable(self):
+        from scripts.audit_jsonl_nan import validate_shard_polars
+
+        assert callable(validate_shard_polars)
+
+    def test_validate_shard_accepts_clean_shard(self, tmp_path):
+        from scripts.audit_jsonl_nan import validate_shard_polars
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(
+            '{"id": "0", "case_name": "Smith v. Jones", "score": 1.0}\n',
+            encoding="utf-8",
+        )
+        ok, err = validate_shard_polars(shard)
+        assert ok is True
+        assert err is None
+
+    def test_validate_shard_rejects_bare_nan(self, tmp_path):
+        from scripts.audit_jsonl_nan import validate_shard_polars
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        ok, err = validate_shard_polars(shard)
+        assert ok is False
+        assert err is not None
+
+    def test_validate_after_repair_passes(self, tmp_path):
+        from scripts.audit_jsonl_nan import validate_shard_polars
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        repair_shard(shard, dry_run=False)
+        ok, err = validate_shard_polars(shard)
+        assert ok is True
+        assert err is None
