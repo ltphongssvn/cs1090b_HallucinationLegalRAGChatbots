@@ -84,6 +84,12 @@ _STRING_NAN_VALUES: frozenset[str] = frozenset(
     {"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"}
 )
 
+# Default advisory fields — single source of truth shared by AuditSettings
+# and gate_verdict(). NaN in these fields is REPAIRABLE, not HARD_FAILURE.
+_DEFAULT_ADVISORY_FIELDS: frozenset[str] = frozenset(
+    {"case_name", "raw_text", "cleaning_flags"}
+)
+
 # Retained for regex contract tests only — NOT used in repair path.
 # Repair uses semantic parse->walk->reserialize because this regex is not
 # quote-context aware: tokens surrounded by spaces inside quoted strings
@@ -105,9 +111,7 @@ class AuditSettings(BaseSettings):
     """Runtime configuration. Override any field via AUDIT_* env vars."""
 
     input_dir: Path = Path("data/raw/cl_federal_appellate_bulk")
-    advisory_fields: frozenset[str] = frozenset(
-        {"case_name", "raw_text", "cleaning_flags"}
-    )
+    advisory_fields: frozenset[str] = _DEFAULT_ADVISORY_FIELDS
     string_nan_values: frozenset[str] = _STRING_NAN_VALUES
     workers: int = Field(default=4, gt=0)
     dry_run: bool = False
@@ -212,7 +216,7 @@ class DatasetHealth:
         via vacuous-truth all(). Now returns PARSE_FAILURE when nan_lines > 0
         but no field names were recorded — cannot safely call it advisory.
         """
-        _advisory = advisory or frozenset({"case_name", "raw_text", "cleaning_flags"})
+        _advisory = advisory or _DEFAULT_ADVISORY_FIELDS
 
         if self.nan_lines == 0:
             return "CLEAN"
