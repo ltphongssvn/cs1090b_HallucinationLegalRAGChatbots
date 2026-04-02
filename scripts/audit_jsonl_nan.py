@@ -49,6 +49,7 @@ Usage
     python scripts/audit_jsonl_nan.py --wandb
     python scripts/audit_jsonl_nan.py --workers 4
     python scripts/audit_jsonl_nan.py --fix --validate
+    python scripts/audit_jsonl_nan.py --strict-encoding
 """
 
 from __future__ import annotations
@@ -101,7 +102,6 @@ class AuditSettings(BaseSettings):
     """Runtime configuration. Override any field via AUDIT_* env vars."""
 
     input_dir: Path = Path("data/raw/cl_federal_appellate_bulk")
-    # Advisory fields: NaN here is REPAIRABLE, not a HARD_FAILURE
     advisory_fields: frozenset[str] = frozenset(
         {"case_name", "raw_text", "cleaning_flags"}
     )
@@ -174,7 +174,6 @@ class DatasetHealth:
         if self.nan_lines == 0:
             return "CLEAN"
 
-        # nan_lines > 0 but no field mapping — decode errors or unclassified
         if not self.nan_fields:
             return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
 
@@ -419,7 +418,11 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def audit_dataset(input_dir: Path, workers: int | None = None) -> DatasetHealth:
+def audit_dataset(
+    input_dir: Path,
+    workers: int | None = None,
+    strict_encoding: bool = False,
+) -> DatasetHealth:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
     shards = sorted(input_dir.glob("*.jsonl"))
@@ -429,10 +432,13 @@ def audit_dataset(input_dir: Path, workers: int | None = None) -> DatasetHealth:
     ncpus = workers or multiprocessing.cpu_count()
     log.info("Scanning %d shards using %d CPU cores ...", len(shards), ncpus)
 
+    # Select shard scanner based on encoding mode
+    shard_fn = audit_shard_strict if strict_encoding else audit_shard
+
     with multiprocessing.Pool(processes=ncpus) as pool:
         results = list(
             tqdm(
-                pool.imap(audit_shard, shards),
+                pool.imap(shard_fn, shards),
                 total=len(shards),
                 unit="shard",
                 desc="auditing",
@@ -487,7 +493,10 @@ def repair_dataset(
         if validate and not dry_run:
             ok, err = validate_shard_polars(shard)
             if not ok:
-                log.error("Post-repair Polars validation FAILED for %s: %s", shard.name, err)
+                log.error(
+                    "Post-repair Polars validation FAILED for %s: %s",
+                    shard.name, err,
+                )
             else:
                 log.debug("Post-repair Polars validation OK: %s", shard.name)
     log.info(
@@ -612,6 +621,10 @@ def main() -> None:
         help="With --fix: run Polars validation on each repaired shard."
     )
     parser.add_argument(
+        "--strict-encoding", action="store_true",
+        help="Use errors='strict' to surface encoding corruption (default: replace)."
+    )
+    parser.add_argument(
         "--workers", type=int, default=None,
         help="Worker processes (default: cpu_count)."
     )
@@ -634,7 +647,11 @@ def main() -> None:
         )
         return
 
-    health = audit_dataset(args.input_dir, workers=args.workers)
+    health = audit_dataset(
+        args.input_dir,
+        workers=args.workers,
+        strict_encoding=args.strict_encoding,
+    )
 
     if args.csv:
         _write_csv(health, args.csv)
