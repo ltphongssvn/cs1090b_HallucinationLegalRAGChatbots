@@ -10,18 +10,24 @@ Detection strategy:
   - No string heuristics — zero false positives on legal text
   - Contamination split into typed counters: nonfinite_lines,
     string_sentinel_lines, decode_error_lines for honest gate verdicts
+  - audit_shard_strict(): errors="strict" surfaces encoding corruption
+    that errors="replace" silently normalises (confirmed in testing 2026-04)
 
 Repair strategy:
   - Semantic: json.loads (with parse_constant intercept) -> recursive
     replace -> json.dumps(allow_nan=False). Quote-context safe — legal
     text containing NaN/Infinity inside strings is never modified.
-  - Regex was rejected: it is not quote-context aware and corrupts legal
-    strings containing spaced NaN/Infinity tokens (confirmed in testing).
+  - Regex was rejected: not quote-context aware; corrupts legal strings
+    containing spaced NaN/Infinity tokens (confirmed in testing 2026-04).
   - Streams line-by-line into .jsonl.tmp then atomic rename — peak RAM
     is O(1) regardless of shard size (shards reach ~422 MB on this dataset).
   - Repair is idempotent: a clean shard touched twice changes 0 lines.
-  - Post-repair Polars validation confirmed: bare NaN rejected before,
-    null accepted after (confirmed in testing 2026-04).
+
+Post-repair validation:
+  - validate_shard_polars(): runs pl.read_ndjson() on repaired shard to
+    confirm the actual downstream consumer accepts the output.
+  - Polars rejects bare NaN (TapeError), accepts null after repair
+    (confirmed in testing 2026-04).
 
 Configuration:
   - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
@@ -42,6 +48,7 @@ Usage
     python scripts/audit_jsonl_nan.py --fix --dry-run
     python scripts/audit_jsonl_nan.py --wandb
     python scripts/audit_jsonl_nan.py --workers 4
+    python scripts/audit_jsonl_nan.py --fix --validate
 """
 
 from __future__ import annotations
@@ -160,16 +167,14 @@ class DatasetHealth:
 
         Fix: empty nan_fields with nan_lines > 0 previously returned REPAIRABLE
         via vacuous-truth all(). Now returns PARSE_FAILURE when nan_lines > 0
-        but no field names were recorded — regardless of decode_error_lines
-        value — because the caller may not have set that counter explicitly.
+        but no field names were recorded — cannot safely call it advisory.
         """
         _advisory = advisory or frozenset({"case_name", "raw_text", "cleaning_flags"})
 
         if self.nan_lines == 0:
             return "CLEAN"
 
-        # nan_lines > 0 but no field mapping recorded — could be decode errors
-        # or any unclassified contamination; cannot safely call it advisory
+        # nan_lines > 0 but no field mapping — decode errors or unclassified
         if not self.nan_fields:
             return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
 
@@ -229,16 +234,23 @@ def _is_string_sentinel(value: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Shard-level audit
+# Shard-level audit — lenient (default) and strict encoding modes
 # ---------------------------------------------------------------------------
 
 
-def audit_shard(shard_path: Path) -> ShardHealth:
-    """Scan a single shard. Safe to call from multiprocessing worker."""
+def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
+    """
+    Core audit logic shared by audit_shard and audit_shard_strict.
+
+    encoding_errors: passed to open() as errors= parameter.
+      "replace" — silent normalisation, operationally resilient (default).
+      "strict"  — raises UnicodeDecodeError on first corrupt byte, counted
+                  as decode_error so gate_verdict can surface it.
+    """
     total = nan_lines = nonfinite = sentinel = decode_err = 0
     nan_fields: dict[str, int] = {}
     try:
-        with shard_path.open(encoding="utf-8", errors="replace") as fh:
+        with shard_path.open(encoding="utf-8", errors=encoding_errors) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -246,8 +258,8 @@ def audit_shard(shard_path: Path) -> ShardHealth:
                 total += 1
                 try:
                     obj = json.loads(line)
-                except json.JSONDecodeError:
-                    # Separate counter — not the same failure class as NaN
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # UnicodeDecodeError only raised when errors="strict"
                     nan_lines += 1
                     decode_err += 1
                     continue
@@ -260,6 +272,11 @@ def audit_shard(shard_path: Path) -> ShardHealth:
                         sentinel += 1
                     for f in fields:
                         nan_fields[f] = nan_fields.get(f, 0) + 1
+    except UnicodeDecodeError as exc:
+        # strict mode: file-level decode failure before any line was read
+        log.error("Encoding error in %s: %s", shard_path.name, exc)
+        nan_lines += 1
+        decode_err += 1
     except Exception as exc:
         log.error("Error reading %s: %s", shard_path.name, exc)
     return ShardHealth(
@@ -271,6 +288,50 @@ def audit_shard(shard_path: Path) -> ShardHealth:
         string_sentinel_lines=sentinel,
         decode_error_lines=decode_err,
     )
+
+
+def audit_shard(shard_path: Path) -> ShardHealth:
+    """
+    Scan a single shard with lenient encoding (errors='replace').
+    Safe to call from multiprocessing worker.
+    Encoding corruption is silently normalised — use audit_shard_strict
+    when scientific honesty about byte-level damage is required.
+    """
+    return _audit_shard_impl(shard_path, encoding_errors="replace")
+
+
+def audit_shard_strict(shard_path: Path) -> ShardHealth:
+    """
+    Scan a single shard with strict encoding (errors='strict').
+    UnicodeDecodeError is caught per-line and counted in decode_error_lines
+    so gate_verdict can surface encoding corruption rather than hiding it.
+    Use when the dataset contract requires byte-level integrity.
+    """
+    return _audit_shard_impl(shard_path, encoding_errors="strict")
+
+
+# ---------------------------------------------------------------------------
+# Post-repair Polars validation
+# ---------------------------------------------------------------------------
+
+
+def validate_shard_polars(shard_path: Path) -> tuple[bool, str | None]:
+    """
+    Validate a shard with the actual downstream consumer (Polars read_ndjson).
+
+    Returns (True, None) if Polars accepts the shard.
+    Returns (False, error_message) if Polars rejects it.
+
+    Polars uses a strict tape parser that rejects bare NaN/Infinity tokens
+    (confirmed: ComputeError TapeError at NaN position). After semantic
+    repair all tokens become null and Polars accepts the shard.
+    """
+    try:
+        import polars as pl
+        pl.read_ndjson(shard_path)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +470,10 @@ def audit_dataset(input_dir: Path, workers: int | None = None) -> DatasetHealth:
 
 
 def repair_dataset(
-    input_dir: Path, dry_run: bool = False, workers: int | None = None
+    input_dir: Path,
+    dry_run: bool = False,
+    workers: int | None = None,
+    validate: bool = False,
 ) -> None:
     shards = sorted(input_dir.glob("*.jsonl"))
     if not shards:
@@ -420,6 +484,12 @@ def repair_dataset(
     for shard in tqdm(shards, unit="shard", desc="repairing"):
         _, repaired = repair_shard(shard, dry_run=dry_run)
         total_repaired += repaired
+        if validate and not dry_run:
+            ok, err = validate_shard_polars(shard)
+            if not ok:
+                log.error("Post-repair Polars validation FAILED for %s: %s", shard.name, err)
+            else:
+                log.debug("Post-repair Polars validation OK: %s", shard.name)
     log.info(
         "%s %d lines.",
         "Would repair" if dry_run else "Repaired",
@@ -538,6 +608,10 @@ def main() -> None:
         "--dry-run", action="store_true", help="With --fix: preview without writing."
     )
     parser.add_argument(
+        "--validate", action="store_true",
+        help="With --fix: run Polars validation on each repaired shard."
+    )
+    parser.add_argument(
         "--workers", type=int, default=None,
         help="Worker processes (default: cpu_count)."
     )
@@ -552,7 +626,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.fix:
-        repair_dataset(args.input_dir, dry_run=args.dry_run, workers=args.workers)
+        repair_dataset(
+            args.input_dir,
+            dry_run=args.dry_run,
+            workers=args.workers,
+            validate=args.validate,
+        )
         return
 
     health = audit_dataset(args.input_dir, workers=args.workers)
