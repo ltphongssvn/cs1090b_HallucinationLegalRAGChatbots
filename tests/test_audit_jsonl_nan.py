@@ -869,3 +869,33 @@ class TestMain:
         main()
         captured = capsys.readouterr()
         assert "s.jsonl" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# RED: --strict-encoding CLI flag wired into main()
+# ---------------------------------------------------------------------------
+
+
+class TestMainStrictEncoding:
+    def test_main_strict_encoding_flag_accepted(self, tmp_path, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0"}) + "\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--strict-encoding"])
+        # must not raise SystemExit (unrecognised argument)
+        main()
+
+    def test_main_strict_encoding_catches_corrupt_shard(self, tmp_path, capsys, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_bytes(b"\xff\xfe" + b'{"id": "0"}\n')
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--strict-encoding"])
+        main()
+        captured = capsys.readouterr()
+        assert "decode_error_lines" in captured.out
