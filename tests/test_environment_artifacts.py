@@ -22,6 +22,9 @@ def _venv_run(code: str) -> subprocess.CompletedProcess:  # type: ignore[type-ar
 
 skip_no_venv = pytest.mark.skipif(not VENV_PYTHON.is_file(), reason=".venv not built — run bash setup.sh first")
 skip_no_manifest = pytest.mark.skipif(not MANIFEST.is_file(), reason="manifest not written — run bash setup.sh first")
+skip_no_env = pytest.mark.skipif(
+    not (PROJECT_ROOT / ".env").is_file(), reason=".env not found — run bash setup.sh first"
+)
 skip_no_kernelspec = pytest.mark.skipif(
     not KERNELSPEC_DIR.is_dir(), reason="kernelspec not registered — run bash setup.sh first"
 )
@@ -301,6 +304,7 @@ print('ok')
         assert r.returncode == 0
 
     @skip_no_venv
+    @skip_no_env
     def test_repro_configure_sets_deterministic(self) -> None:
         r = _venv_run("""
 import sys
