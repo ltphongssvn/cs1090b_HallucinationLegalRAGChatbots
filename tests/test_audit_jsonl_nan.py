@@ -899,3 +899,96 @@ class TestMainStrictEncoding:
         main()
         captured = capsys.readouterr()
         assert "decode_error_lines" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# RED: _semantic_repair_line direct unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticRepairLine:
+    def test_bare_nan_becomes_null(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        result, changed = _semantic_repair_line('{"id": "0", "case_name": NaN}')
+        assert changed is True
+        assert json.loads(result)["case_name"] is None
+
+    def test_bare_infinity_becomes_null(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        result, changed = _semantic_repair_line('{"score": Infinity}')
+        assert changed is True
+        assert json.loads(result)["score"] is None
+
+    def test_legal_string_containing_nan_unchanged(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        line = '{"text": "The NaN result was expected"}'
+        result, changed = _semantic_repair_line(line)
+        assert changed is False
+        assert json.loads(result)["text"] == "The NaN result was expected"
+
+    def test_legal_string_containing_infinity_unchanged(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        line = '{"text": "score was Infinity points"}'
+        result, changed = _semantic_repair_line(line)
+        assert changed is False
+        assert json.loads(result)["text"] == "score was Infinity points"
+
+    def test_clean_line_unchanged(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        line = '{"id": "0", "case_name": "Smith v. Jones"}'
+        result, changed = _semantic_repair_line(line)
+        assert changed is False
+
+    def test_output_is_strict_json(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        result, _ = _semantic_repair_line('{"case_name": NaN}')
+
+        def reject(tok):
+            raise ValueError(f"non-finite: {tok}")
+
+        obj = json.loads(result.strip(), parse_constant=reject)
+        assert obj["case_name"] is None
+
+    def test_malformed_line_raises_decode_error(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        with pytest.raises(json.JSONDecodeError):
+            _semantic_repair_line("not valid json")
+
+
+# ---------------------------------------------------------------------------
+# RED: repair idempotency — verifies comment claim in repair_shard docstring
+# ---------------------------------------------------------------------------
+
+
+class TestRepairIdempotency:
+    def test_repair_twice_changes_zero_lines_second_pass(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN, "score": Infinity}\n')
+        _, first = repair_shard(shard, dry_run=False)
+        _, second = repair_shard(shard, dry_run=False)
+        assert first == 1
+        assert second == 0
+
+    def test_content_stable_after_two_repairs(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n')
+        repair_shard(shard, dry_run=False)
+        after_first = shard.read_text()
+        repair_shard(shard, dry_run=False)
+        after_second = shard.read_text()
+        assert after_first == after_second
+
+    def test_repaired_output_valid_json_after_idempotent_repair(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n')
+        repair_shard(shard, dry_run=False)
+        repair_shard(shard, dry_run=False)
+        obj = json.loads(shard.read_text())
+        assert obj["case_name"] is None
