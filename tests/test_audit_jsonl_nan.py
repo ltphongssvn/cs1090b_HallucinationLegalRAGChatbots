@@ -992,3 +992,56 @@ class TestRepairIdempotency:
         repair_shard(shard, dry_run=False)
         obj = json.loads(shard.read_text())
         assert obj["case_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# RED: DatasetHealth.zero() and __add__ for aggregation
+# ---------------------------------------------------------------------------
+
+
+class TestDatasetHealthAggregation:
+    def test_zero_returns_dataset_health(self):
+        h = DatasetHealth.zero(total_shards=5)
+        assert isinstance(h, DatasetHealth)
+        assert h.total_lines == 0
+        assert h.nan_lines == 0
+        assert h.total_shards == 5
+
+    def test_add_shard_health_accumulates_lines(self):
+        z = DatasetHealth.zero(total_shards=2)
+        s = ShardHealth("a.jsonl", 100, 5, {"case_name": 5}, 5, 0, 0)
+        result = z + s
+        assert result.total_lines == 100
+        assert result.nan_lines == 5
+        assert result.nan_shards == 1
+        assert result.nan_fields == {"case_name": 5}
+        assert result.contaminated_shards == ["a.jsonl"]
+
+    def test_add_clean_shard_does_not_increment_nan_shards(self):
+        z = DatasetHealth.zero(total_shards=2)
+        s = ShardHealth("b.jsonl", 200, 0, {}, 0, 0, 0)
+        result = z + s
+        assert result.nan_shards == 0
+        assert result.contaminated_shards == []
+
+    def test_add_merges_nan_fields(self):
+        z = DatasetHealth.zero(total_shards=2)
+        s1 = ShardHealth("a.jsonl", 100, 5, {"case_name": 5}, 5, 0, 0)
+        s2 = ShardHealth("b.jsonl", 100, 3, {"case_name": 2, "raw_text": 1}, 3, 0, 0)
+        result = z + s1 + s2
+        assert result.nan_fields["case_name"] == 7
+        assert result.nan_fields["raw_text"] == 1
+
+    def test_sum_pattern_matches_manual_loop(self, tmp_path):
+        shards = [
+            ShardHealth("a.jsonl", 100, 5, {"case_name": 5}, 5, 0, 0),
+            ShardHealth("b.jsonl", 200, 0, {}, 0, 0, 0),
+            ShardHealth("c.jsonl", 150, 3, {"case_name": 2, "raw_text": 1}, 3, 0, 0),
+        ]
+        result = sum(shards, start=DatasetHealth.zero(total_shards=len(shards)))
+        assert result.total_lines == 450
+        assert result.nan_lines == 8
+        assert result.nan_shards == 2
+        assert result.total_shards == 3
+        assert result.nan_fields == {"case_name": 7, "raw_text": 1}
+        assert result.contaminated_shards == ["a.jsonl", "c.jsonl"]
