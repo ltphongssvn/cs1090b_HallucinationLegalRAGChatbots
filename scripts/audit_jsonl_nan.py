@@ -44,17 +44,17 @@ Telemetry:
 
 Usage
 -----
-    python scripts/audit_jsonl_nan.py
-    python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appellate_bulk
-    python scripts/audit_jsonl_nan.py --json
-    python scripts/audit_jsonl_nan.py --emit-shard-ids
-    python scripts/audit_jsonl_nan.py --csv logs/nan_audit.csv
-    python scripts/audit_jsonl_nan.py --fix
-    python scripts/audit_jsonl_nan.py --fix --dry-run
-    python scripts/audit_jsonl_nan.py --wandb
-    python scripts/audit_jsonl_nan.py --workers 4
-    python scripts/audit_jsonl_nan.py --fix --validate
-    python scripts/audit_jsonl_nan.py --strict-encoding
+    uv run python scripts/audit_jsonl_nan.py
+    uv run python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appellate_bulk
+    uv run python scripts/audit_jsonl_nan.py --json
+    uv run python scripts/audit_jsonl_nan.py --emit-shard-ids
+    uv run python scripts/audit_jsonl_nan.py --csv logs/nan_audit.csv
+    uv run python scripts/audit_jsonl_nan.py --fix
+    uv run python scripts/audit_jsonl_nan.py --fix --dry-run
+    uv run python scripts/audit_jsonl_nan.py --wandb
+    uv run python scripts/audit_jsonl_nan.py --workers 4
+    uv run python scripts/audit_jsonl_nan.py --fix --validate
+    uv run python scripts/audit_jsonl_nan.py --strict-encoding
 """
 
 from __future__ import annotations
