@@ -1073,3 +1073,45 @@ class TestAdvisoryFieldsSingleSource:
         h = DatasetHealth(100, 5, 1, 5, {"case_name": 5}, ["s.jsonl"])
         # gate_verdict() with no args must use _DEFAULT_ADVISORY_FIELDS
         assert h.gate_verdict() == h.gate_verdict(advisory=_DEFAULT_ADVISORY_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# RED: schema-driven advisory fields via OpinionRecord introspection
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveAdvisoryFromSchema:
+    def test_derive_advisory_from_schema_importable(self):
+        from scripts.audit_jsonl_nan import derive_advisory_from_schema
+
+        assert callable(derive_advisory_from_schema)
+
+    def test_derive_advisory_returns_only_optional_fields(self):
+        from scripts.audit_jsonl_nan import derive_advisory_from_schema
+        from src.schemas import OpinionRecord
+
+        advisory = derive_advisory_from_schema(OpinionRecord)
+        assert isinstance(advisory, frozenset)
+        # docket_id is the only Optional field in OpinionRecord
+        assert "docket_id" in advisory
+        # required fields must NOT be in advisory
+        assert "case_name" not in advisory
+        assert "raw_text" not in advisory
+        assert "text" not in advisory
+
+    def test_gate_verdict_with_schema_advisory_hard_failure(self):
+        from scripts.audit_jsonl_nan import derive_advisory_from_schema
+        from src.schemas import OpinionRecord
+
+        advisory = derive_advisory_from_schema(OpinionRecord)
+        h = DatasetHealth(100, 5, 1, 5, {"case_name": 5}, ["s.jsonl"])
+        # case_name is required in schema — must be HARD_FAILURE
+        assert "HARD_FAILURE" in h.gate_verdict(advisory=advisory)
+
+    def test_gate_verdict_with_schema_advisory_repairable_for_optional(self):
+        from scripts.audit_jsonl_nan import derive_advisory_from_schema
+        from src.schemas import OpinionRecord
+
+        advisory = derive_advisory_from_schema(OpinionRecord)
+        h = DatasetHealth(100, 5, 1, 5, {"docket_id": 5}, ["s.jsonl"])
+        assert "REPAIRABLE" in h.gate_verdict(advisory=advisory)
