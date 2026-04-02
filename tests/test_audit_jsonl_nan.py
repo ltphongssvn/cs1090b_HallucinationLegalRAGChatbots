@@ -1045,3 +1045,31 @@ class TestDatasetHealthAggregation:
         assert result.total_shards == 3
         assert result.nan_fields == {"case_name": 7, "raw_text": 1}
         assert result.contaminated_shards == ["a.jsonl", "c.jsonl"]
+
+
+# ---------------------------------------------------------------------------
+# RED: DRY — advisory fields single source of truth
+# ---------------------------------------------------------------------------
+
+
+class TestAdvisoryFieldsSingleSource:
+    def test_default_advisory_fields_constant_importable(self):
+        from scripts.audit_jsonl_nan import _DEFAULT_ADVISORY_FIELDS
+
+        assert isinstance(_DEFAULT_ADVISORY_FIELDS, frozenset)
+        assert "case_name" in _DEFAULT_ADVISORY_FIELDS
+        assert "raw_text" in _DEFAULT_ADVISORY_FIELDS
+        assert "cleaning_flags" in _DEFAULT_ADVISORY_FIELDS
+
+    def test_audit_settings_uses_same_constant(self):
+        from scripts.audit_jsonl_nan import _DEFAULT_ADVISORY_FIELDS, AuditSettings
+
+        cfg = AuditSettings()
+        assert cfg.advisory_fields == _DEFAULT_ADVISORY_FIELDS
+
+    def test_gate_verdict_uses_same_constant(self):
+        from scripts.audit_jsonl_nan import _DEFAULT_ADVISORY_FIELDS
+
+        h = DatasetHealth(100, 5, 1, 5, {"case_name": 5}, ["s.jsonl"])
+        # gate_verdict() with no args must use _DEFAULT_ADVISORY_FIELDS
+        assert h.gate_verdict() == h.gate_verdict(advisory=_DEFAULT_ADVISORY_FIELDS)
