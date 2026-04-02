@@ -86,6 +86,9 @@ omit = [
     "src/extract.py",
     "src/manifest_collector.py",
     "src/drift_check.py",
+    "scripts/ci_audit_report.py",
+    "scripts/ci_write_env.py",
+    "scripts/migrate_gate_instantiation.py",
 ]
 [tool.coverage.report]
 fail_under = 80
