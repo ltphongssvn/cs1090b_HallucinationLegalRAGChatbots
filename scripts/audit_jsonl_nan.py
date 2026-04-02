@@ -594,7 +594,7 @@ def log_health_to_wandb(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=__import__("sys").stderr)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
