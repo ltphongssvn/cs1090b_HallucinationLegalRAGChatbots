@@ -659,3 +659,213 @@ class TestPolarsValidation:
         ok, err = validate_shard_polars(shard)
         assert ok is True
         assert err is None
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests — push from 78% to ≥80%
+# ---------------------------------------------------------------------------
+
+
+class TestIsNonfiniteBranches:
+    def test_list_containing_nan(self):
+        from scripts.audit_jsonl_nan import _is_nonfinite
+
+        assert _is_nonfinite([1.0, float("nan")]) is True
+
+    def test_list_all_clean(self):
+        from scripts.audit_jsonl_nan import _is_nonfinite
+
+        assert _is_nonfinite([1.0, 2.0]) is False
+
+    def test_dict_containing_inf(self):
+        from scripts.audit_jsonl_nan import _is_nonfinite
+
+        assert _is_nonfinite({"a": float("inf")}) is True
+
+
+class TestIsStringSentinelBranches:
+    def test_list_containing_sentinel(self):
+        from scripts.audit_jsonl_nan import _is_string_sentinel
+
+        assert _is_string_sentinel(["ok", "NaN"]) is True
+
+    def test_dict_containing_sentinel(self):
+        from scripts.audit_jsonl_nan import _is_string_sentinel
+
+        assert _is_string_sentinel({"x": "Infinity"}) is True
+
+    def test_clean_list(self):
+        from scripts.audit_jsonl_nan import _is_string_sentinel
+
+        assert _is_string_sentinel(["ok", "fine"]) is False
+
+
+class TestAuditShardImplBranches:
+    def test_empty_lines_skipped(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text("\n\n" + json.dumps({"id": "0"}) + "\n", encoding="utf-8")
+        h = audit_shard(shard)
+        assert h.total_lines == 1
+
+    def test_string_sentinel_counted(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        # "NaN" as a string value — string sentinel path
+        shard.write_text('{"id": "0", "case_name": "NaN"}\n', encoding="utf-8")
+        h = audit_shard(shard)
+        assert h.string_sentinel_lines == 1
+
+    def test_nonfinite_and_sentinel_same_record(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        # bare NaN (nonfinite) — string sentinel is separate field
+        lines = '{"id": "0", "case_name": NaN}\n'
+        shard.write_text(lines, encoding="utf-8")
+        h = audit_shard(shard)
+        assert h.nonfinite_lines == 1
+
+    def test_file_level_unicode_error_strict(self, tmp_path):
+        from scripts.audit_jsonl_nan import audit_shard_strict
+
+        shard = tmp_path / "s.jsonl"
+        # write bytes that are invalid utf-8 at file level
+        shard.write_bytes(b"\xff\xfe" + b'{"id": "0"}\n')
+        h = audit_shard_strict(shard)
+        assert h.decode_error_lines >= 1
+
+
+class TestReplaceNonfiniteBranches:
+    def test_list_with_nan(self):
+        from scripts.audit_jsonl_nan import _replace_nonfinite
+
+        result = _replace_nonfinite([1.0, float("nan"), 3.0])
+        assert result == [1.0, None, 3.0]
+
+
+class TestRepairShardMalformedLine:
+    def test_malformed_json_line_passed_through(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        malformed = "not valid json at all\n"
+        good = json.dumps({"id": "1"}) + "\n"
+        shard.write_text(malformed + good, encoding="utf-8")
+        total, repaired = repair_shard(shard, dry_run=False)
+        assert total == 2
+        assert repaired == 0
+        lines = shard.read_text().splitlines()
+        assert lines[0] == "not valid json at all"
+
+
+class TestRepairDatasetBranches:
+    def test_repair_dataset_raises_on_missing_dir(self, tmp_path):
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        with pytest.raises(FileNotFoundError):
+            repair_dataset(tmp_path / "nonexistent")
+
+    def test_repair_dataset_validate_flag_passes(self, tmp_path):
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        repair_dataset(tmp_path, dry_run=False, validate=True)
+        obj = json.loads(shard.read_text())
+        assert obj["case_name"] is None
+
+    def test_repair_dataset_validate_logs_failure(self, tmp_path, caplog):
+        import logging
+
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        shard = tmp_path / "s.jsonl"
+        # write a shard that repair won't fix but polars will reject
+        # inject a bare NaN that semantic repair catches — then corrupt bak
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        # mock validate_shard_polars to return failure
+        import scripts.audit_jsonl_nan as m
+
+        original = m.validate_shard_polars
+        m.validate_shard_polars = lambda p: (False, "TapeError")
+        try:
+            with caplog.at_level(logging.ERROR, logger="scripts.audit_jsonl_nan"):
+                repair_dataset(tmp_path, dry_run=False, validate=True)
+            assert any("FAILED" in r.message for r in caplog.records)
+        finally:
+            m.validate_shard_polars = original
+
+
+class TestEmitTextShardIds:
+    def test_emit_text_with_shard_ids(self, capsys):
+        h = DatasetHealth(
+            total_lines=100,
+            nan_lines=5,
+            nan_shards=1,
+            total_shards=5,
+            nan_fields={"case_name": 5},
+            contaminated_shards=["shard_0000.jsonl"],
+        )
+        from scripts.audit_jsonl_nan import _emit_text
+
+        _emit_text(h, emit_shard_ids=True)
+        captured = capsys.readouterr()
+        assert "shard_0000.jsonl" in captured.out
+
+
+class TestMain:
+    def test_main_text_output(self, tmp_path, capsys, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0", "case_name": "Smith v. Jones"}) + "\n")
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path)])
+        main()
+        captured = capsys.readouterr()
+        assert "verdict" in captured.out
+
+    def test_main_json_flag(self, tmp_path, capsys, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0"}) + "\n")
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--json"])
+        main()
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert "gate_verdict" in parsed
+
+    def test_main_csv_flag(self, tmp_path, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n')
+        csv_out = tmp_path / "out.csv"
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--csv", str(csv_out)])
+        main()
+        assert csv_out.exists()
+
+    def test_main_fix_flag(self, tmp_path, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n')
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--fix"])
+        main()
+        obj = json.loads(shard.read_text())
+        assert obj["case_name"] is None
+
+    def test_main_emit_shard_ids(self, tmp_path, capsys, monkeypatch):
+        import sys
+
+        from scripts.audit_jsonl_nan import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n')
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--emit-shard-ids"])
+        main()
+        captured = capsys.readouterr()
+        assert "s.jsonl" in captured.out
