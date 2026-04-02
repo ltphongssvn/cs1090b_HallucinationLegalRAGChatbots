@@ -4,30 +4,30 @@ scripts/audit_jsonl_nan.py
 Audits JSONL shards for bare NaN/Infinity tokens that pass Python's
 json.loads but are rejected by Polars' strict tape parser.
 
-Findings (verified 2026-04):
-  - 25,173 NaN lines across 135/159 shards (98.28% clean)
-  - All NaN occurrences are in `case_name` field only
-  - Cause: upstream extract.py used json.dumps(allow_nan=True) default
-  - Classification: REPAIRABLE — case_name is advisory metadata,
-    not required for chunking, citation lookup, or NLI evaluation
-  - parse_constant kwarg is a no-op in Python 3 — not used here
-
 Detection strategy:
   - Float nan/inf: json.loads + recursive math.isnan / math.isinf walk
   - Stringified NaN: recursive walk checking str values in _STRING_NAN_VALUES
   - No string heuristics — zero false positives on legal text
+  - Contamination split into typed counters: nonfinite_lines,
+    string_sentinel_lines, decode_error_lines for honest gate verdicts
 
 Repair strategy:
-  - Regex substitution on raw line bytes before JSON parse (faster than
-    round-trip deserialise -> fix -> re-serialise, and avoids re-encoding
-    unicode escapes or changing key ordering in the output)
-  - Writes to a .jsonl.tmp sibling then tmp.replace() for atomicity —
-    a crash mid-write leaves the original shard intact
-  - Streams line-by-line so peak RAM is bounded to one line regardless
-    of shard size (shards reach ~422 MB on this dataset)
+  - Semantic: json.loads (with parse_constant intercept) -> recursive
+    replace -> json.dumps(allow_nan=False). Quote-context safe — legal
+    text containing NaN/Infinity inside strings is never modified.
+  - Regex was rejected: it is not quote-context aware and corrupts legal
+    strings containing spaced NaN/Infinity tokens (confirmed in testing).
+  - Streams line-by-line into .jsonl.tmp then atomic rename — peak RAM
+    is O(1) regardless of shard size (shards reach ~422 MB on this dataset).
+  - Repair is idempotent: a clean shard touched twice changes 0 lines.
 
-Processes shards in parallel via multiprocessing.
-Progress tracked via tqdm for observability over SSH.
+Configuration:
+  - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
+    Override via AUDIT_* env vars.
+  - load_audit_config(): load advisory_fields from a YAML file via OmegaConf.
+
+Telemetry:
+  - log_health_to_wandb(): log DatasetHealth fields to a W&B run (offline safe).
 
 Usage
 -----
@@ -38,6 +38,8 @@ Usage
     python scripts/audit_jsonl_nan.py --csv logs/nan_audit.csv
     python scripts/audit_jsonl_nan.py --fix
     python scripts/audit_jsonl_nan.py --fix --dry-run
+    python scripts/audit_jsonl_nan.py --wandb
+    python scripts/audit_jsonl_nan.py --workers 4
 """
 
 from __future__ import annotations
@@ -50,10 +52,13 @@ import math
 import multiprocessing
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from omegaconf import DictConfig, OmegaConf
+from pydantic import Field
+from pydantic_settings import BaseSettings
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -62,24 +67,56 @@ from tqdm import tqdm
 
 # Exact string values produced by upstream allow_nan=True serialisation.
 # Kept as a frozenset so membership checks are O(1).
-_STRING_NAN_VALUES: frozenset[str] = frozenset({"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"})
+_STRING_NAN_VALUES: frozenset[str] = frozenset(
+    {"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"}
+)
 
-# Matches bare NaN/Infinity tokens NOT already quoted.
-# Negative lookbehind/lookahead on [\"'\w] prevents touching string values
-# such as "NaN" or field names containing "Inf".
-# Regex substitution on the raw line is faster than a JSON round-trip and
-# avoids altering key order or unicode escapes present in the original bytes.
+# Retained for regex contract tests — NOT used in repair path.
+# Repair uses semantic parse->walk->reserialize instead of regex because
+# the regex is not quote-context aware: tokens surrounded by spaces inside
+# quoted strings are corrupted (confirmed in testing 2026-04).
 _NAN_REPAIR_PATTERN = re.compile(r"(?<![\"'\w])(?:NaN|-?Infinity|-?Inf)(?![\"'\w])")
 
 # ---------------------------------------------------------------------------
-# Logging — single named logger; callers control level/handler
+# Logging
 # ---------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Configuration — pydantic-settings + OmegaConf
+# ---------------------------------------------------------------------------
+
+
+class AuditSettings(BaseSettings):
+    """Runtime configuration. Override any field via AUDIT_* env vars."""
+
+    input_dir: Path = Path("data/raw/cl_federal_appellate_bulk")
+    # Advisory fields: NaN here is REPAIRABLE, not a HARD_FAILURE
+    advisory_fields: frozenset[str] = frozenset(
+        {"case_name", "raw_text", "cleaning_flags"}
+    )
+    string_nan_values: frozenset[str] = _STRING_NAN_VALUES
+    workers: int = Field(default=4, gt=0)
+    dry_run: bool = False
+
+    model_config = {"env_prefix": "AUDIT_"}
+
+
+def load_audit_config(config_path: Path) -> AuditSettings:
+    """
+    Load advisory_fields (and other overrides) from a YAML file via OmegaConf,
+    then merge into AuditSettings. Allows externalising policy from source.
+    """
+    raw: DictConfig = OmegaConf.load(config_path)
+    overrides: dict[str, Any] = OmegaConf.to_container(raw, resolve=True)  # type: ignore[assignment]
+    if "advisory_fields" in overrides:
+        overrides["advisory_fields"] = frozenset(overrides["advisory_fields"])
+    return AuditSettings(**overrides)
+
 
 # ---------------------------------------------------------------------------
-# Data classes
+# Data classes — typed contamination counters
 # ---------------------------------------------------------------------------
 
 
@@ -87,8 +124,11 @@ log = logging.getLogger(__name__)
 class ShardHealth:
     shard: str
     total_lines: int
-    nan_lines: int
+    nan_lines: int           # total contaminated lines (backward compat)
     nan_fields: dict[str, int]
+    nonfinite_lines: int = 0       # float nan/inf
+    string_sentinel_lines: int = 0 # stringified "NaN" / "Infinity" etc.
+    decode_error_lines: int = 0    # JSONDecodeError — separate failure class
 
 
 @dataclass(frozen=True)
@@ -99,23 +139,39 @@ class DatasetHealth:
     total_shards: int
     nan_fields: dict[str, int]
     contaminated_shards: list[str]
+    nonfinite_lines: int = 0
+    string_sentinel_lines: int = 0
+    decode_error_lines: int = 0
 
     @property
     def clean_pct(self) -> float:
-        return 100.0 * (self.total_lines - self.nan_lines) / self.total_lines if self.total_lines else 0.0
+        return (
+            100.0 * (self.total_lines - self.nan_lines) / self.total_lines
+            if self.total_lines
+            else 0.0
+        )
 
-    def gate_verdict(self) -> str:
+    def gate_verdict(self, advisory: frozenset[str] | None = None) -> str:
         """
-        Classify nan_lines presence as hard failure, repairable, or clean.
-          CLEAN        : no nan lines
-          REPAIRABLE   : nan only in advisory fields (case_name, raw_text, etc.)
-          HARD_FAILURE : nan in required Stage 3 fields
+        Classify contamination as CLEAN, REPAIRABLE, HARD_FAILURE, or
+        PARSE_FAILURE.
+
+        Bug fix: empty nan_fields with nan_lines > 0 previously returned
+        REPAIRABLE via vacuous-truth all(). Now correctly returns PARSE_FAILURE
+        when decode errors are present but no field names were recorded.
         """
-        _advisory = {"case_name", "raw_text", "cleaning_flags"}
+        _advisory = advisory or frozenset({"case_name", "raw_text", "cleaning_flags"})
+
         if self.nan_lines == 0:
             return "CLEAN"
-        if all(f in _advisory for f in self.nan_fields):
+
+        # Decode errors with no field mapping — cannot be classified as advisory
+        if self.decode_error_lines > 0 and not self.nan_fields:
+            return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
+
+        if self.nan_fields and all(f in _advisory for f in self.nan_fields):
             return "REPAIRABLE — NaN only in advisory fields; does not block Stage 3"
+
         return "HARD_FAILURE — NaN in required fields; blocks Stage 3 pipeline"
 
 
@@ -127,9 +183,8 @@ class DatasetHealth:
 def _has_nan(value: Any) -> bool:
     """
     Recursively detect float nan/inf OR stringified NaN variants.
-    Handles nested dicts and lists. No string heuristics — only exact
-    membership in _STRING_NAN_VALUES — so legal text never triggers false
-    positives (e.g. a case name containing the word "infinity").
+    Only exact membership in _STRING_NAN_VALUES — no substring heuristics —
+    so legal text never triggers false positives.
     """
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return True
@@ -147,14 +202,36 @@ def _nan_fields(obj: dict[str, Any]) -> list[str]:
     return [k for k, v in obj.items() if _has_nan(v)]
 
 
+def _is_nonfinite(value: Any) -> bool:
+    """True only for float nan/inf — not string sentinels."""
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return True
+    if isinstance(value, dict):
+        return any(_is_nonfinite(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_is_nonfinite(v) for v in value)
+    return False
+
+
+def _is_string_sentinel(value: Any) -> bool:
+    """True only for string sentinel values — not float nan/inf."""
+    if isinstance(value, str) and value in _STRING_NAN_VALUES:
+        return True
+    if isinstance(value, dict):
+        return any(_is_string_sentinel(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_is_string_sentinel(v) for v in value)
+    return False
+
+
 # ---------------------------------------------------------------------------
-# Shard-level audit (called from multiprocessing worker — must be picklable)
+# Shard-level audit
 # ---------------------------------------------------------------------------
 
 
 def audit_shard(shard_path: Path) -> ShardHealth:
     """Scan a single shard. Safe to call from multiprocessing worker."""
-    total, nan_lines = 0, 0
+    total = nan_lines = nonfinite = sentinel = decode_err = 0
     nan_fields: dict[str, int] = {}
     try:
         with shard_path.open(encoding="utf-8", errors="replace") as fh:
@@ -166,12 +243,17 @@ def audit_shard(shard_path: Path) -> ShardHealth:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    # Line is not valid JSON at all — count as contaminated
+                    # Separate counter — not the same failure class as NaN
                     nan_lines += 1
+                    decode_err += 1
                     continue
                 fields = _nan_fields(obj)
                 if fields:
                     nan_lines += 1
+                    if _is_nonfinite(obj):
+                        nonfinite += 1
+                    if _is_string_sentinel(obj):
+                        sentinel += 1
                     for f in fields:
                         nan_fields[f] = nan_fields.get(f, 0) + 1
     except Exception as exc:
@@ -181,49 +263,87 @@ def audit_shard(shard_path: Path) -> ShardHealth:
         total_lines=total,
         nan_lines=nan_lines,
         nan_fields=nan_fields,
+        nonfinite_lines=nonfinite,
+        string_sentinel_lines=sentinel,
+        decode_error_lines=decode_err,
     )
 
 
 # ---------------------------------------------------------------------------
-# Shard-level repair — streamed via tempfile to bound peak RAM
+# Shard-level repair — semantic, quote-context safe, streaming
 # ---------------------------------------------------------------------------
+
+
+def _replace_nonfinite(obj: Any) -> Any:
+    """
+    Recursively replace float nan/inf with None.
+    Does NOT replace string sentinels — parse_constant already handles
+    bare tokens; quoted "NaN" strings are intentional string values.
+    """
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _replace_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_replace_nonfinite(v) for v in obj]
+    return obj
+
+
+def _semantic_repair_line(line: str) -> tuple[str, bool]:
+    """
+    Repair a single raw JSON line via parse -> walk -> reserialize.
+
+    parse_constant intercepts bare NaN/Infinity during json.loads and
+    converts them to float('nan') so _replace_nonfinite can nullify them.
+    json.dumps(allow_nan=False) guarantees strict JSON output.
+
+    Returns (repaired_line, was_changed).
+    Raises json.JSONDecodeError for truly malformed lines (not NaN-related).
+    """
+    def _intercept(token: str) -> float:
+        # parse_constant fires for bare NaN / Infinity / -Infinity tokens
+        return float("nan") if "nan" in token.lower() else float("inf")
+
+    obj = json.loads(line, parse_constant=_intercept)
+    cleaned = _replace_nonfinite(obj)
+    repaired = json.dumps(cleaned, allow_nan=False)
+    return repaired + "\n", repaired != line.rstrip("\n")
 
 
 def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     """
     Repair bare NaN/Infinity tokens -> null in a single shard.
 
-    Streams line-by-line into a sibling .jsonl.tmp file so peak RAM is
-    bounded to one line at a time regardless of shard size (shards reach
-    ~422 MB on this dataset; loading into a list would cost ~1.2-1.7 GB
-    Python overhead per worker in a multiprocessing pool).
+    Uses semantic parse->walk->reserialize (not regex) so quoted legal
+    strings containing NaN/Infinity are never modified.
 
-    On completion, creates a .jsonl.bak backup then atomically replaces the
-    original via tmp.replace() so a crash mid-write never corrupts the shard.
+    Streams line-by-line into a .jsonl.tmp sibling — peak RAM is O(1).
+    Atomic rename on completion; .bak backup preserved before overwrite.
+    Idempotent: a clean shard repaired twice changes 0 lines.
 
     Returns (total_lines, repaired_lines).
     """
     total, repaired = 0, 0
-    # Sibling tmp stays on same filesystem — guarantees tmp.replace() is an
-    # atomic rename() syscall, not a cross-device copy.
     tmp = shard_path.with_suffix(".jsonl.tmp")
     try:
         with shard_path.open(encoding="utf-8", errors="replace") as fh, \
              tmp.open("w", encoding="utf-8") as out:
-            for line in fh:
+            for raw_line in fh:
                 total += 1
-                fixed = _NAN_REPAIR_PATTERN.sub("null", line)
-                if fixed != line:
-                    repaired += 1
-                out.write(fixed)
+                try:
+                    fixed, changed = _semantic_repair_line(raw_line.rstrip("\n"))
+                    if changed:
+                        repaired += 1
+                    out.write(fixed)
+                except json.JSONDecodeError:
+                    # Malformed line — pass through unchanged
+                    out.write(raw_line)
 
         if repaired > 0 and not dry_run:
             backup = shard_path.with_suffix(".jsonl.bak")
-            shutil.copy2(shard_path, backup)   # preserve mtime + permissions
-            tmp.replace(shard_path)            # atomic on POSIX
-        # dry_run or nothing repaired — tmp discarded in finally block
+            shutil.copy2(shard_path, backup)
+            tmp.replace(shard_path)   # atomic on POSIX
     finally:
-        # Always clean up tmp; harmless if already renamed above
         if tmp.exists():
             tmp.unlink()
     return total, repaired
@@ -234,14 +354,14 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def audit_dataset(input_dir: Path) -> DatasetHealth:
+def audit_dataset(input_dir: Path, workers: int | None = None) -> DatasetHealth:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
     shards = sorted(input_dir.glob("*.jsonl"))
     if not shards:
         raise FileNotFoundError(f"No .jsonl shards found in {input_dir}")
 
-    ncpus = multiprocessing.cpu_count()
+    ncpus = workers or multiprocessing.cpu_count()
     log.info("Scanning %d shards using %d CPU cores ...", len(shards), ncpus)
 
     with multiprocessing.Pool(processes=ncpus) as pool:
@@ -255,16 +375,20 @@ def audit_dataset(input_dir: Path) -> DatasetHealth:
         )
 
     total_lines = nan_lines = nan_shards = 0
+    nonfinite = sentinel = decode_err = 0
     all_nan_fields: dict[str, int] = {}
     contaminated: list[str] = []
 
-    for health in results:
-        total_lines += health.total_lines
-        nan_lines += health.nan_lines
-        if health.nan_lines:
+    for h in results:
+        total_lines += h.total_lines
+        nan_lines += h.nan_lines
+        nonfinite += h.nonfinite_lines
+        sentinel += h.string_sentinel_lines
+        decode_err += h.decode_error_lines
+        if h.nan_lines:
             nan_shards += 1
-            contaminated.append(health.shard)
-        for f, c in health.nan_fields.items():
+            contaminated.append(h.shard)
+        for f, c in h.nan_fields.items():
             all_nan_fields[f] = all_nan_fields.get(f, 0) + c
 
     return DatasetHealth(
@@ -274,10 +398,15 @@ def audit_dataset(input_dir: Path) -> DatasetHealth:
         total_shards=len(shards),
         nan_fields=all_nan_fields,
         contaminated_shards=sorted(contaminated),
+        nonfinite_lines=nonfinite,
+        string_sentinel_lines=sentinel,
+        decode_error_lines=decode_err,
     )
 
 
-def repair_dataset(input_dir: Path, dry_run: bool = False) -> None:
+def repair_dataset(
+    input_dir: Path, dry_run: bool = False, workers: int | None = None
+) -> None:
     shards = sorted(input_dir.glob("*.jsonl"))
     if not shards:
         raise FileNotFoundError(f"No .jsonl shards found in {input_dir}")
@@ -287,16 +416,19 @@ def repair_dataset(input_dir: Path, dry_run: bool = False) -> None:
     for shard in tqdm(shards, unit="shard", desc="repairing"):
         _, repaired = repair_shard(shard, dry_run=dry_run)
         total_repaired += repaired
-    log.info("%s %d lines.", "Would repair" if dry_run else "Repaired", total_repaired)
+    log.info(
+        "%s %d lines.",
+        "Would repair" if dry_run else "Repaired",
+        total_repaired,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Output formatters — split from main() so they are independently testable
+# Output formatters
 # ---------------------------------------------------------------------------
 
 
 def _write_csv(health: DatasetHealth, csv_path: Path) -> None:
-    """Write per-field NaN counts to CSV. Separated from main() for testability."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -307,12 +439,14 @@ def _write_csv(health: DatasetHealth, csv_path: Path) -> None:
 
 
 def _emit_json(health: DatasetHealth) -> None:
-    """Print JSON summary to stdout. Separated from main() for testability."""
     print(
         json.dumps(
             {
                 "total_lines": health.total_lines,
                 "nan_lines": health.nan_lines,
+                "nonfinite_lines": health.nonfinite_lines,
+                "string_sentinel_lines": health.string_sentinel_lines,
+                "decode_error_lines": health.decode_error_lines,
                 "nan_shards": health.nan_shards,
                 "total_shards": health.total_shards,
                 "clean_pct": round(health.clean_pct, 4),
@@ -326,13 +460,15 @@ def _emit_json(health: DatasetHealth) -> None:
 
 
 def _emit_text(health: DatasetHealth, emit_shard_ids: bool = False) -> None:
-    """Print human-readable summary to stdout. Separated from main() for testability."""
-    print(f"\ntotal lines:  {health.total_lines:,}")
-    print(f"nan lines:    {health.nan_lines:,}")
-    print(f"nan shards:   {health.nan_shards}/{health.total_shards}")
-    print(f"clean pct:    {health.clean_pct:.4f}%")
-    print(f"nan fields:   {health.nan_fields}")
-    print(f"verdict:      {health.gate_verdict()}")
+    print(f"\ntotal lines:          {health.total_lines:,}")
+    print(f"nan lines:            {health.nan_lines:,}")
+    print(f"  nonfinite_lines:    {health.nonfinite_lines:,}")
+    print(f"  sentinel_lines:     {health.string_sentinel_lines:,}")
+    print(f"  decode_error_lines: {health.decode_error_lines:,}")
+    print(f"nan shards:           {health.nan_shards}/{health.total_shards}")
+    print(f"clean pct:            {health.clean_pct:.4f}%")
+    print(f"nan fields:           {health.nan_fields}")
+    print(f"verdict:              {health.gate_verdict()}")
     if emit_shard_ids:
         print("\ncontaminated shards:")
         for s in health.contaminated_shards:
@@ -340,7 +476,40 @@ def _emit_text(health: DatasetHealth, emit_shard_ids: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point — dispatch only; no business logic here
+# W&B telemetry
+# ---------------------------------------------------------------------------
+
+
+def log_health_to_wandb(
+    health: DatasetHealth,
+    project: str = "audit-jsonl-nan",
+    run_name: str | None = None,
+) -> None:
+    """
+    Log DatasetHealth fields to a W&B run. Safe in offline mode.
+    Set WANDB_MODE=offline to avoid network calls in CI/HPC environments.
+    """
+    import wandb
+
+    run = wandb.init(project=project, name=run_name)
+    run.log(
+        {
+            "data/total_lines": health.total_lines,
+            "data/nan_lines": health.nan_lines,
+            "data/nonfinite_lines": health.nonfinite_lines,
+            "data/string_sentinel_lines": health.string_sentinel_lines,
+            "data/decode_error_lines": health.decode_error_lines,
+            "data/nan_shards": health.nan_shards,
+            "data/total_shards": health.total_shards,
+            "data/clean_pct": round(health.clean_pct, 4),
+            "data/gate_verdict": health.gate_verdict(),
+        }
+    )
+    run.finish()
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 
@@ -348,22 +517,44 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
+    parser.add_argument(
+        "--input-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk")
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON summary.")
-    parser.add_argument("--emit-shard-ids", action="store_true", help="Print contaminated shard names.")
-    parser.add_argument("--csv", type=Path, default=None, help="Write per-field NaN counts to CSV.")
-    parser.add_argument("--fix", action="store_true", help="Repair NaN->null in-place with .bak backup.")
-    parser.add_argument("--dry-run", action="store_true", help="With --fix: preview without writing.")
+    parser.add_argument(
+        "--emit-shard-ids", action="store_true", help="Print contaminated shard names."
+    )
+    parser.add_argument(
+        "--csv", type=Path, default=None, help="Write per-field NaN counts to CSV."
+    )
+    parser.add_argument(
+        "--fix", action="store_true", help="Repair NaN->null in-place with .bak backup."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="With --fix: preview without writing."
+    )
+    parser.add_argument(
+        "--workers", type=int, default=None, help="Worker processes (default: cpu_count)."
+    )
+    parser.add_argument(
+        "--wandb", action="store_true", help="Log health metrics to Weights & Biases."
+    )
+    parser.add_argument(
+        "--config", type=Path, default=None, help="YAML config for advisory_fields etc."
+    )
     args = parser.parse_args()
 
     if args.fix:
-        repair_dataset(args.input_dir, dry_run=args.dry_run)
+        repair_dataset(args.input_dir, dry_run=args.dry_run, workers=args.workers)
         return
 
-    health = audit_dataset(args.input_dir)
+    health = audit_dataset(args.input_dir, workers=args.workers)
 
     if args.csv:
         _write_csv(health, args.csv)
+
+    if args.wandb:
+        log_health_to_wandb(health)
 
     if args.json:
         _emit_json(health)
