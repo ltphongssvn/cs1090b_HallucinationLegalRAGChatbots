@@ -29,6 +29,11 @@ Post-repair validation:
   - Polars rejects bare NaN (TapeError), accepts null after repair
     (confirmed in testing 2026-04).
 
+Aggregation:
+  - DatasetHealth.zero(total_shards) + ShardHealth via __add__ replaces
+    the 8-counter mutable loop. sum(results, start=DatasetHealth.zero())
+    makes aggregation testable in isolation.
+
 Configuration:
   - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
     Override via AUDIT_* env vars.
@@ -75,8 +80,6 @@ from tqdm import tqdm
 # Module-level constants (immutable — safe to import directly in tests)
 # ---------------------------------------------------------------------------
 
-# Exact string values produced by upstream allow_nan=True serialisation.
-# Kept as a frozenset so membership checks are O(1).
 _STRING_NAN_VALUES: frozenset[str] = frozenset(
     {"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"}
 )
@@ -133,11 +136,11 @@ def load_audit_config(config_path: Path) -> AuditSettings:
 class ShardHealth:
     shard: str
     total_lines: int
-    nan_lines: int                 # total contaminated lines (backward compat)
+    nan_lines: int
     nan_fields: dict[str, int]
-    nonfinite_lines: int = 0       # float nan/inf
-    string_sentinel_lines: int = 0 # stringified "NaN" / "Infinity" etc.
-    decode_error_lines: int = 0    # JSONDecodeError — separate failure class
+    nonfinite_lines: int = 0
+    string_sentinel_lines: int = 0
+    decode_error_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,46 @@ class DatasetHealth:
     nonfinite_lines: int = 0
     string_sentinel_lines: int = 0
     decode_error_lines: int = 0
+
+    @classmethod
+    def zero(cls, total_shards: int = 0) -> "DatasetHealth":
+        """Identity element for __add__ aggregation over ShardHealth results."""
+        return cls(
+            total_lines=0,
+            nan_lines=0,
+            nan_shards=0,
+            total_shards=total_shards,
+            nan_fields={},
+            contaminated_shards=[],
+            nonfinite_lines=0,
+            string_sentinel_lines=0,
+            decode_error_lines=0,
+        )
+
+    def __add__(self, other: ShardHealth) -> "DatasetHealth":
+        """
+        Accumulate a ShardHealth into this DatasetHealth.
+        Enables: sum(shard_results, start=DatasetHealth.zero(total_shards))
+        which replaces the 8-counter mutable loop and makes aggregation
+        testable in isolation.
+        """
+        merged = dict(self.nan_fields)
+        for f, c in other.nan_fields.items():
+            merged[f] = merged.get(f, 0) + c
+        return DatasetHealth(
+            total_lines=self.total_lines + other.total_lines,
+            nan_lines=self.nan_lines + other.nan_lines,
+            nan_shards=self.nan_shards + (1 if other.nan_lines else 0),
+            total_shards=self.total_shards,
+            nan_fields=merged,
+            contaminated_shards=sorted(
+                self.contaminated_shards
+                + ([other.shard] if other.nan_lines else [])
+            ),
+            nonfinite_lines=self.nonfinite_lines + other.nonfinite_lines,
+            string_sentinel_lines=self.string_sentinel_lines + other.string_sentinel_lines,
+            decode_error_lines=self.decode_error_lines + other.decode_error_lines,
+        )
 
     @property
     def clean_pct(self) -> float:
@@ -258,7 +301,6 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
                 try:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    # UnicodeDecodeError only raised when errors="strict"
                     nan_lines += 1
                     decode_err += 1
                     continue
@@ -272,7 +314,6 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
                     for f in fields:
                         nan_fields[f] = nan_fields.get(f, 0) + 1
     except UnicodeDecodeError as exc:
-        # strict mode: file-level decode failure before any line was read
         log.error("Encoding error in %s: %s", shard_path.name, exc)
         nan_lines += 1
         decode_err += 1
@@ -293,8 +334,6 @@ def audit_shard(shard_path: Path) -> ShardHealth:
     """
     Scan a single shard with lenient encoding (errors='replace').
     Safe to call from multiprocessing worker.
-    Encoding corruption is silently normalised — use audit_shard_strict
-    when scientific honesty about byte-level damage is required.
     """
     return _audit_shard_impl(shard_path, encoding_errors="replace")
 
@@ -302,9 +341,7 @@ def audit_shard(shard_path: Path) -> ShardHealth:
 def audit_shard_strict(shard_path: Path) -> ShardHealth:
     """
     Scan a single shard with strict encoding (errors='strict').
-    UnicodeDecodeError is caught per-line and counted in decode_error_lines
-    so gate_verdict can surface encoding corruption rather than hiding it.
-    Use when the dataset contract requires byte-level integrity.
+    UnicodeDecodeError counted in decode_error_lines for honest gating.
     """
     return _audit_shard_impl(shard_path, encoding_errors="strict")
 
@@ -317,13 +354,7 @@ def audit_shard_strict(shard_path: Path) -> ShardHealth:
 def validate_shard_polars(shard_path: Path) -> tuple[bool, str | None]:
     """
     Validate a shard with the actual downstream consumer (Polars read_ndjson).
-
-    Returns (True, None) if Polars accepts the shard.
-    Returns (False, error_message) if Polars rejects it.
-
-    Polars uses a strict tape parser that rejects bare NaN/Infinity tokens
-    (confirmed: ComputeError TapeError at NaN position). After semantic
-    repair all tokens become null and Polars accepts the shard.
+    Returns (True, None) on success, (False, error_message) on rejection.
     """
     try:
         import polars as pl
@@ -339,11 +370,7 @@ def validate_shard_polars(shard_path: Path) -> tuple[bool, str | None]:
 
 
 def _replace_nonfinite(obj: Any) -> Any:
-    """
-    Recursively replace float nan/inf with None.
-    Does NOT replace string sentinels — parse_constant already handles
-    bare tokens; quoted "NaN" strings are intentional string values.
-    """
+    """Recursively replace float nan/inf with None."""
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
     if isinstance(obj, dict):
@@ -362,10 +389,9 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
     json.dumps(allow_nan=False) guarantees strict JSON output.
 
     Returns (repaired_line, was_changed).
-    Raises json.JSONDecodeError for truly malformed lines (not NaN-related).
+    Raises json.JSONDecodeError for truly malformed lines.
     """
     def _intercept(token: str) -> float:
-        # parse_constant fires for bare NaN / Infinity / -Infinity tokens
         return float("nan") if "nan" in token.lower() else float("inf")
 
     obj = json.loads(line, parse_constant=_intercept)
@@ -380,10 +406,8 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
 
     Uses semantic parse->walk->reserialize (not regex) so quoted legal
     strings containing NaN/Infinity are never modified.
-
-    Streams line-by-line into a .jsonl.tmp sibling — peak RAM is O(1).
-    Atomic rename on completion; .bak backup preserved before overwrite.
-    Idempotent: a clean shard repaired twice changes 0 lines.
+    Streams line-by-line into .jsonl.tmp — peak RAM O(1).
+    Atomic rename; .bak backup before overwrite. Idempotent.
 
     Returns (total_lines, repaired_lines).
     """
@@ -400,13 +424,12 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
                         repaired += 1
                     out.write(fixed)
                 except json.JSONDecodeError:
-                    # Malformed line — pass through unchanged
                     out.write(raw_line)
 
         if repaired > 0 and not dry_run:
             backup = shard_path.with_suffix(".jsonl.bak")
             shutil.copy2(shard_path, backup)
-            tmp.replace(shard_path)   # atomic on POSIX
+            tmp.replace(shard_path)
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -432,7 +455,6 @@ def audit_dataset(
     ncpus = workers or multiprocessing.cpu_count()
     log.info("Scanning %d shards using %d CPU cores ...", len(shards), ncpus)
 
-    # Select shard scanner based on encoding mode
     shard_fn = audit_shard_strict if strict_encoding else audit_shard
 
     with multiprocessing.Pool(processes=ncpus) as pool:
@@ -445,34 +467,9 @@ def audit_dataset(
             )
         )
 
-    total_lines = nan_lines = nan_shards = 0
-    nonfinite = sentinel = decode_err = 0
-    all_nan_fields: dict[str, int] = {}
-    contaminated: list[str] = []
-
-    for h in results:
-        total_lines += h.total_lines
-        nan_lines += h.nan_lines
-        nonfinite += h.nonfinite_lines
-        sentinel += h.string_sentinel_lines
-        decode_err += h.decode_error_lines
-        if h.nan_lines:
-            nan_shards += 1
-            contaminated.append(h.shard)
-        for f, c in h.nan_fields.items():
-            all_nan_fields[f] = all_nan_fields.get(f, 0) + c
-
-    return DatasetHealth(
-        total_lines=total_lines,
-        nan_lines=nan_lines,
-        nan_shards=nan_shards,
-        total_shards=len(shards),
-        nan_fields=all_nan_fields,
-        contaminated_shards=sorted(contaminated),
-        nonfinite_lines=nonfinite,
-        string_sentinel_lines=sentinel,
-        decode_error_lines=decode_err,
-    )
+    # DatasetHealth.__add__ accumulates ShardHealth results — replaces the
+    # 8-counter mutable loop; aggregation is now testable in isolation.
+    return sum(results, start=DatasetHealth.zero(total_shards=len(shards)))
 
 
 def repair_dataset(
