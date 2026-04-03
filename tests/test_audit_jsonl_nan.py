@@ -1513,3 +1513,26 @@ class TestTelemetryConfigSnapshot:
         assert "config/advisory_fields" in logged
         assert "config/strict_encoding" in logged
         assert "config/workers" in logged
+
+
+# ---------------------------------------------------------------------------
+# RED: #11 semantic repair must not mark unicode-normalized lines as changed
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticRepairUnicode:
+    def test_unicode_line_not_marked_as_changed(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        line = '{"text": "café"}'
+        _, changed = _semantic_repair_line(line)
+        assert changed is False, "unicode normalization must not count as semantic change"
+
+    def test_unicode_content_preserved_after_repair(self):
+        from scripts.audit_jsonl_nan import _semantic_repair_line
+
+        line = '{"text": "café au lait"}'
+        repaired, _ = _semantic_repair_line(line)
+        import json
+
+        assert json.loads(repaired)["text"] == "café au lait"
