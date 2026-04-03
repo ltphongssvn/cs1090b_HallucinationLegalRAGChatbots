@@ -1343,6 +1343,7 @@ class TestWandbTable:
         import unittest.mock
 
         from scripts.audit_jsonl_nan import log_health_to_wandb
+
         logged = {}
         with unittest.mock.patch("wandb.init") as mock_init:
             mock_run = unittest.mock.MagicMock()
@@ -1356,10 +1357,12 @@ class TestWandbTable:
 class TestRepairEfficacy:
     def test_repair_efficacy_importable(self):
         from scripts.audit_jsonl_nan import repair_efficacy
+
         assert callable(repair_efficacy)
 
     def test_repair_efficacy_returns_before_after(self, tmp_path):
         from scripts.audit_jsonl_nan import repair_efficacy
+
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0", "case_name": NaN}\n{"id": "1", "case_name": "Smith"}\n')
         result = repair_efficacy(tmp_path)
@@ -1375,22 +1378,20 @@ class TestTelemetryLevel:
         import sys
 
         from scripts.audit_jsonl_nan import main
+
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
-        monkeypatch.setattr(sys, "argv", [
-            "audit", "--input-dir", str(tmp_path), "--telemetry-level", "summary"
-        ])
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--telemetry-level", "summary"])
         main()  # must not raise
 
     def test_telemetry_level_detailed_accepted(self, tmp_path, monkeypatch):
         import sys
 
         from scripts.audit_jsonl_nan import main
+
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
-        monkeypatch.setattr(sys, "argv", [
-            "audit", "--input-dir", str(tmp_path), "--telemetry-level", "detailed"
-        ])
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--telemetry-level", "detailed"])
         main()
 
 
@@ -1399,24 +1400,23 @@ class TestFailUnder:
         import sys
 
         from scripts.audit_jsonl_nan import main
+
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
-        monkeypatch.setattr(sys, "argv", [
-            "audit", "--input-dir", str(tmp_path), "--fail-under", "80.0"
-        ])
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--fail-under", "80.0"])
         main()
 
     def test_fail_under_raises_on_contaminated_dataset(self, tmp_path, monkeypatch):
         import sys
 
         from scripts.audit_jsonl_nan import main
+
         shard = tmp_path / "s.jsonl"
         # 50% contaminated
         shard.write_text('{"id": "0", "case_name": NaN}\n{"id": "1", "case_name": "Smith"}\n')
-        monkeypatch.setattr(sys, "argv", [
-            "audit", "--input-dir", str(tmp_path), "--fail-under", "99.0"
-        ])
+        monkeypatch.setattr(sys, "argv", ["audit", "--input-dir", str(tmp_path), "--fail-under", "99.0"])
         import pytest
+
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code != 0
