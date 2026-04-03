@@ -1167,3 +1167,29 @@ class TestWalkHelper:
         cases = [float("nan"), "NaN", {"a": float("inf")}, [1, "Infinity"], {"a": "ok"}]
         for c in cases:
             assert _walk(c, pred) == _has_nan(c), f"mismatch: {c}"
+
+
+# ---------------------------------------------------------------------------
+# RED: repair_dataset parallel workers
+# ---------------------------------------------------------------------------
+
+
+class TestRepairDatasetParallel:
+    def test_repair_dataset_accepts_workers_for_parallel(self, tmp_path):
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        for i in range(4):
+            (tmp_path / f"s{i}.jsonl").write_text(f'{{"id": "{i}", "case_name": NaN}}\n', encoding="utf-8")
+        repair_dataset(tmp_path, dry_run=True, workers=2, parallel_repair=True)
+
+    def test_repair_dataset_parallel_produces_same_result(self, tmp_path):
+        import json
+
+        from scripts.audit_jsonl_nan import repair_dataset
+
+        for i in range(4):
+            (tmp_path / f"s{i}.jsonl").write_text(f'{{"id": "{i}", "case_name": NaN}}\n', encoding="utf-8")
+        repair_dataset(tmp_path, dry_run=False, workers=2, parallel_repair=True)
+        for i in range(4):
+            obj = json.loads((tmp_path / f"s{i}.jsonl").read_text())
+            assert obj["case_name"] is None
