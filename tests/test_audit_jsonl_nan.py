@@ -1330,3 +1330,88 @@ class TestConfigPrecedence:
 
         cfg = AuditSettings()
         assert cfg.workers == 4
+
+
+# ---------------------------------------------------------------------------
+# RED: Telemetry enhancements
+# ---------------------------------------------------------------------------
+
+
+class TestWandbTable:
+    def test_log_health_to_wandb_logs_field_table(self, monkeypatch):
+        monkeypatch.setenv("WANDB_MODE", "offline")
+        import unittest.mock
+        from scripts.audit_jsonl_nan import log_health_to_wandb
+        logged = {}
+        with unittest.mock.patch("wandb.init") as mock_init:
+            mock_run = unittest.mock.MagicMock()
+            mock_run.log = lambda d: logged.update(d)
+            mock_init.return_value = mock_run
+            h = DatasetHealth(100, 5, 1, 5, {"case_name": 5}, ["s.jsonl"])
+            log_health_to_wandb(h, project="test")
+        assert "data/field_contamination" in logged
+
+
+class TestRepairEfficacy:
+    def test_repair_efficacy_importable(self):
+        from scripts.audit_jsonl_nan import repair_efficacy
+        assert callable(repair_efficacy)
+
+    def test_repair_efficacy_returns_before_after(self, tmp_path):
+        from scripts.audit_jsonl_nan import repair_efficacy
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n{"id": "1", "case_name": "Smith"}\n')
+        result = repair_efficacy(tmp_path)
+        assert "before" in result
+        assert "after" in result
+        assert "lines_fixed" in result
+        assert result["lines_fixed"] == 1
+        assert result["after"]["gate_verdict"] == "CLEAN"
+
+
+class TestTelemetryLevel:
+    def test_main_accepts_telemetry_level_flag(self, tmp_path, monkeypatch):
+        import sys
+        from scripts.audit_jsonl_nan import main
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0"}\n')
+        monkeypatch.setattr(sys, "argv", [
+            "audit", "--input-dir", str(tmp_path), "--telemetry-level", "summary"
+        ])
+        main()  # must not raise
+
+    def test_telemetry_level_detailed_accepted(self, tmp_path, monkeypatch):
+        import sys
+        from scripts.audit_jsonl_nan import main
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0"}\n')
+        monkeypatch.setattr(sys, "argv", [
+            "audit", "--input-dir", str(tmp_path), "--telemetry-level", "detailed"
+        ])
+        main()
+
+
+class TestFailUnder:
+    def test_main_accepts_fail_under_flag(self, tmp_path, monkeypatch):
+        import sys
+        from scripts.audit_jsonl_nan import main
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0"}\n')
+        monkeypatch.setattr(sys, "argv", [
+            "audit", "--input-dir", str(tmp_path), "--fail-under", "80.0"
+        ])
+        main()
+
+    def test_fail_under_raises_on_contaminated_dataset(self, tmp_path, monkeypatch):
+        import sys
+        from scripts.audit_jsonl_nan import main
+        shard = tmp_path / "s.jsonl"
+        # 50% contaminated
+        shard.write_text('{"id": "0", "case_name": NaN}\n{"id": "1", "case_name": "Smith"}\n')
+        monkeypatch.setattr(sys, "argv", [
+            "audit", "--input-dir", str(tmp_path), "--fail-under", "99.0"
+        ])
+        import pytest
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code != 0
