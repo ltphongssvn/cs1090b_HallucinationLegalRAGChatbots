@@ -437,7 +437,12 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
     obj = json.loads(line, parse_constant=_intercept)
     cleaned = _replace_nonfinite(obj)
     repaired = json.dumps(cleaned, allow_nan=False)
-    return repaired + "\n", repaired != line.rstrip("\n")
+    # Compare parsed objects semantically, not raw strings.
+    # json.dumps may unicode-escape chars (café -> caf\u00e9) causing
+    # false-positive "changed" on semantically identical content.
+    original_obj = json.loads(line)
+    semantic_change = cleaned != original_obj
+    return repaired + "\n", semantic_change
 
 
 def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int, int]:
