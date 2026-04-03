@@ -432,6 +432,20 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     Atomic rename; .bak backup; idempotent. Returns (total_lines, repaired).
     """
     total, repaired = 0, 0
+
+    if dry_run:
+        # dry-run: scan only — skip tmp write to avoid wasted I/O on ~422MB shards
+        with shard_path.open(encoding="utf-8", errors="replace") as fh:
+            for raw_line in fh:
+                total += 1
+                try:
+                    _, changed = _semantic_repair_line(raw_line.rstrip("\n"))
+                    if changed:
+                        repaired += 1
+                except json.JSONDecodeError:
+                    pass
+        return total, repaired
+
     tmp = shard_path.with_suffix(".jsonl.tmp")
     try:
         with shard_path.open(encoding="utf-8", errors="replace") as fh, tmp.open(
@@ -446,8 +460,7 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
                     out.write(fixed)
                 except json.JSONDecodeError:
                     out.write(raw_line)
-
-        if repaired > 0 and not dry_run:
+        if repaired > 0:
             backup = shard_path.with_suffix(".jsonl.bak")
             shutil.copy2(shard_path, backup)
             tmp.replace(shard_path)
