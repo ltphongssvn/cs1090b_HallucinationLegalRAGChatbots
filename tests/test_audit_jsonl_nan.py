@@ -193,7 +193,7 @@ class TestRepairShard:
     def test_repair_replaces_nan_with_null(self, tmp_path):
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
-        _, repaired = repair_shard(shard, dry_run=False)
+        _, repaired, _ = repair_shard(shard, dry_run=False)
         assert repaired == 1
         obj = json.loads(shard.read_text(encoding="utf-8"))
         assert obj["case_name"] is None
@@ -208,7 +208,7 @@ class TestRepairShard:
         shard = tmp_path / "s.jsonl"
         original = '{"id": "0", "case_name": "Smith v. Jones"}\n'
         shard.write_text(original, encoding="utf-8")
-        _, repaired = repair_shard(shard, dry_run=False)
+        _, repaired, _ = repair_shard(shard, dry_run=False)
         assert repaired == 0
         assert shard.read_text(encoding="utf-8") == original
 
@@ -746,7 +746,7 @@ class TestRepairShardMalformedLine:
         malformed = "not valid json at all\n"
         good = json.dumps({"id": "1"}) + "\n"
         shard.write_text(malformed + good, encoding="utf-8")
-        total, repaired = repair_shard(shard, dry_run=False)
+        total, repaired, _ = repair_shard(shard, dry_run=False)
         assert total == 2
         assert repaired == 0
         lines = shard.read_text().splitlines()
@@ -971,8 +971,8 @@ class TestRepairIdempotency:
     def test_repair_twice_changes_zero_lines_second_pass(self, tmp_path):
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0", "case_name": NaN, "score": Infinity}\n')
-        _, first = repair_shard(shard, dry_run=False)
-        _, second = repair_shard(shard, dry_run=False)
+        _, first, _ = repair_shard(shard, dry_run=False)
+        _, second, _ = repair_shard(shard, dry_run=False)
         assert first == 1
         assert second == 0
 
