@@ -1341,6 +1341,7 @@ class TestWandbTable:
     def test_log_health_to_wandb_logs_field_table(self, monkeypatch):
         monkeypatch.setenv("WANDB_MODE", "offline")
         import unittest.mock
+
         from scripts.audit_jsonl_nan import log_health_to_wandb
         logged = {}
         with unittest.mock.patch("wandb.init") as mock_init:
@@ -1372,6 +1373,7 @@ class TestRepairEfficacy:
 class TestTelemetryLevel:
     def test_main_accepts_telemetry_level_flag(self, tmp_path, monkeypatch):
         import sys
+
         from scripts.audit_jsonl_nan import main
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
@@ -1382,6 +1384,7 @@ class TestTelemetryLevel:
 
     def test_telemetry_level_detailed_accepted(self, tmp_path, monkeypatch):
         import sys
+
         from scripts.audit_jsonl_nan import main
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
@@ -1394,6 +1397,7 @@ class TestTelemetryLevel:
 class TestFailUnder:
     def test_main_accepts_fail_under_flag(self, tmp_path, monkeypatch):
         import sys
+
         from scripts.audit_jsonl_nan import main
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0"}\n')
@@ -1404,6 +1408,7 @@ class TestFailUnder:
 
     def test_fail_under_raises_on_contaminated_dataset(self, tmp_path, monkeypatch):
         import sys
+
         from scripts.audit_jsonl_nan import main
         shard = tmp_path / "s.jsonl"
         # 50% contaminated
