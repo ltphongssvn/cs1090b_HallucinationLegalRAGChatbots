@@ -2,6 +2,7 @@
 Telemetry contract tests for scripts/audit_jsonl_nan.py
 Tests W&B payload mapping, lazy import guard, and job_type tagging.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -34,8 +35,7 @@ class TestWandbPayloadMapping:
             mock_run = MagicMock()
             mock_run.log = lambda d: logged.update(d)
             mock_init.return_value = mock_run
-            h = DatasetHealth(1000, 50, 1, 5, {"case_name": 50}, ["s.jsonl"],
-                              nonfinite_lines=50, decode_error_lines=5)
+            h = DatasetHealth(1000, 50, 1, 5, {"case_name": 50}, ["s.jsonl"], nonfinite_lines=50, decode_error_lines=5)
             log_health_to_wandb(h, project="test")
         assert "data/nonfinite_lines" in logged
         assert "data/decode_error_lines" in logged
@@ -52,14 +52,17 @@ class TestWandbPayloadMapping:
 
 class TestLazyImportGuard:
     def test_graceful_when_wandb_missing(self, caplog):
-        import sys
         import importlib
+        import sys
+
         # temporarily hide wandb
         real_wandb = sys.modules.get("wandb")
         sys.modules["wandb"] = None  # type: ignore
         try:
             import importlib
+
             import scripts.audit_jsonl_nan as m
+
             importlib.reload(m)
             # should not raise
             h = DatasetHealth(100, 0, 0, 5, {}, [])
