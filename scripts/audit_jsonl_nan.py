@@ -541,8 +541,8 @@ def audit_dataset(
 def _repair_shard_task(args: tuple[Path, bool]) -> tuple[str, int, int]:
     """Worker function for parallel repair — must be picklable (module-level)."""
     shard_path, dry_run = args
-    total, repaired = repair_shard(shard_path, dry_run=dry_run)
-    return shard_path.name, total, repaired
+    total, repaired, remaining_sentinel = repair_shard(shard_path, dry_run=dry_run)
+    return shard_path.name, total, repaired, remaining_sentinel
 
 
 def repair_dataset(
