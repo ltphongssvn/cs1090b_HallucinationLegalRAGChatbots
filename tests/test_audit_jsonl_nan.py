@@ -1286,14 +1286,16 @@ class TestRepairShardDryRunNoIO:
     def test_dry_run_does_not_write_tmp_file(self, tmp_path):
         shard = tmp_path / "s.jsonl"
         shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
-        tmp = shard.with_suffix(".jsonl.tmp")
         # patch Path.open to detect if tmp is opened for writing
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
+
         opened_paths = []
         original_open = shard.__class__.open
+
         def tracking_open(self, *args, **kwargs):
             opened_paths.append((str(self), args, kwargs))
             return original_open(self, *args, **kwargs)
+
         with patch.object(shard.__class__, "open", tracking_open):
             repair_shard(shard, dry_run=True)
         tmp_writes = [p for p, a, k in opened_paths if "tmp" in p and "w" in str(a)]
