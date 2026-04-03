@@ -327,7 +327,7 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
       "strict"  — raises UnicodeDecodeError on first corrupt byte, counted
                   as decode_error so gate_verdict can surface it.
     """
-    total = nan_lines = nonfinite = sentinel = decode_err = 0
+    total = nan_lines = nonfinite = sentinel = decode_error_count = 0
     nan_fields: dict[str, int] = {}
     try:
         with shard_path.open(encoding="utf-8", errors=encoding_errors) as fh:
@@ -340,7 +340,7 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     nan_lines += 1
-                    decode_err += 1
+                    decode_error_count += 1
                     continue
                 fields = _nan_fields(obj)
                 if fields:
@@ -354,7 +354,7 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
     except UnicodeDecodeError as exc:
         log.error("Encoding error in %s: %s", shard_path.name, exc)
         nan_lines += 1
-        decode_err += 1
+        decode_error_count += 1
     except Exception as exc:
         log.error("Error reading %s: %s", shard_path.name, exc)
     return ShardHealth(
@@ -364,7 +364,7 @@ def _audit_shard_impl(shard_path: Path, encoding_errors: str) -> ShardHealth:
         nan_fields=nan_fields,
         nonfinite_lines=nonfinite,
         string_sentinel_lines=sentinel,
-        decode_error_lines=decode_err,
+        decode_error_lines=decode_error_count,
     )
 
 
