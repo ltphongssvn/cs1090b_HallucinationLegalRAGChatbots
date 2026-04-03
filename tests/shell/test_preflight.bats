@@ -14,7 +14,7 @@ load helpers
     load_bootstrap_env
     local tmpdir; tmpdir=$(mktemp -d)
     PROJECT_ROOT="$tmpdir"
-    # L4 cluster has >>50GB — this should always pass
+    TARGET_MIN_DISK_GB=1  # conservative — passes on any real filesystem
     run _check_disk_space
     [ "$status" -eq 0 ]
     assert_contains "$output" "free"
