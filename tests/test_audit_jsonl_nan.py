@@ -1464,7 +1464,7 @@ class TestRepairBreakdown:
     def test_repair_shard_returns_typed_repair_counts(self, tmp_path):
         shard = tmp_path / "s.jsonl"
         shard.write_text(
-            '{"id": "0", "case_name": NaN}\n'   # numeric — repaired
+            '{"id": "0", "case_name": NaN}\n'  # numeric — repaired
             '{"id": "1", "case_name": "NaN"}\n',  # string sentinel — not repaired
             encoding="utf-8",
         )
@@ -1494,6 +1494,7 @@ class TestTelemetryConfigSnapshot:
     def test_log_health_to_wandb_includes_config_snapshot(self, monkeypatch):
         monkeypatch.setenv("WANDB_MODE", "offline")
         import unittest.mock
+
         from scripts.audit_jsonl_nan import log_health_to_wandb
 
         logged = {}
