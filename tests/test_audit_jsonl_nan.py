@@ -1193,3 +1193,60 @@ class TestRepairDatasetParallel:
         for i in range(4):
             obj = json.loads((tmp_path / f"s{i}.jsonl").read_text())
             assert obj["case_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# RED: Hypothesis property test for repair idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestRepairIdempotencyProperty:
+    def test_repair_idempotent_on_arbitrary_valid_jsonl(self, tmp_path):
+        from hypothesis import given, settings
+        from hypothesis import strategies as st
+        from hypothesis.strategies import composite
+
+        @composite
+        def valid_jsonl(draw):
+            keys = draw(st.lists(st.text(min_size=1, max_size=10), min_size=1, max_size=5, unique=True))
+            vals = draw(
+                st.lists(
+                    st.one_of(st.text(max_size=20), st.integers(), st.none()), min_size=len(keys), max_size=len(keys)
+                )
+            )
+            return json.dumps(dict(zip(keys, vals)))
+
+        @given(valid_jsonl())
+        @settings(max_examples=100)
+        def inner(line):
+            shard = tmp_path / "s.jsonl"
+            shard.write_text(line + "\n", encoding="utf-8")
+            repair_shard(shard, dry_run=False)
+            after_first = shard.read_text()
+            repair_shard(shard, dry_run=False)
+            after_second = shard.read_text()
+            assert after_first == after_second
+
+        inner()
+
+
+# ---------------------------------------------------------------------------
+# RED: audit_dataset map_fn injection to avoid Pool in tests
+# ---------------------------------------------------------------------------
+
+
+class TestAuditDatasetMapFn:
+    def test_audit_dataset_accepts_map_fn(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0", "case_name": "Smith v. Jones"}) + "\n")
+        result = audit_dataset(tmp_path, map_fn=map)
+        assert isinstance(result, DatasetHealth)
+
+    def test_audit_dataset_map_fn_bypasses_pool(self, tmp_path):
+        import unittest.mock
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(json.dumps({"id": "0"}) + "\n")
+        with unittest.mock.patch("multiprocessing.Pool") as mock_pool:
+            audit_dataset(tmp_path, map_fn=map)
+            assert not mock_pool.called
