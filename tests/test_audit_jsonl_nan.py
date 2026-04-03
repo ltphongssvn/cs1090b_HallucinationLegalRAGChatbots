@@ -1420,3 +1420,95 @@ class TestFailUnder:
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# RED: #8 decode errors must dominate verdict over advisory contamination
+# ---------------------------------------------------------------------------
+
+
+class TestSeverityHierarchy:
+    def test_decode_errors_dominate_advisory_contamination(self):
+        h = DatasetHealth(
+            total_lines=100,
+            nan_lines=10,
+            nan_shards=1,
+            total_shards=5,
+            nan_fields={"case_name": 5},  # advisory only
+            contaminated_shards=["s.jsonl"],
+            nonfinite_lines=5,
+            string_sentinel_lines=0,
+            decode_error_lines=5,  # decode errors present
+        )
+        assert "PARSE_FAILURE" in h.gate_verdict()
+
+    def test_advisory_only_no_decode_errors_still_repairable(self):
+        h = DatasetHealth(
+            total_lines=100,
+            nan_lines=5,
+            nan_shards=1,
+            total_shards=5,
+            nan_fields={"case_name": 5},
+            contaminated_shards=["s.jsonl"],
+            decode_error_lines=0,
+        )
+        assert "REPAIRABLE" in h.gate_verdict()
+
+
+# ---------------------------------------------------------------------------
+# RED: #9 repair_shard returns breakdown of numeric vs sentinel repairs
+# ---------------------------------------------------------------------------
+
+
+class TestRepairBreakdown:
+    def test_repair_shard_returns_typed_repair_counts(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text(
+            '{"id": "0", "case_name": NaN}\n'   # numeric — repaired
+            '{"id": "1", "case_name": "NaN"}\n',  # string sentinel — not repaired
+            encoding="utf-8",
+        )
+        result = repair_shard(shard, dry_run=False)
+        # must return at minimum (total, repaired_numeric, remaining_sentinel)
+        assert len(result) >= 3, "repair_shard must return typed repair breakdown"
+
+    def test_repair_shard_numeric_count_correct(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": NaN}\n', encoding="utf-8")
+        total, repaired_numeric, *_ = repair_shard(shard, dry_run=False)
+        assert repaired_numeric == 1
+
+    def test_repair_shard_sentinel_not_counted_as_repaired(self, tmp_path):
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0", "case_name": "NaN"}\n', encoding="utf-8")
+        total, repaired_numeric, *_ = repair_shard(shard, dry_run=False)
+        assert repaired_numeric == 0
+
+
+# ---------------------------------------------------------------------------
+# RED: #11 resolved config snapshot in W&B telemetry
+# ---------------------------------------------------------------------------
+
+
+class TestTelemetryConfigSnapshot:
+    def test_log_health_to_wandb_includes_config_snapshot(self, monkeypatch):
+        monkeypatch.setenv("WANDB_MODE", "offline")
+        import unittest.mock
+        from scripts.audit_jsonl_nan import log_health_to_wandb
+
+        logged = {}
+        with unittest.mock.patch("wandb.init") as mock_init:
+            mock_run = unittest.mock.MagicMock()
+            mock_run.log = lambda d: logged.update(d)
+            mock_init.return_value = mock_run
+            h = DatasetHealth(100, 0, 0, 5, {}, [])
+            log_health_to_wandb(
+                h,
+                project="test",
+                advisory=frozenset({"case_name"}),
+                strict_encoding=False,
+                workers=4,
+            )
+        assert "config/advisory_fields" in logged
+        assert "config/strict_encoding" in logged
+        assert "config/workers" in logged
