@@ -1101,6 +1101,42 @@ cs1090b_HallucinationLegalRAGChatbots/
 ---
 GPU pipeline comparing retrieval architectures (TF-IDF, CNN, LSTM, BERT bi-encoder, KG-augmented) to reduce hallucination in legal RAG chatbots.
 **Hardware:** 4x NVIDIA L4/A10G GPUs | Python 3.11.9 | torch 2.0.1+cu117 | CUDA 11.7 (driver 12.8)
+---
+## Research-Pipeline Infrastructure
+
+| Component | Module | Purpose |
+|-----------|--------|---------|
+| Reproducibility | `src/repro.py` | Seeds, deterministic flags, env loading via `.env` |
+| W&B Telemetry | `src/wandb_logger.py` | `log_run_start`, `log_dataset_stats`, `log_quality_signals` |
+| Manifest & Provenance | `src/manifest.py` | Shard checksums (SHA256), git SHA, `write_manifest` / `read_manifest` |
+| Pipeline Orchestration | `src/pipeline.py` | `run_pipeline`, `validate_pipeline` |
+| Data Audit | `scripts/audit_jsonl_nan.py` | NaN/Infinity detection, semantic repair, Polars validation, W&B provenance logging (`git_sha`, `python_version`, `polars_version`) |
+
+### Verified functional (2026-04)
+```python
+from src.repro import configure
+from src.wandb_logger import log_run_start, log_dataset_stats
+from src.manifest import write_manifest, read_manifest
+from src.pipeline import run_pipeline, validate_pipeline
+```
+
+### Data audit CLI
+```bash
+# Audit with schema-driven gating (2026 policy)
+uv run python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appellate_bulk --schema-advisory --json
+
+# Repair in parallel with Polars post-validation
+uv run python scripts/audit_jsonl_nan.py --fix --parallel-repair --validate --workers 8
+
+# Strict encoding audit (surfaces corrupt bytes)
+uv run python scripts/audit_jsonl_nan.py --strict-encoding --emit-shard-ids
+```
+
+### Config precedence
+
+`YAML (--config)` > `env vars (AUDIT_*)` > `defaults`
+
+---
 ## Quick Start
 ```bash
 # Clone and install hooks (required once)
