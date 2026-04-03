@@ -538,7 +538,7 @@ def audit_dataset(
     return sum(results, start=DatasetHealth.zero(total_shards=len(shards)))
 
 
-def _repair_shard_task(args: tuple[Path, bool]) -> tuple[str, int, int]:
+def _repair_shard_task(args: tuple[Path, bool]) -> tuple[str, int, int, int]:
     """Worker function for parallel repair — must be picklable (module-level)."""
     shard_path, dry_run = args
     total, repaired, remaining_sentinel = repair_shard(shard_path, dry_run=dry_run)
@@ -572,7 +572,7 @@ def repair_dataset(
             for future in tqdm(
                 as_completed(futures), total=len(futures), unit="shard", desc="repairing"
             ):
-                _, repaired, _ = future.result()
+                _, repaired, _, _ = future.result()
                 total_repaired += repaired
     else:
         for shard in tqdm(shards, unit="shard", desc="repairing"):
