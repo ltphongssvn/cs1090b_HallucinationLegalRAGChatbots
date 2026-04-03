@@ -466,6 +466,7 @@ def audit_dataset(
     input_dir: Path,
     workers: int | None = None,
     strict_encoding: bool = False,
+    map_fn: Any | None = None,
 ) -> DatasetHealth:
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
@@ -478,15 +479,20 @@ def audit_dataset(
 
     shard_fn = audit_shard_strict if strict_encoding else audit_shard
 
-    with multiprocessing.Pool(processes=ncpus) as pool:
-        results = list(
-            tqdm(
-                pool.imap(shard_fn, shards),
-                total=len(shards),
-                unit="shard",
-                desc="auditing",
+    if map_fn is not None:
+        # Injected map function (e.g. builtins.map) bypasses Pool — enables
+        # synchronous execution in tests without multiprocessing overhead.
+        results = list(tqdm(map_fn(shard_fn, shards), total=len(shards), unit="shard", desc="auditing"))
+    else:
+        with multiprocessing.Pool(processes=ncpus) as pool:
+            results = list(
+                tqdm(
+                    pool.imap(shard_fn, shards),
+                    total=len(shards),
+                    unit="shard",
+                    desc="auditing",
+                )
             )
-        )
 
     return sum(results, start=DatasetHealth.zero(total_shards=len(shards)))
 
