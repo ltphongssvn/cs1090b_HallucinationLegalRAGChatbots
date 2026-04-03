@@ -1300,3 +1300,33 @@ class TestRepairShardDryRunNoIO:
             repair_shard(shard, dry_run=True)
         tmp_writes = [p for p, a, k in opened_paths if "tmp" in p and "w" in str(a)]
         assert len(tmp_writes) == 0, f"tmp file was opened for writing in dry-run: {tmp_writes}"
+
+
+# ---------------------------------------------------------------------------
+# RED: config precedence contract — YAML > env > defaults
+# ---------------------------------------------------------------------------
+
+
+class TestConfigPrecedence:
+    def test_yaml_beats_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AUDIT_WORKERS", "4")
+        cfg_file = tmp_path / "audit.yaml"
+        cfg_file.write_text("workers: 8\n")
+        from scripts.audit_jsonl_nan import load_audit_config
+
+        cfg = load_audit_config(cfg_file)
+        assert cfg.workers == 8
+
+    def test_env_beats_default(self, monkeypatch):
+        monkeypatch.setenv("AUDIT_WORKERS", "3")
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        cfg = AuditSettings()
+        assert cfg.workers == 3
+
+    def test_default_used_when_no_env_no_yaml(self, monkeypatch):
+        monkeypatch.delenv("AUDIT_WORKERS", raising=False)
+        from scripts.audit_jsonl_nan import AuditSettings
+
+        cfg = AuditSettings()
+        assert cfg.workers == 4
