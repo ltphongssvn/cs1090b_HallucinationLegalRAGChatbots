@@ -1115,3 +1115,55 @@ class TestDeriveAdvisoryFromSchema:
         advisory = derive_advisory_from_schema(OpinionRecord)
         h = DatasetHealth(100, 5, 1, 5, {"docket_id": 5}, ["s.jsonl"])
         assert "REPAIRABLE" in h.gate_verdict(advisory=advisory)
+
+
+# ---------------------------------------------------------------------------
+# RED: _walk generic traversal replaces 3 duplicate recursive walkers
+# ---------------------------------------------------------------------------
+
+
+class TestWalkHelper:
+    def test_walk_importable(self):
+        from scripts.audit_jsonl_nan import _walk
+
+        assert callable(_walk)
+
+    def test_walk_float_nan(self):
+        import math
+
+        from scripts.audit_jsonl_nan import _walk
+
+        assert _walk(float("nan"), lambda v: isinstance(v, float) and math.isnan(v))
+
+    def test_walk_nested_dict(self):
+        import math
+
+        from scripts.audit_jsonl_nan import _walk
+
+        assert _walk({"a": {"b": float("nan")}}, lambda v: isinstance(v, float) and math.isnan(v))
+
+    def test_walk_nested_list(self):
+        import math
+
+        from scripts.audit_jsonl_nan import _walk
+
+        assert _walk([1, [2, float("nan")]], lambda v: isinstance(v, float) and math.isnan(v))
+
+    def test_walk_clean_returns_false(self):
+        from scripts.audit_jsonl_nan import _walk
+
+        assert not _walk({"a": "Smith v. Jones"}, lambda v: isinstance(v, float))
+
+    def test_has_nan_via_walk_matches_original(self):
+        import math
+
+        from scripts.audit_jsonl_nan import _STRING_NAN_VALUES, _has_nan, _walk
+
+        def pred(v: object) -> bool:
+            return (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) or (  # type: ignore[arg-type]
+                isinstance(v, str) and v in _STRING_NAN_VALUES  # type: ignore[arg-type]
+            )
+
+        cases = [float("nan"), "NaN", {"a": float("inf")}, [1, "Infinity"], {"a": "ok"}]
+        for c in cases:
+            assert _walk(c, pred) == _has_nan(c), f"mismatch: {c}"
