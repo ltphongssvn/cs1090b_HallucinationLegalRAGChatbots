@@ -706,7 +706,11 @@ def log_health_to_wandb(
     """
     import subprocess
 
-    import wandb
+    try:
+        import wandb
+    except ImportError:
+        log.warning("wandb not installed — skipping telemetry emission")
+        return
 
     try:
         git_sha = subprocess.check_output(
@@ -721,7 +725,7 @@ def log_health_to_wandb(
     except Exception:
         polars_version = "unknown"
 
-    run = wandb.init(project=project, name=run_name)
+    run = wandb.init(project=project, name=run_name, job_type="data-quality-gate")
 
     metrics: dict[str, Any] = {
         "config/advisory_fields": sorted(advisory or _DEFAULT_ADVISORY_FIELDS),
