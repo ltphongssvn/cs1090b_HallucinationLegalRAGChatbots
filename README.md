@@ -1135,7 +1135,61 @@ uv run python scripts/audit_jsonl_nan.py --strict-encoding --emit-shard-ids
 ### Config precedence
 
 `YAML (--config)` > `env vars (AUDIT_*)` > `defaults`
+---
 
+## Data Audit — `scripts/audit_jsonl_nan.py`
+
+### Run on real data (2026-04, 159 shards)
+```bash
+uv run python scripts/audit_jsonl_nan.py \
+  --input-dir data/raw/cl_federal_appellate_bulk \
+  --json 2>/dev/null
+```
+```json
+{
+  "total_lines": 1465484,
+  "nan_lines": 0,
+  "nonfinite_lines": 0,
+  "string_sentinel_lines": 0,
+  "decode_error_lines": 0,
+  "nan_shards": 0,
+  "total_shards": 159,
+  "clean_pct": 100.0,
+  "nan_fields": {},
+  "gate_verdict": "CLEAN",
+  "contaminated_shards": []
+}
+```
+
+### Gate verdicts
+
+| Verdict | Meaning |
+|---------|---------|
+| `CLEAN` | No contamination — pipeline unblocked |
+| `REPAIRABLE` | NaN only in advisory fields (`case_name`, `raw_text`, `cleaning_flags`) — use `--fix` |
+| `HARD_FAILURE` | NaN in required fields — blocks Stage 3 |
+| `PARSE_FAILURE` | Malformed JSON with no field mapping — manual inspection required |
+
+### Key CLI flags
+```bash
+# Default audit (text output)
+uv run python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appellate_bulk
+
+# JSON output for CI parsing
+uv run python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appellate_bulk --json
+
+# Schema-driven 2026 gating (Optional fields only = advisory)
+uv run python scripts/audit_jsonl_nan.py --schema-advisory --json
+
+# Repair in parallel + Polars post-validation
+uv run python scripts/audit_jsonl_nan.py --fix --parallel-repair --validate --workers 8
+
+# Strict encoding audit (surfaces corrupt bytes)
+uv run python scripts/audit_jsonl_nan.py --strict-encoding --emit-shard-ids
+
+# Log results to W&B (offline safe)
+uv run python scripts/audit_jsonl_nan.py --wandb
+```
 ---
 ## Quick Start
 ```bash
