@@ -254,6 +254,13 @@ class DatasetHealth:
 
         if self.nan_lines == 0:
             return "CLEAN"
+        # Severity hierarchy: decode errors dominate advisory contamination.
+        # Even if nan_fields are all advisory, decode errors indicate structural
+        # damage that cannot be safely classified as REPAIRABLE.
+        if self.decode_error_lines > 0 and not self.nan_fields:
+            return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
+        if self.decode_error_lines > 0:
+            return "PARSE_FAILURE — decode errors present alongside contamination; manual inspection required"
         if not self.nan_fields:
             return "PARSE_FAILURE — malformed JSON lines; manual inspection required"
         if all(f in _advisory for f in self.nan_fields):
@@ -433,13 +440,19 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
     return repaired + "\n", repaired != line.rstrip("\n")
 
 
-def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
+def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int, int]:
     """
     Repair bare NaN/Infinity -> null. Semantic, quote-context safe, streaming.
     dry_run=True: scan only — no tmp file written (avoids I/O on ~422MB shards).
-    Atomic rename; .bak backup; idempotent. Returns (total_lines, repaired).
+    Atomic rename; .bak backup; idempotent.
+    Returns (total_lines, repaired_numeric, remaining_sentinel).
+    repaired_numeric: lines where bare NaN/Infinity was replaced with null.
+    remaining_sentinel: lines where string "NaN" sentinel remains (intentional —
+      string sentinels are valid JSON values and not modified by repair).
     """
     total, repaired = 0, 0
+
+    remaining_sentinel = 0
 
     if dry_run:
         # dry-run: scan only — skip tmp write to avoid wasted I/O on ~422MB shards
@@ -450,9 +463,16 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
                     _, changed = _semantic_repair_line(raw_line.rstrip("\n"))
                     if changed:
                         repaired += 1
+                    else:
+                        try:
+                            obj = json.loads(raw_line)
+                            if _is_string_sentinel(obj):
+                                remaining_sentinel += 1
+                        except json.JSONDecodeError:
+                            pass
                 except json.JSONDecodeError:
                     pass
-        return total, repaired
+        return total, repaired, remaining_sentinel
 
     tmp = shard_path.with_suffix(".jsonl.tmp")
     try:
@@ -475,7 +495,7 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     finally:
         if tmp.exists():
             tmp.unlink()
-    return total, repaired
+    return total, repaired, remaining_sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -552,11 +572,11 @@ def repair_dataset(
             for future in tqdm(
                 as_completed(futures), total=len(futures), unit="shard", desc="repairing"
             ):
-                _, _, repaired = future.result()
+                _, repaired, _ = future.result()
                 total_repaired += repaired
     else:
         for shard in tqdm(shards, unit="shard", desc="repairing"):
-            _, repaired = repair_shard(shard, dry_run=dry_run)
+            _, repaired, _ = repair_shard(shard, dry_run=dry_run)
             total_repaired += repaired
             if validate and not dry_run:
                 ok, err = validate_shard_polars(shard)
@@ -670,6 +690,8 @@ def log_health_to_wandb(
     run_name: str | None = None,
     advisory: frozenset[str] | None = None,
     telemetry_level: str = "summary",
+    strict_encoding: bool = False,
+    workers: int | None = None,
 ) -> None:
     """
     Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline).
@@ -702,6 +724,9 @@ def log_health_to_wandb(
     run = wandb.init(project=project, name=run_name)
 
     metrics: dict[str, Any] = {
+        "config/advisory_fields": sorted(advisory or _DEFAULT_ADVISORY_FIELDS),
+        "config/strict_encoding": strict_encoding,
+        "config/workers": workers or multiprocessing.cpu_count(),
         "data/total_lines": health.total_lines,
         "data/nan_lines": health.nan_lines,
         "data/nonfinite_lines": health.nonfinite_lines,
