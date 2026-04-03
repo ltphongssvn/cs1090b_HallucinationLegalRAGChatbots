@@ -12,6 +12,8 @@ Detection strategy:
     string_sentinel_lines, decode_error_lines for honest gate verdicts
   - audit_shard_strict(): errors="strict" surfaces encoding corruption
     that errors="replace" silently normalises (confirmed in testing 2026-04)
+  - _walk(obj, predicate): single recursive traversal helper shared by
+    _has_nan, _is_nonfinite, _is_string_sentinel — eliminates 3x DRY violation
 
 Repair strategy:
   - Semantic: json.loads (with parse_constant intercept) -> recursive
@@ -78,7 +80,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import Field
@@ -127,10 +129,6 @@ def derive_advisory_from_schema(schema_cls: type) -> frozenset[str]:
     This implements Dependency Inversion for data quality gating: policy
     depends on the schema abstraction (OpinionRecord) not on string literals.
     When new Optional fields are added, the advisory set updates automatically.
-
-    Example:
-        advisory = derive_advisory_from_schema(OpinionRecord)
-        verdict = health.gate_verdict(advisory=advisory)
     """
     hints = get_type_hints(schema_cls)
     return frozenset(
@@ -251,7 +249,6 @@ class DatasetHealth:
         advisory: frozenset of field names considered non-blocking.
           - Default: _DEFAULT_ADVISORY_FIELDS (backward compatible)
           - Schema-driven: derive_advisory_from_schema(OpinionRecord)
-            which returns only Optional fields — stricter 2026 policy.
         """
         _advisory = advisory or _DEFAULT_ADVISORY_FIELDS
 
@@ -268,7 +265,31 @@ class DatasetHealth:
 
 
 # ---------------------------------------------------------------------------
-# Detection helpers
+# Generic recursive traversal helper
+# ---------------------------------------------------------------------------
+
+
+def _walk(obj: Any, predicate: Callable[[Any], bool]) -> bool:
+    """
+    Generic recursive traversal over arbitrary JSON-like objects.
+    Returns True as soon as predicate(node) is True for any node.
+
+    Replaces three identical recursive walkers (_has_nan, _is_nonfinite,
+    _is_string_sentinel) that shared traversal logic with only the leaf
+    predicate differing — a DRY violation caught in 2026-04 review.
+    Single traversal pass per call; short-circuits on first match.
+    """
+    if predicate(obj):
+        return True
+    if isinstance(obj, dict):
+        return any(_walk(v, predicate) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_walk(v, predicate) for v in obj)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Detection helpers — all use _walk to eliminate traversal duplication
 # ---------------------------------------------------------------------------
 
 
@@ -277,15 +298,12 @@ def _has_nan(value: Any) -> bool:
     Recursively detect float nan/inf OR stringified NaN variants.
     Only exact membership in _STRING_NAN_VALUES — no substring heuristics.
     """
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return True
-    if isinstance(value, str) and value in _STRING_NAN_VALUES:
-        return True
-    if isinstance(value, dict):
-        return any(_has_nan(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_has_nan(v) for v in value)
-    return False
+    def _predicate(v: Any) -> bool:
+        return (isinstance(v, float) and (math.isnan(v) or math.isinf(v))) or (
+            isinstance(v, str) and v in _STRING_NAN_VALUES
+        )
+
+    return _walk(value, _predicate)
 
 
 def _nan_fields(obj: dict[str, Any]) -> list[str]:
@@ -295,24 +313,18 @@ def _nan_fields(obj: dict[str, Any]) -> list[str]:
 
 def _is_nonfinite(value: Any) -> bool:
     """True only for float nan/inf — not string sentinels."""
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-        return True
-    if isinstance(value, dict):
-        return any(_is_nonfinite(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_is_nonfinite(v) for v in value)
-    return False
+    def _predicate(v: Any) -> bool:
+        return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
+
+    return _walk(value, _predicate)
 
 
 def _is_string_sentinel(value: Any) -> bool:
     """True only for string sentinel values — not float nan/inf."""
-    if isinstance(value, str) and value in _STRING_NAN_VALUES:
-        return True
-    if isinstance(value, dict):
-        return any(_is_string_sentinel(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_is_string_sentinel(v) for v in value)
-    return False
+    def _predicate(v: Any) -> bool:
+        return isinstance(v, str) and v in _STRING_NAN_VALUES
+
+    return _walk(value, _predicate)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +401,7 @@ def validate_shard_polars(shard_path: Path) -> tuple[bool, str | None]:
     """Validate shard with Polars read_ndjson. Returns (ok, error_or_None)."""
     try:
         import polars as pl
+
         pl.read_ndjson(shard_path)
         return True, None
     except Exception as exc:
@@ -417,6 +430,7 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
     parse_constant intercepts bare NaN/Infinity; _replace_nonfinite nullifies.
     Returns (repaired_line, was_changed). Raises JSONDecodeError if malformed.
     """
+
     def _intercept(token: str) -> float:
         return float("nan") if "nan" in token.lower() else float("inf")
 
@@ -434,8 +448,9 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     total, repaired = 0, 0
     tmp = shard_path.with_suffix(".jsonl.tmp")
     try:
-        with shard_path.open(encoding="utf-8", errors="replace") as fh, \
-             tmp.open("w", encoding="utf-8") as out:
+        with shard_path.open(encoding="utf-8", errors="replace") as fh, tmp.open(
+            "w", encoding="utf-8"
+        ) as out:
             for raw_line in fh:
                 total += 1
                 try:
@@ -510,7 +525,8 @@ def repair_dataset(
             if not ok:
                 log.error(
                     "Post-repair Polars validation FAILED for %s: %s",
-                    shard.name, err,
+                    shard.name,
+                    err,
                 )
             else:
                 log.debug("Post-repair Polars validation OK: %s", shard.name)
@@ -638,32 +654,31 @@ def main() -> None:
         "--dry-run", action="store_true", help="With --fix: preview without writing."
     )
     parser.add_argument(
-        "--validate", action="store_true",
-        help="With --fix: run Polars validation on each repaired shard."
+        "--validate",
+        action="store_true",
+        help="With --fix: run Polars validation on each repaired shard.",
     )
     parser.add_argument(
-        "--strict-encoding", action="store_true",
-        help="Use errors='strict' to surface encoding corruption (default: replace)."
+        "--strict-encoding",
+        action="store_true",
+        help="Use errors='strict' to surface encoding corruption (default: replace).",
     )
     parser.add_argument(
-        "--schema-advisory", action="store_true",
+        "--schema-advisory",
+        action="store_true",
         help=(
             "Derive advisory fields from OpinionRecord schema (Optional fields only). "
-            "Stricter 2026 policy: required fields with NaN become HARD_FAILURE. "
-            "Default policy keeps case_name/raw_text/cleaning_flags as REPAIRABLE."
+            "Stricter 2026 policy: required fields with NaN become HARD_FAILURE."
         ),
     )
     parser.add_argument(
-        "--workers", type=int, default=None,
-        help="Worker processes (default: cpu_count)."
+        "--workers", type=int, default=None, help="Worker processes (default: cpu_count)."
     )
     parser.add_argument(
-        "--wandb", action="store_true",
-        help="Log health metrics to Weights & Biases."
+        "--wandb", action="store_true", help="Log health metrics to Weights & Biases."
     )
     parser.add_argument(
-        "--config", type=Path, default=None,
-        help="YAML config for advisory_fields etc."
+        "--config", type=Path, default=None, help="YAML config for advisory_fields etc."
     )
     args = parser.parse_args()
 
@@ -671,6 +686,7 @@ def main() -> None:
     advisory: frozenset[str] | None = None
     if args.schema_advisory:
         from src.schemas import OpinionRecord
+
         advisory = derive_advisory_from_schema(OpinionRecord)
         log.info("Schema-driven advisory policy: %s", sorted(advisory))
 
