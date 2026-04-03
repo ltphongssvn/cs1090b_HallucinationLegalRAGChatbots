@@ -1250,3 +1250,28 @@ class TestAuditDatasetMapFn:
         with unittest.mock.patch("multiprocessing.Pool") as mock_pool:
             audit_dataset(tmp_path, map_fn=map)
             assert not mock_pool.called
+
+
+# ---------------------------------------------------------------------------
+# RED: W&B provenance — git sha, python version, polars version
+# ---------------------------------------------------------------------------
+
+
+class TestWandbProvenance:
+    def test_log_health_to_wandb_includes_provenance(self, monkeypatch):
+        monkeypatch.setenv("WANDB_MODE", "offline")
+        import unittest.mock
+
+        from scripts.audit_jsonl_nan import log_health_to_wandb
+
+        logged = {}
+        with unittest.mock.patch("wandb.init") as mock_init:
+            mock_run = unittest.mock.MagicMock()
+            mock_run.log = lambda d: logged.update(d)
+            mock_init.return_value = mock_run
+            h = DatasetHealth(100, 0, 0, 5, {}, [])
+            log_health_to_wandb(h, project="test")
+
+        assert "provenance/git_sha" in logged
+        assert "provenance/python_version" in logged
+        assert "provenance/polars_version" in logged
