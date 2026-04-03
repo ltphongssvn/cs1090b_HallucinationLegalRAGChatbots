@@ -24,14 +24,15 @@ Repair strategy:
   - Streams line-by-line into .jsonl.tmp then atomic rename — peak RAM
     is O(1) regardless of shard size (shards reach ~422 MB on this dataset).
   - Repair is idempotent: a clean shard touched twice changes 0 lines.
-  - repair_dataset(parallel_repair=True): mirrors audit_dataset's worker
-    pool; per-shard atomicity guaranteed by .tmp -> rename strategy.
+  - dry_run=True scans only — no tmp file written, no I/O on large shards.
+  - repair_dataset(parallel_repair=True): mirrors audit_dataset worker pool.
 
 Post-repair validation:
   - validate_shard_polars(): runs pl.read_ndjson() on repaired shard to
     confirm the actual downstream consumer accepts the output.
   - Polars rejects bare NaN (TapeError), accepts null after repair
     (confirmed in testing 2026-04).
+  - repair_efficacy(): re-audits after repair and emits before/after diff.
 
 Aggregation:
   - DatasetHealth.zero(total_shards) + ShardHealth via __add__ replaces
@@ -39,20 +40,22 @@ Aggregation:
     makes aggregation testable in isolation.
 
 Schema-driven advisory policy:
-  - derive_advisory_from_schema(dataclass): returns frozenset of field
-    names typed Optional[...] in the schema. Only Optional fields can be
-    REPAIRABLE; required fields with NaN are HARD_FAILURE.
+  - derive_advisory_from_schema(dataclass): returns frozenset of Optional
+    fields only. Required fields with NaN become HARD_FAILURE.
   - --schema-advisory CLI flag enables strict 2026 schema-native gating.
-  - Default advisory (_DEFAULT_ADVISORY_FIELDS) preserved for backward
-    compatibility with existing pipelines.
+
+Telemetry (production-grade research instrumentation):
+  - log_health_to_wandb(): logs scalar summaries + per-field W&B Table +
+    provenance (git_sha, python_version, polars_version).
+  - --telemetry-level summary|detailed controls verbosity.
+  - --fail-under FLOAT: exits non-zero if clean_pct < threshold (CI gate).
+  - repair_efficacy(): before/after diff for repair observability.
 
 Configuration:
   - AuditSettings (pydantic-settings): advisory_fields, workers, etc.
     Override via AUDIT_* env vars.
   - load_audit_config(): load advisory_fields from a YAML file via OmegaConf.
-
-Telemetry:
-  - log_health_to_wandb(): log DatasetHealth fields to a W&B run (offline safe).
+  - Precedence: YAML (--config) > env (AUDIT_*) > defaults.
 
 Usage
 -----
@@ -69,6 +72,8 @@ Usage
     uv run python scripts/audit_jsonl_nan.py --fix --validate
     uv run python scripts/audit_jsonl_nan.py --strict-encoding
     uv run python scripts/audit_jsonl_nan.py --schema-advisory
+    uv run python scripts/audit_jsonl_nan.py --telemetry-level detailed
+    uv run python scripts/audit_jsonl_nan.py --fail-under 99.0
 """
 
 from __future__ import annotations
@@ -81,6 +86,7 @@ import math
 import multiprocessing
 import re
 import shutil
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,6 +165,7 @@ def load_audit_config(config_path: Path) -> AuditSettings:
     """
     Load advisory_fields (and other overrides) from a YAML file via OmegaConf,
     then merge into AuditSettings. Allows externalising policy from source.
+    Precedence: YAML kwargs > env vars (AUDIT_*) > defaults.
     """
     raw: DictConfig = OmegaConf.load(config_path)
     overrides: dict[str, Any] = OmegaConf.to_container(raw, resolve=True)  # type: ignore[assignment]
@@ -429,6 +436,7 @@ def _semantic_repair_line(line: str) -> tuple[str, bool]:
 def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int]:
     """
     Repair bare NaN/Infinity -> null. Semantic, quote-context safe, streaming.
+    dry_run=True: scan only — no tmp file written (avoids I/O on ~422MB shards).
     Atomic rename; .bak backup; idempotent. Returns (total_lines, repaired).
     """
     total, repaired = 0, 0
@@ -511,10 +519,7 @@ def audit_dataset(
 
 
 def _repair_shard_task(args: tuple[Path, bool]) -> tuple[str, int, int]:
-    """
-    Worker function for parallel repair — must be picklable (module-level).
-    Returns (shard_name, total_lines, repaired_lines).
-    """
+    """Worker function for parallel repair — must be picklable (module-level)."""
     shard_path, dry_run = args
     total, repaired = repair_shard(shard_path, dry_run=dry_run)
     return shard_path.name, total, repaired
@@ -529,11 +534,7 @@ def repair_dataset(
 ) -> None:
     """
     Repair all shards in input_dir.
-
-    parallel_repair=True: mirrors audit_dataset's worker pool via
-    ProcessPoolExecutor. Per-shard atomicity guaranteed by .tmp -> rename.
-    For 159 shards × ~5s each, parallel repair reduces wall time from
-    ~13 min (sequential) to ~2 min (8 workers).
+    parallel_repair=True: mirrors audit_dataset's worker pool via ProcessPoolExecutor.
     """
     shards = sorted(input_dir.glob("*.jsonl"))
     if not shards:
@@ -545,7 +546,6 @@ def repair_dataset(
     total_repaired = 0
 
     if parallel_repair:
-        # ProcessPoolExecutor + atomic rename: safe for concurrent shard repair
         tasks = [(s, dry_run) for s in shards]
         with ProcessPoolExecutor(max_workers=ncpus) as pool:
             futures = {pool.submit(_repair_shard_task, t): t[0] for t in tasks}
@@ -574,6 +574,33 @@ def repair_dataset(
         "Would repair" if dry_run else "Repaired",
         total_repaired,
     )
+
+
+def repair_efficacy(
+    input_dir: Path,
+    workers: int | None = None,
+) -> dict[str, Any]:
+    """
+    Measure repair efficacy by auditing before repair, repairing, then re-auditing.
+    Returns before/after DatasetHealth snapshots and lines_fixed count.
+    Enables before/after observability for research telemetry.
+    """
+    before = audit_dataset(input_dir, workers=workers, map_fn=map)
+    repair_dataset(input_dir, workers=workers)
+    after = audit_dataset(input_dir, workers=workers, map_fn=map)
+    return {
+        "before": {
+            "nan_lines": before.nan_lines,
+            "clean_pct": before.clean_pct,
+            "gate_verdict": before.gate_verdict(),
+        },
+        "after": {
+            "nan_lines": after.nan_lines,
+            "clean_pct": after.clean_pct,
+            "gate_verdict": after.gate_verdict(),
+        },
+        "lines_fixed": before.nan_lines - after.nan_lines,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +660,7 @@ def _emit_text(
 
 
 # ---------------------------------------------------------------------------
-# W&B telemetry
+# W&B telemetry — production-grade research instrumentation
 # ---------------------------------------------------------------------------
 
 
@@ -642,13 +669,21 @@ def log_health_to_wandb(
     project: str = "audit-jsonl-nan",
     run_name: str | None = None,
     advisory: frozenset[str] | None = None,
+    telemetry_level: str = "summary",
 ) -> None:
-    """Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline).
-    Includes provenance fields: git_sha, python_version, polars_version for
-    full reproducibility traceability per 2026 DL pipeline standards.
+    """
+    Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline).
+
+    telemetry_level:
+      "summary"  — scalar metrics + provenance (default)
+      "detailed" — summary + per-field W&B Table + DatasetHealth artifact
+
+    Provenance fields (git_sha, python_version, polars_version) enable
+    end-to-end traceability: correlate data-health numbers with downstream
+    training dynamics and model performance across experiments.
     """
     import subprocess
-    import sys
+
     import wandb
 
     try:
@@ -665,22 +700,58 @@ def log_health_to_wandb(
         polars_version = "unknown"
 
     run = wandb.init(project=project, name=run_name)
-    run.log(
-        {
-            "data/total_lines": health.total_lines,
-            "data/nan_lines": health.nan_lines,
-            "data/nonfinite_lines": health.nonfinite_lines,
-            "data/string_sentinel_lines": health.string_sentinel_lines,
-            "data/decode_error_lines": health.decode_error_lines,
-            "data/nan_shards": health.nan_shards,
-            "data/total_shards": health.total_shards,
-            "data/clean_pct": round(health.clean_pct, 4),
-            "data/gate_verdict": health.gate_verdict(advisory=advisory),
-            "provenance/git_sha": git_sha,
-            "provenance/python_version": sys.version[:6],
-            "provenance/polars_version": polars_version,
-        }
-    )
+
+    metrics: dict[str, Any] = {
+        "data/total_lines": health.total_lines,
+        "data/nan_lines": health.nan_lines,
+        "data/nonfinite_lines": health.nonfinite_lines,
+        "data/string_sentinel_lines": health.string_sentinel_lines,
+        "data/decode_error_lines": health.decode_error_lines,
+        "data/nan_shards": health.nan_shards,
+        "data/total_shards": health.total_shards,
+        "data/clean_pct": round(health.clean_pct, 4),
+        "data/gate_verdict": health.gate_verdict(advisory=advisory),
+        "provenance/git_sha": git_sha,
+        "provenance/python_version": sys.version[:6],
+        "provenance/polars_version": polars_version,
+    }
+
+    if telemetry_level in ("detailed",):
+        # Per-field contamination histogram as W&B Table
+        table = wandb.Table(columns=["field", "nan_count", "pct_of_nan_lines"])
+        for f, c in sorted(health.nan_fields.items(), key=lambda x: -x[1]):
+            pct = round(100.0 * c / health.nan_lines, 4) if health.nan_lines else 0.0
+            table.add_data(f, c, pct)
+        metrics["data/field_contamination"] = table
+
+        # DatasetHealth artifact for lineage
+        import tempfile
+        artifact = wandb.Artifact("dataset-health", type="dataset")
+        tmp = Path(tempfile.mktemp(suffix=".json"))
+        tmp.write_text(
+            json.dumps(
+                {
+                    "total_lines": health.total_lines,
+                    "nan_lines": health.nan_lines,
+                    "clean_pct": health.clean_pct,
+                    "gate_verdict": health.gate_verdict(advisory=advisory),
+                    "nan_fields": health.nan_fields,
+                    "git_sha": git_sha,
+                }
+            )
+        )
+        artifact.add_file(str(tmp))
+        run.log_artifact(artifact)
+
+    # Always log field_contamination table at summary level too when fields exist
+    if telemetry_level == "summary" and health.nan_fields:
+        table = wandb.Table(columns=["field", "nan_count", "pct_of_nan_lines"])
+        for f, c in sorted(health.nan_fields.items(), key=lambda x: -x[1]):
+            pct = round(100.0 * c / health.nan_lines, 4) if health.nan_lines else 0.0
+            table.add_data(f, c, pct)
+        metrics["data/field_contamination"] = table
+
+    run.log(metrics)
     run.finish()
 
 
@@ -693,7 +764,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="[%(levelname)s] %(message)s",
-        stream=__import__("sys").stderr,
+        stream=sys.stderr,
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -745,6 +816,18 @@ def main() -> None:
     parser.add_argument(
         "--config", type=Path, default=None, help="YAML config for advisory_fields etc."
     )
+    parser.add_argument(
+        "--telemetry-level",
+        choices=["summary", "detailed", "debug"],
+        default="summary",
+        help="W&B telemetry verbosity: summary (default), detailed (+ Table + Artifact).",
+    )
+    parser.add_argument(
+        "--fail-under",
+        type=float,
+        default=None,
+        help="Exit non-zero if clean_pct < THRESHOLD. Enables CI gating.",
+    )
     args = parser.parse_args()
 
     advisory: frozenset[str] | None = None
@@ -774,13 +857,24 @@ def main() -> None:
         _write_csv(health, args.csv)
 
     if args.wandb:
-        log_health_to_wandb(health, advisory=advisory)
+        log_health_to_wandb(
+            health,
+            advisory=advisory,
+            telemetry_level=args.telemetry_level,
+        )
 
     if args.json:
         _emit_json(health, advisory=advisory)
-        return
+    else:
+        _emit_text(health, emit_shard_ids=args.emit_shard_ids, advisory=advisory)
 
-    _emit_text(health, emit_shard_ids=args.emit_shard_ids, advisory=advisory)
+    if args.fail_under is not None and health.clean_pct < args.fail_under:
+        log.error(
+            "clean_pct %.4f%% < --fail-under %.4f%% — pipeline gate FAILED",
+            health.clean_pct,
+            args.fail_under,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
