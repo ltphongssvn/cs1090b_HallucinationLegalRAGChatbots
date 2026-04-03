@@ -630,8 +630,26 @@ def log_health_to_wandb(
     run_name: str | None = None,
     advisory: frozenset[str] | None = None,
 ) -> None:
-    """Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline)."""
+    """Log DatasetHealth to W&B. Safe in offline mode (WANDB_MODE=offline).
+    Includes provenance fields: git_sha, python_version, polars_version for
+    full reproducibility traceability per 2026 DL pipeline standards.
+    """
+    import subprocess
+    import sys
     import wandb
+
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_sha = "unknown"
+
+    try:
+        import polars as pl
+        polars_version = pl.__version__
+    except Exception:
+        polars_version = "unknown"
 
     run = wandb.init(project=project, name=run_name)
     run.log(
@@ -645,6 +663,9 @@ def log_health_to_wandb(
             "data/total_shards": health.total_shards,
             "data/clean_pct": round(health.clean_pct, 4),
             "data/gate_verdict": health.gate_verdict(advisory=advisory),
+            "provenance/git_sha": git_sha,
+            "provenance/python_version": sys.version[:6],
+            "provenance/polars_version": polars_version,
         }
     )
     run.finish()
