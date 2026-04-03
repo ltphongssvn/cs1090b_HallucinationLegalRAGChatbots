@@ -1810,7 +1810,15 @@ def run_probe(
     Run all gates on a record subset. Returns a typed ProbeReport.
     No side effects on corpus shards — all output written to --output only.
 
-    log_to_wandb is intentionally absent from this signature (obs 4/17).
+    full_scan parameter semantics (important):
+      Polars _full_scan_with_polars() is ALWAYS called regardless of full_scan value.
+      full_scan=True  (default) — all loaded records passed to gates.
+      full_scan=False           — loaded records reservoir-subsampled to `subset`
+                                  before gates run.
+      The flag controls post-load retention, not scan scope.
+      provenance["full_scan"] records the flag value passed by the caller.
+
+    log_to_wandb is intentionally absent from this signature.
     W&B telemetry is exclusively a main() concern — call _log_report_to_wandb
     after run_probe() returns from main() only.
     """
