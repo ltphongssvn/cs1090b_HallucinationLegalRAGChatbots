@@ -1,7 +1,7 @@
 # Reducing Hallucination in Legal RAG Chatbots
 ### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
-- **Author:** Alex Oort Alonso, Allan Korir, and PHONG LE
+- **Author:** Alex Oort Alonso, Allan Korir, PHONG LE, and Brit Biddle
 - **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 > - Although compute nodes physically contain 4× NVIDIA L4/A10G GPUs, student jobs are allocated a
@@ -57,7 +57,7 @@
 - ✅ 1,465,484 federal appellate opinions downloaded, filtered, sharded (7.6GB)
 - ✅ DVC + S3 artifact versioning operational
 - ✅ All `src/` modules implemented and tested
-- 🔄 CourtListener RAG-readiness refinement in progress (Cell 2)
+- ✅ CourtListener RAG-readiness refinement completed (Cell 2)
 - ⏳ LePaRD acquisition, model training, evaluation remaining
 **Prioritization:** LePaRD first → 10–20% subset fast iteration → BM25+BGE-M3+Tier A → scale + Tier B/C
 ---
@@ -90,17 +90,18 @@
 * **Per phase**, W&B logs:
   * **peak allocated CUDA memory**
   * **peak reserved CUDA memory**
-| Phase      | Model loaded                                | Est. VRAM                                                                                                    | Strategy                                                                                                                                                                                                   |
-|------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Retrieval  | BGE-M3                                      | ~2.27GB                                                                                                      | Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache                                                                                                      |
-| Reranking  | bge-reranker-v2-m3                          | ~2GB (GPU default; CPU fallback)                                                                             | Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache                          |
-| Generation | Mistral-7B-Instruct-v0.2                    | ~14–15GB + KV cache                                                                                          | Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
-| NLI eval   | DeBERTa-v3-large-mnli-fever-anli-ling-wanli | ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache                                                                                                                        |
-| Citation   | SQLite                                      | 0GB                                                                                                          | CPU only (read-only; check_same_thread=False)                                                                                                                                                              |
-| Corpus scan | Polars scan_ndjson                         | 0GB GPU (CPU-only)                                                                                           | **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention                                                                             |
-Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
+
 ---
-## Methodology Strengths
+| Phase | Model loaded| Est. VRAM| Strategy|
+|-------|------------|-------------------------|----------------------------------------------------------|
+| Retrieval| BGE-M3| ~2.27GB| Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache|
+| Reranking| bge-reranker-v2-m3| ~2GB (GPU default; CPU fallback)| Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache|
+| Generation| Mistral-7B-Instruct-v0.2| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
+| NLI eval| DeBERTa-v3-large-mnli-fever-anli-ling-wanli| ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache|
+| Citation| SQLite| 0GB| CPU only (read-only; check_same_thread=False)|
+| Corpus scan| Polars scan_ndjson| 0GB GPU (CPU-only)| **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention|
+Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
+---# Methodology Strengths
 **1 — Automated Hallucination Measurement (No Human Annotation Bottleneck)**
 - **Tier A:**
   - LePaRD 4M+ expert-annotated citation pairs — gold-standard retrieval ground truth
@@ -551,7 +552,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
 | CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
-| CourtListener RAG prep | 🔄 In progress | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines corpus evaluation for downstream legal RAG), module-level constants, contract test suite (303 tests), GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), GATE_REGISTRY, stratify_by minority-group-preserving stratified subsampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
+| CourtListener RAG prep | ✅ Complete | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines corpus evaluation for downstream legal RAG), module-level constants, contract test suite (303 tests), GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), GATE_REGISTRY, stratify_by minority-group-preserving stratified subsampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
@@ -560,7 +561,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ---
 ## DL System Stack
 ### Stage 1 — Raw Data Acquisition
-* **CourtListener federal appellate subset (🔄)**
+* **CourtListener federal appellate subset (✅)**
   * Contains **1,465,484 opinions**
   * Stored as **23-field JSONL** records
 * **Tier C citation support**
@@ -992,7 +993,7 @@ When integrated, the full logger tracks:
 ## Datasets
 | Dataset | Size | License | Role | Status |
 |---------|------|---------|------|--------|
-| CourtListener federal appellate subset | 1,465,484 opinions | CC BY-ND 4.0 | Retrieval corpus + SQLite citation index | 🔄 In progress |
+| CourtListener federal appellate subset | 1,465,484 opinions | CC BY-ND 4.0 | Retrieval corpus + SQLite citation index | ✅ Complete |
 | LePaRD (ACL 2024) | ~4M pairs | Open research | Training (500K–1M cap) + evaluation | ⏳ **Priority 1** |
 ---
 ## Reproducibility
