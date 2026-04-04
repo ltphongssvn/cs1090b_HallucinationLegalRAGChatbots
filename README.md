@@ -1242,7 +1242,7 @@ uv run python scripts/audit_jsonl_nan.py \
   --json 2>&1
 ```
 
-**Run:** [expert-bush-1](https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan/runs/jnqc9vo4)  
+**Run:** [expert-bush-1](https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan/runs/jnqc9vo4)
 **Project:** https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan
 ```
 wandb: Run summary:
@@ -1327,10 +1327,10 @@ audit_shard() × 159 shards (48 workers, 5.17 shards/s)
 
 ## Full-Corpus RAG Readiness Probe
 
-**Date:** 2026-04-03  
-**Node:** `gpu-dy-gpu-cr-3`  
-**Corpus:** CourtListener Federal Appellate Bulk (`data/raw/cl_federal_appellate_bulk/`)  
-**Records:** 1,465,484  
+**Date:** 2026-04-03
+**Node:** `gpu-dy-gpu-cr-3`
+**Corpus:** CourtListener Federal Appellate Bulk (`data/raw/cl_federal_appellate_bulk/`)
+**Records:** 1,465,484
 **Report:** `logs/dataset_probe_report_full.json`
 
 ### Command
@@ -1373,8 +1373,8 @@ Token indices sequence length is longer than the specified maximum sequence leng
 | `A11` | Tokenizer-aware chunk count (BAAI/bge-m3, 1024-subword chunks, 128 overlap) | Blocking | ✅ PASSED | Median chunk count per document confirms the corpus will produce multi-chunk embeddings. **Warning observed:** at least one opinion tokenises to 19,544 subwords — 2.4× the 8,192-token context window. Stage 3 must enforce citation-aware recursive chunking to prevent silent truncation of holdings at document tail. |
 | `A13` | Sentence density (spaCy `en_core_web_sm` sentenciser, min 20 sentences) | Blocking | ✅ PASSED | The majority of opinions contain sufficient sentence-level structure for sentence-window retrieval and reranking strategies. Sparse-sentence outliers are within tolerance and will not degrade recall. |
 
-**FAILED_BLOCKING:** none  
-**FAILED_ADVISORY:** none  
+**FAILED_BLOCKING:** none
+**FAILED_ADVISORY:** none
 **SKIPPED:** none
 
 ### Environment
