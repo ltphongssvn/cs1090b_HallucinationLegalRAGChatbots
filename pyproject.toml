@@ -10,7 +10,8 @@ dependencies = [
   "pandas>=2.2.0",
   "numpy>=1.24.0,<2.0.0",
   "torch>=2.0",
-  "transformers>=4.35,<4.41",
+  "transformers==4.41.2",   # pinned: minimum for Mistral/LLaMA tokenizer schema; <5.x keeps PyTorch 2.0.1 compat
+  "tokenizers==0.19.1",     # pinned: adds PyPreTokenizerTypeWrapper support; verified with Mistral-7B-Instruct-v0.2
   "sentence-transformers==3.1.1",
   "accelerate>=0.20",
   "peft>=0.7,<0.10",
