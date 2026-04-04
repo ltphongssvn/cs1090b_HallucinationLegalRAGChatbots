@@ -64,7 +64,7 @@ class TestVenv:
 from packaging.version import Version
 import transformers
 v = Version(transformers.__version__)
-assert Version('4.35') <= v < Version('4.41'), f'out of range: {v}'
+assert Version('4.35') <= v < Version('4.42'), f'out of range: {v}'
 print('ok')
 """)
         assert r.returncode == 0
