@@ -14,7 +14,7 @@ from packaging.version import Version
 
 REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "torch": ">=2.0",
-    "transformers": ">=4.35,<4.41",
+    "transformers": ">=4.35,<4.42",
     "datasets": ">=2.16",
     "sentence_transformers": None,  # v3.1.1 installed; __version__ unreliable via importlib
     "bm25s": None,  # replaces rank_bm25 — memory-mapped sparse retrieval
