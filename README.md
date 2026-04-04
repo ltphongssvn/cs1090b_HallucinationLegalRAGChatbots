@@ -21,7 +21,7 @@
 |--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Python                   | 3.11.9                                                                                                                                                |
 | PyTorch                  | 2.0.1+cu117                                                                                                                                           |
-| transformers             | 4.39.3                                                                                                                                                |
+| transformers             | 4.41.2 (pinned)                                                                                                                                            |
 | sentence-transformers    | 3.1.1                                                                                                                                                 |
 | Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling — confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json)                             |
 | Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
@@ -131,7 +131,7 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
     - (3) sliding-window fallback only if anchor extraction fails.
   - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 **2 — Clean Experimental Design**
-- `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.39.3`).
+- `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
 - All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
 - A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds Mistral's hard limit.
 - Prompt token count (Mistral tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
@@ -257,7 +257,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * on a **10% subset**
 ### Revision 8 — LLM Generator
 * The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
-* It has been **smoke-tested in this repository** under **`transformers 4.39.3`**.
+* It has been **smoke-tested in this repository** under **`transformers 4.41.2 (pinned)`**.
 * All prompts are formatted using:
   * `tokenizer.apply_chat_template(...)`
 * Generation uses **greedy decoding** with:
@@ -499,7 +499,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * **Sparse retrieval** uses **`bm25s`**, `bm25s` is indexed over the **same pre-chunked payloads** embedded by **BGE-M3**. "pre-chunked payloads" means the retrieval-ready text chunks created ahead of time from legal opinions and reused identically by BM25 and BGE-M3 so the architecture comparison stays fair and reproducible.**
 * **Dense retrieval** uses the repo-certified stack:
   * `sentence-transformers 3.1.1`
-  * `transformers 4.39.3`
+  * `transformers 4.41.2 (pinned)`
 * It uses **CLS pooling**, following BAAI's published:
   * `1_Pooling/config.json`
 * A **runtime assertion** in `model_loader.py` prevents accidental pooling override.
@@ -1067,7 +1067,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | Language                | Python                                                                                               | 3.11.9 |
 | Package manager         | uv                                                                                                   | 0.10.2 (repo-pinned) |
 | Deep learning           | PyTorch                                                                                              | 2.0.1+cu117 (node driver: CUDA 12.8) |
-| Transformers            | HuggingFace transformers                                                                             | 4.39.3 (version-asserted at startup) |
+| Transformers            | HuggingFace transformers                                                                             | 4.41.2 (pinned) (version-asserted at startup) |
 | Sentence embeddings     | sentence-transformers                                                                                | 3.1.1 |
 | Dense retrieval         | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
 | CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
