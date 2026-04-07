@@ -148,8 +148,26 @@ cites = get_citations(text)
 
 ## How We Plan to Use It
 
-1. **Tier A retrieval evaluation**: Given `destination_context` as a query, can our retriever (BM25 / BGE-M3 / Hybrid) find the correct passage from the source opinion in the CourtListener corpus? Scored by recall@k, MRR, NDCG@10.
+### Evaluation approach: passage-level retrieval accuracy
 
-2. **Training data**: Fine-tune the dense retriever so it learns that `destination_context` → `quote` is a relevant match.
+We evaluate at the **passage level**, not the document level. Finding the right *case* is a low bar — the citing context often names the case explicitly. The real question is: can the retriever surface the **specific passage** that was quoted?
 
-The merge is necessary because our retrieval corpus is indexed by CourtListener IDs, but LePaRD's "answer key" uses CAP IDs. Without the merge, we can't score whether the retriever found the right document.
+For each LePaRD row:
+
+1. **Build the query**: Take `destination_context` and **strip the citation string** from it (case name, reporter, volume/page). This is critical — without stripping, the retriever can trivially match on the citation text rather than understanding the legal reasoning. Use `eyecite` or regex to remove citations like `"Singh v. George Washington University, 368 F. Supp. 2d 58 (2005)"` from the context before feeding it to the retriever.
+
+2. **Retrieve**: Run the stripped context through the retriever (BM25 / BGE-M3 / Hybrid) against the chunked CourtListener corpus.
+
+3. **Score**: Check if any of the top-k retrieved chunks contain the `quote` from LePaRD. Use fuzzy matching (e.g., rapidfuzz with a ~90% threshold) rather than exact substring match, since LePaRD's quotes may have minor OCR artifacts.
+
+4. **Metrics**: Recall@k, MRR, NDCG@10 — measured at the chunk level.
+
+This directly answers the research question: *which retrieval setup best surfaces the specific legal reasoning a judge actually relied on?*
+
+### Training data
+
+Fine-tune the dense retriever (BGE-M3) using `(stripped destination_context, quote)` pairs so it learns to match legal arguments to their supporting precedent passages.
+
+### Why the merge is necessary
+
+The merge connects LePaRD's "answer key" to our retrieval corpus. LePaRD says "this quote came from CAP case #3628546" but our corpus is indexed by CourtListener IDs. Without the citation-string merge, we can't identify which CourtListener chunk is the gold answer for scoring.
