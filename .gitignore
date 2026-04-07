@@ -31,3 +31,4 @@ src/repro.py
 tests/shell/bats-core/
 data/
 wandb/
+lepard_eda/lepard_data/
