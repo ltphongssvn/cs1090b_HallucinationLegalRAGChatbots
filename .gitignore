@@ -49,3 +49,4 @@ data/**
 
 wandb/
 /lepard_train_4000000_rev0194f95.jsonl
+lepard_eda/lepard_data/
