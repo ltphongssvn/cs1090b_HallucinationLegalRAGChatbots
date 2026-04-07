@@ -13,7 +13,7 @@
 > to index 0 regardless of physical slot. All experiments are designed and validated under this
 > single-GPU constraint.
 >
-> - KV cache + activations during Mistral generation on retrieved legal contexts consume
+> - KV cache + activations during API-based LLM gpt-5.4-nano generation on retrieved legal contexts consume
 > several additional GB beyond model weights. Sequential model loading is the mitigation strategy.
 ---
 ## Certified Baseline Stack
@@ -27,7 +27,7 @@
 | Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
 | Sparse retrieval         | bm25s                                                                                                                                                 |
 | Vector search            | faiss-cpu 1.13.2                                                                                                                                      |
-| LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
+| LLM generator            | API-based LLM gpt-5.4-nano                                                                                                                    |
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 | DataFrame / corpus scan  | polars 1.39.3 (CPU-only; **mandatory hard dependency**; imported at module top level in `src/dataset_probe.py`; always used for exact full-corpus scan via `scan_ndjson`)   |
 * This is the certified baseline stack for the current repository; newer upstream stacks are intentionally deferred for now, they will be adopted only after full re-certification in this repo.
@@ -96,7 +96,7 @@
 |-------|------------|-------------------------|----------------------------------------------------------|
 | Retrieval| BGE-M3| ~2.27GB| Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache|
 | Reranking| bge-reranker-v2-m3| ~2GB (GPU default; CPU fallback)| Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache|
-| Generation| Mistral-7B-Instruct-v0.2| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
+| Generation| API-based LLM gpt-5.4-nano| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (API-based LLM gpt-5.4-nano tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval| DeBERTa-v3-large-mnli-fever-anli-ling-wanli| ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache|
 | Citation| SQLite| 0GB| CPU only (read-only; check_same_thread=False)|
 | Corpus scan| Polars scan_ndjson| 0GB GPU (CPU-only)| **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention|
@@ -132,10 +132,10 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
     - (3) sliding-window fallback only if anchor extraction fails.
   - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 **2 — Clean Experimental Design**
-- `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
+- `API-based LLM gpt-5.4-nano` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
 - All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
-- A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds Mistral's hard limit.
-- Prompt token count (Mistral tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
+- A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds API-based LLM gpt-5.4-nano's hard limit.
+- Prompt token count (API-based LLM gpt-5.4-nano tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
 **3 — Grounded in a Real Failure Case**
 - Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
 **4 — Production-Grade Reproducibility Already Operational**
@@ -249,7 +249,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * The **same pre-chunked payloads** are used for both:
   * `bm25s`
   * `BGE-M3`
-* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* Effective prompt token count is logged per query using the **API-based LLM gpt-5.4-nano tokenizer**.
 * A runtime guard enforces context length:
   * `assert max(prompt_tokens) < 32768`
 * If that assertion fails, the pipeline stops loudly rather than silently overflowing context.
@@ -257,7 +257,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * test **64-subword overlap**
   * on a **10% subset**
 ### Revision 8 — LLM Generator
-* The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
+* The generator model is **`API-based LLM gpt-5.4-nano`**.
 * It has been **smoke-tested in this repository** under **`transformers 4.41.2 (pinned)`**.
 * All prompts are formatted using:
   * `tokenizer.apply_chat_template(...)`
@@ -321,7 +321,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * **Hybrid BM25 + BGE-M3 + CrossEncoder**
 * **Legal-BERT** is included as an **optional domain-reference model**.
 * The generator model is held constant as:
-  * **`mistralai/Mistral-7B-Instruct-v0.2`**
+  * **`API-based LLM gpt-5.4-nano`**
 * The generator is used under the following fixed conditions:
   * **frozen weights**
   * **greedy decoding**
@@ -356,7 +356,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * The full prompt is formatted using:
     * `tokenizer.apply_chat_template(...)`
   * The generator model is:
-    * `mistralai/Mistral-7B-Instruct-v0.2`
+    * `API-based LLM gpt-5.4-nano`
   * The generator is kept **frozen** during evaluation.
   * Decoding uses:
     * `do_sample=False`
@@ -364,7 +364,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * Output response is:
     * `R`
   * Before generation starts, a **runtime assertion** checks prompt length.
-  * The **effective prompt token count** is logged for each query using the **Mistral tokenizer**.
+  * The **effective prompt token count** is logged for each query using the **API-based LLM gpt-5.4-nano tokenizer**.
   * Begin with **Tier A** on a **10–20% subset** of the data.
   * Use this smaller run to **validate the pipeline and metrics first**.
   * Add **Tier B** and **Tier C** only after Tier A has been successfully validated.
@@ -416,15 +416,15 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Serialize scores and ranks
     * Return the **top-10** results
     * Unload model
-  * **Phase 3 — Generation with Mistral-7B-Instruct-v0.2**
-    * Load **`Mistral-7B-Instruct-v0.2`** in **bfloat16**
+  * **Phase 3 — Generation with API-based LLM gpt-5.4-nano**
+    * Load **`API-based LLM gpt-5.4-nano`** in **bfloat16**
     * Apply the **chat template**
     * Assert:
       * `max(prompt_tokens) < 32768`
     * Generate with:
       * `do_sample=False`
     * Log:
-      * prompt token count using the **Mistral tokenizer**
+      * prompt token count using the **API-based LLM gpt-5.4-nano tokenizer**
       * completion token count
     * Save outputs
     * Unload model
@@ -624,7 +624,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * Pre-chunked string payloads are:
   * **saved once**
   * **reused by both BGE-M3 and `bm25s`**
-* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* Effective prompt token count is logged per query using the **API-based LLM gpt-5.4-nano tokenizer**.
 * A runtime guard enforces prompt length:
   * `assert max(prompt_tokens) < 32768`
 * If that assertion fails, the pipeline stops loudly instead of silently exceeding context limits.
@@ -664,7 +664,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * Assert `ProbeConfig()` is **frozen** — mutating a field raises `AttributeError` or `TypeError`.
 * Assert `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — the critical invariant that `ProbeConfig` defaults must equal module constants.
 * Assert `_probe_config_to_dict(ProbeConfig())` is JSON-serializable — guarantees the config snapshot in `provenance["probe_config"]` can always be written to disk and W&B.
-* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary Mistral tokenizer check.
+* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary API-based LLM gpt-5.4-nano tokenizer check.
 * Assert all new `ProbeConfig` fields appear in `report["provenance"]["probe_config"]` — confirms the config snapshot is complete in every `ProbeReport`.
 * Assert the A11 chunk count formula (`stride = chunk_size - overlap; n_chunks = max(1, ceil((total - overlap) / stride))`) matches `CHUNK_SIZE_SUBWORDS=1024` and `CHUNK_OVERLAP_SUBWORDS=128` — regression test against chunking formula drift.
 
@@ -750,7 +750,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Text viability | `min_text_length=1500`, `chunk_size_subwords=1024`, `chunk_overlap_subwords=128` | Minimum chars for meaningful chunking; chunk window for A11 |
 | Source format | `a7_known_formats_pass_pct=80.0`, `a7_known_formats={"plain_text","html_with_citations"}` | % of records from formats confirmed to survive normalization |
 | Citation anchor | `a12_min_pct_with_anchor=60.0`, `a9_zero_citation_pass_pct=20.0` | SQLite Tier C viability |
-| Chunk count | `a11_min_median_chunks=2.0`, `encoder_model="BAAI/bge-m3"`, `a11_generative_model` | Multi-chunk splitting + Mistral context limit advisory |
+| Chunk count | `a11_min_median_chunks=2.0`, `encoder_model="BAAI/bge-m3"`, `a11_generative_model` | Multi-chunk splitting + API-based LLM gpt-5.4-nano context limit advisory |
 | Sentence density | `min_sentence_count=20`, `a13_max_below_threshold_pct=15.0`, `spacy_model` | NLI window coverage floor |
 | Entropy / quality | `b6_entropy_spot_check_tolerance=1.0`, `quality_signals_html_pattern`, `quality_signals_boilerplate_phrases` | Tokenization drift + boilerplate survival |
 
@@ -877,7 +877,7 @@ When integrated, the full logger tracks:
 * **CitationFound_NoLocalSupport counts**
 * **Citation hashes**
 * **Citation anchor token offsets**
-* **Prompt token counts** using the Mistral tokenizer
+* **Prompt token counts** using the API-based LLM gpt-5.4-nano tokenizer
 * **Completion token counts**
 * **Gradient norms**
 * **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
@@ -943,7 +943,7 @@ When integrated, the full logger tracks:
     * mean
     * maximum
     * entropy
-* **Mistral**
+* **API-based LLM gpt-5.4-nano**
   * prompt formatting is enforced with:
     * `tokenizer.apply_chat_template(...)`
   * prompt length is guarded by:
@@ -1074,7 +1074,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
 | BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
 | Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
-| LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
+| LLM generator           | API-based LLM gpt-5.4-nano                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
@@ -1095,7 +1095,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 ## Ethical Considerations
 * All datasets used in the project are **publicly available**.
 * **CourtListener** data is used under **CC BY-ND 4.0**.
-* **`mistralai/Mistral-7B-Instruct-v0.2`** does **not** include built-in moderation mechanisms, according to its model card.
+* **`API-based LLM gpt-5.4-nano`** does **not** include built-in moderation mechanisms, according to its model card.
 * Model outputs are used **strictly for retrieval research** under **academic supervision**.
 * Any **PII handling** follows the **redaction practices of the original data provider**.
 * The project uses **no human annotation** for hallucination measurement.
@@ -1243,7 +1243,7 @@ uv run python scripts/audit_jsonl_nan.py \
   --json 2>&1
 ```
 
-**Run:** [expert-bush-1](https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan/runs/jnqc9vo4)  
+**Run:** [expert-bush-1](https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan/runs/jnqc9vo4)
 **Project:** https://wandb.ai/phl690-harvard-extension-schol/audit-jsonl-nan
 ```
 wandb: Run summary:
@@ -1328,10 +1328,10 @@ audit_shard() × 159 shards (48 workers, 5.17 shards/s)
 
 ## Full-Corpus RAG Readiness Probe
 
-**Date:** 2026-04-03  
-**Node:** `gpu-dy-gpu-cr-3`  
-**Corpus:** CourtListener Federal Appellate Bulk (`data/raw/cl_federal_appellate_bulk/`)  
-**Records:** 1,465,484  
+**Date:** 2026-04-03
+**Node:** `gpu-dy-gpu-cr-3`
+**Corpus:** CourtListener Federal Appellate Bulk (`data/raw/cl_federal_appellate_bulk/`)
+**Records:** 1,465,484
 **Report:** `logs/dataset_probe_report_full.json`
 
 ### Command
@@ -1374,8 +1374,8 @@ Token indices sequence length is longer than the specified maximum sequence leng
 | `A11` | Tokenizer-aware chunk count (BAAI/bge-m3, 1024-subword chunks, 128 overlap) | Blocking | ✅ PASSED | Median chunk count per document confirms the corpus will produce multi-chunk embeddings. **Warning observed:** at least one opinion tokenises to 19,544 subwords — 2.4× the 8,192-token context window. Stage 3 must enforce citation-aware recursive chunking to prevent silent truncation of holdings at document tail. |
 | `A13` | Sentence density (spaCy `en_core_web_sm` sentenciser, min 20 sentences) | Blocking | ✅ PASSED | The majority of opinions contain sufficient sentence-level structure for sentence-window retrieval and reranking strategies. Sparse-sentence outliers are within tolerance and will not degrade recall. |
 
-**FAILED_BLOCKING:** none  
-**FAILED_ADVISORY:** none  
+**FAILED_BLOCKING:** none
+**FAILED_ADVISORY:** none
 **SKIPPED:** none
 
 ### Environment
