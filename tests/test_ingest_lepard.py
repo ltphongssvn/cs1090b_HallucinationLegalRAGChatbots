@@ -488,5 +488,5 @@ class TestForcePurgesStaleArtifacts:
         sidecar.write_text("stale_hash\n")
         # force rewrite — stale sidecar must be removed before write
         write_jsonl(iter(rows), out, cap=5, force=True)
-        # sidecar must be updated not stale
+        # sidecar purged by --force — must not contain stale content
         assert sidecar.read_text().strip() != "stale_hash"
