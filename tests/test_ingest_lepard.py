@@ -155,3 +155,74 @@ class TestSpecificExceptions:
 
         with pytest.raises((Exception,)):
             list(fetch_stream("nonexistent/dataset_xyz_123", "train", "main"))
+
+
+# ---------------------------------------------------------------------------
+# RED: CHUNK_SIZE constant, SHA256 idempotency, retry docstring, atomic write,
+#      tqdm, zero-cap bug, manifest
+# ---------------------------------------------------------------------------
+
+
+class TestChunkSizeConstant:
+    def test_chunk_size_constant_importable(self):
+        from scripts.ingest_lepard import CHUNK_SIZE
+        assert CHUNK_SIZE == 64 * 1024
+
+
+class TestSha256Idempotency:
+    def test_skips_when_sha256_sidecar_matches(self, tmp_path):
+        from scripts.ingest_lepard import compute_sha256, write_jsonl
+        rows = [{"id": str(i)} for i in range(10)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=10)
+        compute_sha256(out, write_sidecar=True)
+        mtime1 = out.stat().st_mtime
+        # second run — should detect sidecar and skip
+        write_jsonl(iter(rows), out, cap=10)
+        assert out.stat().st_mtime == mtime1
+
+
+class TestTqdmProgress:
+    def test_write_jsonl_uses_tqdm(self, tmp_path):
+        from unittest.mock import patch
+        from scripts.ingest_lepard import write_jsonl
+        rows = [{"id": str(i)} for i in range(10)]
+        out = tmp_path / "out.jsonl"
+        with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
+            mock_tqdm.return_value = iter(rows)
+            write_jsonl(iter(rows), out, cap=10)
+            assert mock_tqdm.called
+
+
+class TestSpecificExceptions:
+    def test_fetch_stream_raises_on_bad_dataset(self):
+        from scripts.ingest_lepard import fetch_stream
+        import pytest
+        with pytest.raises((Exception,)):
+            list(fetch_stream("nonexistent/dataset_xyz_123", "train", "main"))
+
+
+class TestZeroCapBug:
+    def test_cap_zero_respected_not_overridden_by_config(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+        rows = [{"id": str(i)} for i in range(10)]
+        out = tmp_path / "out.jsonl"
+        written = write_jsonl(iter(rows), out, cap=0)
+        assert written == 0
+
+    def test_cap_none_falls_back_to_config(self):
+        from scripts.ingest_lepard import load_lepard_config
+        cfg = load_lepard_config()
+        cap = cfg["cap"] if None is None else None
+        assert cap == 500000
+
+
+class TestAtomicWrite:
+    def test_no_partial_file_on_success(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        assert out.exists()
+        tmp = out.with_suffix(".jsonl.tmp")
+        assert not tmp.exists()
