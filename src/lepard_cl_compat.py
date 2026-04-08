@@ -88,6 +88,9 @@ def load_lepard_pairs(path):
                 r = json.loads(line)
             except json.JSONDecodeError as e:
                 raise ValueError(f"malformed JSON at line {i} of {path}: {e}") from e
+            for key in ("source_id", "dest_id"):
+                if key not in r:
+                    raise ValueError(f"missing required key {key!r} at line {i} of {path}")
             pairs.append((int(r["source_id"]), int(r["dest_id"])))
     return pairs
 
