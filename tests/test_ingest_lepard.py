@@ -223,3 +223,44 @@ class TestAtomicWriteSafety:
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
         assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# RED: cap validation, atomic write, hash-while-writing
+# ---------------------------------------------------------------------------
+
+
+class TestCapValidation:
+    def test_negative_cap_raises(self, tmp_path):
+        import pytest
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": "0"}]
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(ValueError, match="cap must be positive"):
+            write_jsonl(iter(rows), out, cap=-1)
+
+    def test_zero_cap_raises(self, tmp_path):
+        import pytest
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": "0"}]
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(ValueError, match="cap must be positive"):
+            write_jsonl(iter(rows), out, cap=0)
+
+
+class TestHashWhileWriting:
+    def test_write_jsonl_returns_sha256(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        result = write_jsonl(iter(rows), out, cap=5)
+        # result must be (rows_written, sha256) not just int
+        assert isinstance(result, tuple), "write_jsonl must return (rows_written, sha256)"
+        rows_written, sha256 = result
+        assert rows_written == 5
+        assert len(sha256) == 64
