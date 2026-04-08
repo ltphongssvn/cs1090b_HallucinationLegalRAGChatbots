@@ -142,13 +142,13 @@ class TestTqdmProgress:
 
 
 class TestFetchStreamExceptions:
-    def test_fetch_stream_raises_on_bad_dataset(self):
+    def test_fetch_stream_raises_on_bad_revision(self):
         import pytest
 
         from scripts.ingest_lepard import fetch_stream
 
-        with pytest.raises(Exception):
-            list(fetch_stream("nonexistent/dataset_xyz_123", "train", "main"))
+        with pytest.raises(ValueError, match="not a 40-char hex SHA"):
+            next(fetch_stream("rmahari/LePaRD", "train", "main"))
 
 
 class TestZeroCapHandling:
@@ -460,9 +460,7 @@ class TestForcePurgesStaleArtifacts:
         write_jsonl(iter(rows), out, cap=5)
         sidecar = tmp_path / "out.jsonl.sha256"
         sidecar.write_text("stale_hash\n")
-        # force rewrite — stale sidecar must be purged before write
         write_jsonl(iter(rows), out, cap=5, force=True)
-        # sidecar purged by --force (write_jsonl purges; main() rewrites)
         assert not sidecar.exists() or sidecar.read_text().strip() != "stale_hash"
 
 
@@ -514,10 +512,10 @@ class TestSmokeCap:
     def test_smoke_and_cap_mutually_exclusive(self, tmp_path, monkeypatch):
         import sys
 
+        import pytest
+
         from scripts.ingest_lepard import main
 
-        shard = tmp_path / "s.jsonl"
-        shard.write_text('{"id": "0"}\n')
         monkeypatch.setattr(
             sys,
             "argv",
@@ -530,8 +528,28 @@ class TestSmokeCap:
                 str(tmp_path),
             ],
         )
-        import pytest
-
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code != 0, "--smoke and --cap must be mutually exclusive"
+
+
+class TestFetchStreamRevisionValidation:
+    def test_fetch_stream_rejects_mutable_revision(self):
+        import pytest
+
+        from scripts.ingest_lepard import fetch_stream
+
+        # validate_revision called before network — raises immediately, no HF download
+        with pytest.raises(ValueError, match="not a 40-char hex SHA"):
+            next(fetch_stream("rmahari/LePaRD", "train", "main"))
+
+
+class TestRevisionInOutputFilename:
+    def test_output_filename_includes_revision_prefix(self):
+        from scripts.ingest_lepard import load_lepard_config
+
+        cfg = load_lepard_config()
+        output_file = cfg["output_file"].format(cap=cfg["cap"])
+        assert "rev" in output_file or cfg["revision"][:8] in output_file, (
+            "output_file must include revision prefix to prevent same-cap collision"
+        )

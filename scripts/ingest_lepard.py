@@ -13,12 +13,14 @@ LePaRD (Legal Passage Retrieval Dataset — ACL 2024)
 Features:
   - Config-driven via config/lepard.yaml (OmegaConf)
   - Pinned revision SHA for reproducibility (validated as 40-char hex)
+  - fetch_stream validates revision before any network call
+  - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) SHA256 sidecar check before O(N) line scan
   - Self-heal: valid file without sidecar gets sidecar written on next run
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
-  - json.dumps with ensure_ascii=False — preserves legal unicode (café, —)
+  - json.dumps with ensure_ascii=False — preserves legal unicode
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest JSON written alongside JSONL artifact
@@ -65,7 +67,7 @@ log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
-_MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest: out.jsonl -> out.jsonl.manifest.json
+_MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest suffix
 
 
 def _sidecar_path(output_path: Path) -> Path:
@@ -166,10 +168,11 @@ def fetch_stream(
 ) -> Iterator[dict[str, Any]]:
     """
     Stream rows from HuggingFace dataset with pinned revision.
-    Pinned revision ensures reproducibility — streaming order is deterministic
-    for a fixed commit SHA (confirmed: revision=main is not pinned).
+    Validates revision is a 40-char hex SHA before any network call —
+    enforces immutability at the fetch boundary, not just in main().
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
+    validate_revision(revision)  # enforce immutable SHA before network call
     from datasets import load_dataset
 
     ds = load_dataset(dataset, split=split, streaming=True, revision=revision)
@@ -244,7 +247,11 @@ def write_jsonl(
         with output_path.open(encoding="utf-8") as fh:
             existing = sum(1 for _ in fh)
         if existing == cap or (0 < existing < cap):
-            log.info("Skipping — %s already has %d lines; self-healing sidecar", output_path.name, existing)
+            log.info(
+                "Skipping — %s already has %d lines; self-healing sidecar",
+                output_path.name,
+                existing,
+            )
             digest = compute_sha256(output_path, write_sidecar=True)
             return 0, digest
 
