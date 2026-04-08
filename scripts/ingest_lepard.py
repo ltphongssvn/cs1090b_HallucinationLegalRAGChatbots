@@ -25,6 +25,7 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest JSON written alongside JSONL artifact
+  - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
@@ -95,11 +96,21 @@ def _manifest_path(output_path: Path) -> Path:
 def _git_sha() -> str:
     """
     Return current git commit SHA or 'unknown'.
+    Checks GIT_COMMIT_SHA environment variable first — container-safe:
+    in Docker/Kubernetes environments the .git directory is often stripped,
+    so the SHA should be injected at build time via:
+        ENV GIT_COMMIT_SHA=$(git rev-parse HEAD)
+    Falls back to subprocess for local development.
     Narrows to specific subprocess exceptions:
       FileNotFoundError  — git not installed
       CalledProcessError — not a git repo or git error
       OSError            — OS-level failure
     """
+    # Container-safe: check env var first (injected at Docker build time)
+    env_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
+    if env_sha:
+        return env_sha
+
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
     except (FileNotFoundError, subprocess.CalledProcessError, OSError):

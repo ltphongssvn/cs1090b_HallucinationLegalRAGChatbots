@@ -604,3 +604,22 @@ class TestGitShaFallback:
 
         with patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(128, "git")):
             assert _git_sha() == "unknown"
+
+
+class TestGitShaEnvFallback:
+    def test_git_sha_uses_env_var_when_set(self, monkeypatch):
+        monkeypatch.setenv("GIT_COMMIT_SHA", "abc123def456")
+        from scripts.ingest_lepard import _git_sha
+
+        assert _git_sha() == "abc123def456"
+
+    def test_git_sha_env_takes_priority_over_subprocess(self, monkeypatch):
+        from unittest.mock import patch
+
+        monkeypatch.setenv("GIT_COMMIT_SHA", "env_sha_value")
+        from scripts.ingest_lepard import _git_sha
+
+        with patch("subprocess.check_output") as mock_sub:
+            result = _git_sha()
+            assert result == "env_sha_value"
+            assert not mock_sub.called, "subprocess must not be called when env var set"
