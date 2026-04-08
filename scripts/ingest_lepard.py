@@ -30,7 +30,8 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
-  - --verify-only checks digest AND manifest fields (revision, dataset, split, cap)
+  - --verify-only checks digest, sidecar, AND manifest fields (revision, dataset,
+    split, cap, sha256) — raises ValueError on any mismatch
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -47,7 +48,7 @@ Idempotency design:
   integrity check. It is framed honestly: sidecar present = skip. For verified
   integrity, use --verify-only which recomputes SHA256 from disk bytes,
   compares against the stored sidecar, and checks manifest fields:
-  revision, dataset, split, AND cap.
+  revision, dataset, split, cap, AND stored sha256.
   If manifest is missing when sidecar is present, manifest is repaired.
 
 Self-heal design:
@@ -68,10 +69,11 @@ Concurrency design:
   control — concurrent runs are last-writer-wins, not serialized.
 
 Network retry design:
-  fetch_stream retries up to 3 times on OSError with wait_random_exponential
-  backoff (jitter prevents thundering herd when multiple workers hit HF Hub).
+  fetch_stream retries the initial dataset load up to 3 times on OSError
+  with wait_random_exponential backoff (jitter prevents thundering herd).
   OSError covers ConnectionResetError and TimeoutError as subclasses.
-  Note: retry covers _load_hf_dataset() only, not mid-stream iteration failures.
+  Note: retry covers only _load_hf_dataset() — not mid-stream iteration
+  failures. A connection drop mid-stream will still abort the run.
 
 Usage
 -----
@@ -408,6 +410,7 @@ def _load_hf_dataset(dataset: str, split: str, revision: str) -> Any:
     TimeoutError as subclasses). Retries up to 3 times with random exponential
     backoff (jitter prevents thundering herd across multiple workers).
     Separated from fetch_stream so retry wraps only the network call.
+    Note: retry covers only this initial load — not mid-stream iteration failures.
     """
     from datasets import load_dataset
 
@@ -422,8 +425,9 @@ def fetch_stream(
     """
     Stream rows from HuggingFace dataset with pinned revision.
     Validates revision is a 40-char lowercase hex SHA before any network call.
-    Retries load_dataset up to 3 times on OSError with jitter.
-    NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
+    Retries the initial dataset load up to 3 times on OSError with jitter.
+    Note: retry covers only _load_hf_dataset() — a connection drop mid-stream
+    will still abort the run. NaN rows passed through — audit_jsonl_nan.py gate.
     """
     validate_revision(revision)
     ds = _load_hf_dataset(dataset, split, revision)
@@ -455,7 +459,8 @@ def write_jsonl(
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
     verify_only=True: recomputes SHA256, compares against sidecar AND manifest
-      fields (revision, dataset, split, cap) — raises ValueError on mismatch.
+      fields (revision, dataset, split, cap, sha256) — raises ValueError on any
+      mismatch. This is a full provenance audit, not just a checksum check.
     Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
@@ -466,13 +471,13 @@ def write_jsonl(
         cap: Maximum rows to write. Must be > 0.
         force: If True, purge stale artifacts and always rewrite.
         dry_run: If True, count rows only — no file written.
-        verify_only: If True, verify existing artifact SHA and manifest fields.
+        verify_only: If True, full provenance audit: digest + all manifest fields.
         revision: HF dataset revision SHA for provenance manifest.
         dataset: HF dataset name for provenance manifest.
         split: HF dataset split for provenance manifest.
 
     Raises:
-        ValueError: if cap <= 0, digest mismatch, or manifest field mismatch.
+        ValueError: if cap <= 0, digest mismatch, or any manifest field mismatch.
         FileNotFoundError: if verify_only and output_path does not exist.
     """
     if cap <= 0:
@@ -494,7 +499,7 @@ def write_jsonl(
             log.info("Verified %s — digest matches sidecar", output_path.name)
         else:
             log.warning("Verified %s — no sidecar to compare against", output_path.name)
-        # Check manifest fields: revision, dataset, split, AND cap
+        # Full manifest provenance audit: revision, dataset, split, cap, sha256
         manifest_file = _manifest_path(output_path)
         if manifest_file.exists() and revision and dataset:
             try:
@@ -508,6 +513,11 @@ def write_jsonl(
                     mismatches.append(f"split: stored={stored_manifest.get('split')} requested={split}")
                 if cap and stored_manifest.get("cap") != cap:
                     mismatches.append(f"cap: stored={stored_manifest.get('cap')} requested={cap}")
+                # Verify manifest sha256 matches computed digest
+                if stored_manifest.get("sha256") and stored_manifest.get("sha256") != digest:
+                    mismatches.append(
+                        f"sha256: manifest={stored_manifest.get('sha256')[:8]}... computed={digest[:8]}..."
+                    )
                 if mismatches:
                     raise ValueError(f"manifest mismatch for {output_path.name}: " + "; ".join(mismatches))
                 log.info("Verified %s — manifest fields match", output_path.name)
@@ -622,7 +632,7 @@ def main() -> None:
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="Recompute SHA256 from disk, compare against sidecar and manifest fields.",
+        help="Full provenance audit: SHA256 + sidecar + all manifest fields.",
     )
 
     cap_group = parser.add_mutually_exclusive_group()

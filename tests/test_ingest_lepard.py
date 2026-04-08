@@ -982,3 +982,35 @@ class TestRetryJitter:
     def test_fetch_retry_uses_random_exponential_wait(self):
         src = open("scripts/ingest_lepard.py").read()
         assert "wait_random_exponential" in src, "_FETCH_RETRY must use wait_random_exponential for jitter"
+
+
+class TestVerifyOnlyManifestSha256:
+    def test_verify_only_raises_when_manifest_sha256_mismatches(self, tmp_path):
+        import pytest
+
+        from scripts.ingest_lepard import _manifest_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        # tamper manifest sha256
+        manifest = json.loads(_manifest_path(out).read_text())
+        manifest["sha256"] = "tampered_sha256"
+        _manifest_path(out).write_text(json.dumps(manifest))
+        with pytest.raises(ValueError, match="manifest mismatch"):
+            write_jsonl(
+                iter([]),
+                out,
+                cap=5,
+                verify_only=True,
+                revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+                dataset="rmahari/LePaRD",
+                split="train",
+            )
