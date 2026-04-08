@@ -16,12 +16,13 @@ Features:
   - Idempotent: O(1) SHA256 sidecar check before O(N) line scan
   - Self-heal: valid file without sidecar gets sidecar written on next run
   - Atomic write via unique tmp→rename — safe for concurrent runs
+  - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
   - Provenance manifest JSON written alongside JSONL artifact
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
-  - --force flag to bypass idempotency for forced re-ingestion
+  - --force flag: purges stale sidecar+manifest then re-ingests
   - --dry-run flag to count rows without writing output file
   - --verify-only flag to check SHA/provenance without re-downloading
   - cap validated > 0 at entry
@@ -45,6 +46,7 @@ import datetime
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -104,6 +106,14 @@ def _write_provenance_manifest(
     }
     _manifest_path(output_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     log.info("Provenance manifest written -> %s", _manifest_path(output_path).name)
+
+
+def _purge_stale_artifacts(output_path: Path) -> None:
+    """Remove stale sidecar and manifest before forced re-ingestion."""
+    for stale in [_sidecar_path(output_path), _manifest_path(output_path)]:
+        if stale.exists():
+            stale.unlink()
+            log.info("Purged stale artifact -> %s", stale.name)
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +184,11 @@ def write_jsonl(
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via unique
     tmp→rename — safe for concurrent runs in same directory.
+    FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks.
     Computes SHA256 while writing — avoids second full file pass.
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
+    force=True: purges stale sidecar+manifest before re-ingesting.
     Writes provenance manifest JSON alongside artifact when revision+dataset provided.
     dry_run=True: counts rows without writing output file (CI preflight).
     verify_only=True: checks SHA of existing file without re-downloading.
@@ -186,7 +198,7 @@ def write_jsonl(
         stream: Iterable of row dicts to write.
         output_path: Destination JSONL file path.
         cap: Maximum rows to write. Must be > 0.
-        force: If True, bypass idempotency and always rewrite.
+        force: If True, purge stale artifacts and always rewrite.
         dry_run: If True, count rows only — no file written.
         verify_only: If True, verify existing artifact SHA without rewriting.
         revision: HF dataset revision SHA for provenance manifest.
@@ -214,6 +226,10 @@ def write_jsonl(
         log.info("Dry-run complete — would write %d rows to %s", written, output_path)
         return written, ""
 
+    if force:
+        # Purge stale sidecar and manifest before forced re-ingestion
+        _purge_stale_artifacts(output_path)
+
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
@@ -227,12 +243,14 @@ def write_jsonl(
             return 0, digest
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # FD-safe unique tmp: close raw fd before opening via Python to prevent leaks
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
+    os.close(tmp_fd)  # close raw OS fd — open() below opens by name safely
     tmp = Path(tmp_name)
     written = 0
     h = hashlib.sha256()
     try:
-        with open(tmp_fd, "w", encoding="utf-8", newline="\n") as fh:
+        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
             for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row", disable=None):
                 line = json.dumps(row) + "\n"
                 fh.write(line)
@@ -295,7 +313,7 @@ def main() -> None:
     parser.add_argument("--cap", type=int, default=None, help="Override cap from config.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Override output_dir from config.")
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
-    parser.add_argument("--force", action="store_true", help="Bypass idempotency and force re-ingestion.")
+    parser.add_argument("--force", action="store_true", help="Purge stale artifacts and force re-ingestion.")
     parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
     parser.add_argument("--verify-only", action="store_true", help="Verify existing artifact SHA only.")
     args = parser.parse_args()

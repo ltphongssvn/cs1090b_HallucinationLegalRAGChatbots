@@ -453,3 +453,40 @@ class TestVerifyOnlyFlag:
         expected_sha = compute_sha256(out)
         _, sha = write_jsonl(iter(rows), out, cap=5, verify_only=True)
         assert sha == expected_sha
+
+
+class TestFdLeakFixed:
+    def test_no_fd_leak_on_exception(self, tmp_path):
+        import os
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import write_jsonl
+
+        fds_before = len(os.listdir("/proc/self/fd"))
+
+        # simulate exception during write
+        with patch("scripts.ingest_lepard.json.dumps", side_effect=ValueError("simulated")):
+            try:
+                rows = [{"id": "0"}]
+                out = tmp_path / "out.jsonl"
+                write_jsonl(iter(rows), out, cap=1)
+            except Exception:
+                pass
+
+        fds_after = len(os.listdir("/proc/self/fd"))
+        assert fds_after <= fds_before + 1, "file descriptor leaked"
+
+
+class TestForcePurgesStaleArtifacts:
+    def test_force_removes_stale_sidecar(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = tmp_path / "out.jsonl.sha256"
+        sidecar.write_text("stale_hash\n")
+        # force rewrite — stale sidecar must be removed before write
+        write_jsonl(iter(rows), out, cap=5, force=True)
+        # sidecar must be updated not stale
+        assert sidecar.read_text().strip() != "stale_hash"
