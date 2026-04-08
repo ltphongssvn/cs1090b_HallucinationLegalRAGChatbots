@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-_CONFIG_PATH = Path(__file__).parent.parent / "config" / "data" / "lepard.yaml"
+_CONFIG_PATH = Path(__file__).parent.parent / "config" / "lepard.yaml"
 
 
 def load_lepard_config(config_path: Path = _CONFIG_PATH) -> dict[str, Any]:
