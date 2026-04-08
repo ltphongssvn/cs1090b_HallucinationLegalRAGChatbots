@@ -131,7 +131,7 @@ def write_jsonl(
         raise ValueError(f"cap must be positive, got {cap}")
 
     if not force and output_path.exists():
-        sidecar = output_path.with_suffix(_SIDECAR_SUFFIX)
+        sidecar = output_path.parent / (output_path.name + _SIDECAR_SUFFIX)
         if sidecar.exists():
             # Fast O(1) sidecar check — avoids O(N) line scan on large files
             log.info("Skipping — sidecar found for %s", output_path.name)
@@ -176,7 +176,7 @@ def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
             h.update(chunk)
     digest = h.hexdigest()
     if write_sidecar:
-        sidecar = path.with_suffix(path.suffix + _SIDECAR_SUFFIX)
+        sidecar = path.parent / (path.name + ".sha256")
         sidecar.write_text(digest + "\n", encoding="utf-8")
         log.info("SHA256 written -> %s", sidecar.name)
     return digest
@@ -208,15 +208,17 @@ def main() -> None:
     output_dir = args.output_dir or Path(cfg["output_dir"])
     output_file = output_dir / cfg["output_file"].format(cap=cap)
 
-    log.info("LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s",
-             cfg["dataset"], cfg["revision"], cap, args.force)
+    log.info(
+        "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s",
+        cfg["dataset"], cfg["revision"], cap, args.force,
+    )
 
     try:
         validate_revision(cfg["revision"])
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
         written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force)
         if written > 0:
-            sidecar = output_file.with_suffix(_SIDECAR_SUFFIX)
+            sidecar = output_file.parent / (output_file.name + _SIDECAR_SUFFIX)
             sidecar.write_text(sha256 + "\n", encoding="utf-8")
             log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
