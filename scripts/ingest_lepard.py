@@ -104,32 +104,46 @@ def write_jsonl(
     stream: Iterable[dict[str, Any]],
     output_path: Path,
     cap: int,
-) -> int:
+) -> tuple[int, str]:
     """
-    Write rows from stream to JSONL, respecting cap.
-    Idempotent: if output_path exists with correct line count, skip.
-    Returns number of rows written (or 0 if skipped).
+    Write rows from stream to JSONL, respecting cap. Atomic write via tmp→rename.
+    Computes SHA256 while writing — avoids second full file pass.
+    Idempotent: skips if output exists with cap or fewer lines (short-stream stable).
+    Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
+
+    Raises:
+        ValueError: if cap <= 0.
     """
+    if cap <= 0:
+        raise ValueError(f"cap must be positive, got {cap}")
+
     if output_path.exists():
         with output_path.open(encoding="utf-8") as fh:
             existing = sum(1 for _ in fh)
-        # Skip if file has cap lines OR fewer lines than cap (short stream stabilized)
         if existing == cap or (0 < existing < cap):
             log.info("Skipping — %s already has %d lines", output_path.name, existing)
-            return 0
+            return 0, ""
 
-    if cap == 0:
-        return 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = output_path.with_suffix(".jsonl.tmp")
     written = 0
-    with output_path.open("w", encoding="utf-8") as fh:
-        for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row"):
-            fh.write(json.dumps(row) + "\n")
-            written += 1
-            if written >= cap:
-                break
-    log.info("Wrote %d rows -> %s", written, output_path)
-    return written
+    h = hashlib.sha256()
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row"):
+                line = json.dumps(row) + "\n"
+                fh.write(line)
+                h.update(line.encode("utf-8"))
+                written += 1
+                if written >= cap:
+                    break
+        tmp.replace(output_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    digest = h.hexdigest()
+    log.info("Wrote %d rows -> %s (sha256=%s...)", written, output_path, digest[:8])
+    return written, digest
 
 
 def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
@@ -178,9 +192,11 @@ def main() -> None:
 
     try:
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
-        written = write_jsonl(stream, output_file, cap=cap)
+        written, sha256 = write_jsonl(stream, output_file, cap=cap)
         if written > 0:
-            compute_sha256(output_file, write_sidecar=True)
+            sidecar = output_file.with_suffix(".jsonl.sha256")
+            sidecar.write_text(sha256 + "\n", encoding="utf-8")
+            log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
     except Exception as exc:
         log.error("Ingestion failed: %s", exc)
