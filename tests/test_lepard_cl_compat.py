@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from src.lepard_cl_compat import (
     CompatReport,
     analyze_court_distribution,
@@ -79,6 +80,12 @@ class TestLoaders:
         path = tmp_path / "bad.jsonl"
         path.write_text('{"source_id": 1, "dest_id": 2}\nnot json\n')
         with pytest.raises(ValueError, match="malformed JSON"):
+            load_lepard_pairs(path)
+
+    def test_load_lepard_missing_required_key_raises_valueerror(self, tmp_path):
+        path = tmp_path / "missing_key.jsonl"
+        path.write_text('{"dest_id": 1}\n')
+        with pytest.raises(ValueError, match=r"missing required key.*source_id.*line 0"):
             load_lepard_pairs(path)
 
     def test_load_cl_ids_gzipped(self, tmp_cl_ids_gz):
