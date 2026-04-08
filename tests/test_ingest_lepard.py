@@ -933,3 +933,33 @@ class TestVerifyOnlyManifestCheck:
                 dataset="rmahari/LePaRD",
                 split="train",
             )
+
+
+class TestProvenanceContext:
+    def test_provenance_context_importable(self):
+        from scripts.ingest_lepard import ProvenanceContext
+
+        ctx = ProvenanceContext(
+            dataset="rmahari/LePaRD",
+            split="train",
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            cap=500000,
+        )
+        assert ctx.dataset == "rmahari/LePaRD"
+        assert ctx.split == "train"
+        assert ctx.revision == "0194f95c3091acceab3b887c9b09ef432cf84052"
+        assert ctx.cap == 500000
+
+    def test_provenance_context_is_frozen(self):
+        import pytest
+
+        from scripts.ingest_lepard import ProvenanceContext
+
+        ctx = ProvenanceContext(
+            dataset="rmahari/LePaRD",
+            split="train",
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            cap=500000,
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            ctx.dataset = "other"  # type: ignore[misc]

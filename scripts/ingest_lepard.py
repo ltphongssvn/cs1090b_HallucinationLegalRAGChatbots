@@ -12,6 +12,7 @@ LePaRD (Legal Passage Retrieval Dataset — ACL 2024)
 
 Features:
   - Config-driven via config/lepard.yaml (OmegaConf)
+  - ProvenanceContext dataclass — single object for dataset/split/revision/cap
   - Pinned revision SHA for reproducibility (validated as 40-char lowercase hex)
   - fetch_stream validates revision before any network call
   - fetch_stream retries on transient network errors (tenacity, 3 attempts)
@@ -50,8 +51,8 @@ Idempotency design:
 
 Self-heal design:
   When a valid file exists without sidecar/manifest (e.g. after a crash),
-  the next run restores BOTH the sidecar and the manifest if revision+dataset
-  are provided. Single-pass: line count and SHA256 computed in one disk read
+  the next run restores BOTH the sidecar and the manifest if ProvenanceContext
+  is provided. Single-pass: line count and SHA256 computed in one disk read
   (2.3x faster than double-pass on 500K-row files).
   If original manifest exists, its timestamp is preserved and
   provenance_reconstructed=True is added — never silently overwrites provenance.
@@ -93,6 +94,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -115,6 +117,31 @@ _FETCH_RETRY = retry(
 )
 
 
+# ---------------------------------------------------------------------------
+# ProvenanceContext — single object for dataset/split/revision/cap
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProvenanceContext:
+    """
+    Immutable provenance context passed through ingestion functions.
+    Replaces repetitive (dataset, split, revision, cap) parameter trampolining.
+    Adding a new provenance field requires updating only this dataclass,
+    not every function signature in the pipeline.
+    """
+
+    dataset: str
+    split: str
+    revision: str
+    cap: int
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+
 def _sidecar_path(output_path: Path) -> Path:
     """Return the SHA256 sidecar path for a given output file."""
     return output_path.parent / (output_path.name + _SIDECAR_SUFFIX)
@@ -123,6 +150,11 @@ def _sidecar_path(output_path: Path) -> Path:
 def _manifest_path(output_path: Path) -> Path:
     """Return the provenance manifest path for a given output file."""
     return output_path.parent / (output_path.name + _MANIFEST_SUFFIX)
+
+
+# ---------------------------------------------------------------------------
+# System helpers
+# ---------------------------------------------------------------------------
 
 
 def _git_sha() -> str:
@@ -155,6 +187,11 @@ def _utc_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
+
+
 def _count_lines_and_hash(path: Path) -> tuple[int, str]:
     """
     Single-pass: count newlines and compute SHA256 in one disk read.
@@ -176,21 +213,23 @@ def _write_sidecar(output_path: Path, digest: str) -> None:
     log.info("SHA256 sidecar written -> %s", sidecar.name)
 
 
+# ---------------------------------------------------------------------------
+# Provenance helpers
+# ---------------------------------------------------------------------------
+
+
 def _write_provenance_manifest(
     output_path: Path,
+    ctx: ProvenanceContext,
     sha256: str,
-    cap: int,
     rows_written: int,
-    hf_revision: str,
-    dataset: str,
-    split: str = "",
     force_used: bool = False,
     provenance_reconstructed: bool = False,
     original_ingestion_ts: str = "",
 ) -> None:
     """
     Write provenance manifest JSON alongside JSONL artifact.
-    Includes split and rows_written for complete artifact provenance.
+    Accepts ProvenanceContext — single object instead of 4 loose params.
     If provenance_reconstructed=True, preserves original_ingestion_ts and
     marks manifest so callers know provenance was repaired, not original.
     """
@@ -199,10 +238,10 @@ def _write_provenance_manifest(
     manifest = {
         "ingestion_ts_utc": original_ingestion_ts if original_ingestion_ts else _utc_now(),
         "script_git_commit": _git_sha(),
-        "hf_revision": hf_revision,
-        "dataset": dataset,
-        "split": split,
-        "cap": cap,
+        "hf_revision": ctx.revision,
+        "dataset": ctx.dataset,
+        "split": ctx.split,
+        "cap": ctx.cap,
         "rows_written": rows_written,
         "python_version": _python_version(),
         "datasets_version": _ds.__version__,
@@ -219,43 +258,36 @@ def _write_provenance_manifest(
 
 def _finalize_artifact(
     output_path: Path,
+    ctx: ProvenanceContext,
     digest: str,
-    cap: int,
     rows_written: int,
-    hf_revision: str,
-    dataset: str,
-    split: str,
     force_used: bool = False,
 ) -> None:
     """
     Write sidecar and manifest together — no crash window between data and metadata.
     Called after successful tmp.replace(output_path) to complete artifact bundle.
+    Accepts ProvenanceContext — single object instead of 4 loose params.
     """
     _write_sidecar(output_path, digest)
-    if hf_revision and dataset:
+    if ctx.revision and ctx.dataset:
         _write_provenance_manifest(
             output_path,
+            ctx=ctx,
             sha256=digest,
-            cap=cap,
             rows_written=rows_written,
-            hf_revision=hf_revision,
-            dataset=dataset,
-            split=split,
             force_used=force_used,
         )
 
 
 def _repair_manifest_from_sidecar(
     output_path: Path,
-    revision: str,
-    dataset: str,
-    split: str,
+    ctx: ProvenanceContext,
 ) -> None:
     """
     Repair missing manifest when sidecar is present.
     Reads digest from sidecar, counts lines for rows_written,
     and writes manifest marked provenance_reconstructed=True.
-    Called from fast path when sidecar present but manifest missing.
+    Accepts ProvenanceContext — single object instead of 3 loose params.
     """
     sidecar = _sidecar_path(output_path)
     digest = sidecar.read_text(encoding="utf-8").strip()
@@ -264,12 +296,9 @@ def _repair_manifest_from_sidecar(
     log.info("Repairing missing manifest for %s", output_path.name)
     _write_provenance_manifest(
         output_path,
+        ctx=ctx,
         sha256=digest,
-        cap=rows_written,
         rows_written=rows_written,
-        hf_revision=revision,
-        dataset=dataset,
-        split=split,
         force_used=False,
         provenance_reconstructed=True,
     )
@@ -287,10 +316,7 @@ def _self_heal_artifact(
     output_path: Path,
     existing: int,
     digest: str,
-    cap: int,
-    revision: str,
-    dataset: str,
-    split: str,
+    ctx: ProvenanceContext,
 ) -> tuple[int, str]:
     """
     Self-heal: restore sidecar AND manifest for a valid existing file.
@@ -299,6 +325,7 @@ def _self_heal_artifact(
     digest already computed by _count_lines_and_hash — no second disk read.
     Preserves original manifest timestamp if manifest exists;
     marks manifest provenance_reconstructed=True to signal repair.
+    Accepts ProvenanceContext — single object instead of 4 loose params.
     Returns (0, digest).
     """
     log.info(
@@ -308,7 +335,7 @@ def _self_heal_artifact(
     )
     _write_sidecar(output_path, digest)
 
-    if revision and dataset:
+    if ctx.revision and ctx.dataset:
         original_ts = ""
         manifest = _manifest_path(output_path)
         if manifest.exists():
@@ -320,12 +347,9 @@ def _self_heal_artifact(
 
         _write_provenance_manifest(
             output_path,
+            ctx=ctx,
             sha256=digest,
-            cap=cap,
             rows_written=existing,
-            hf_revision=revision,
-            dataset=dataset,
-            split=split,
             force_used=False,
             provenance_reconstructed=True,
             original_ingestion_ts=original_ts,
@@ -425,7 +449,7 @@ def write_jsonl(
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
     verify_only=True: recomputes SHA256, compares against sidecar AND manifest
-      fields (revision, dataset, split, cap) — raises ValueError on mismatch.
+      fields (revision, dataset, split) — raises ValueError on mismatch.
     Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
@@ -447,6 +471,8 @@ def write_jsonl(
     """
     if cap <= 0:
         raise ValueError(f"cap must be positive, got {cap}")
+
+    ctx = ProvenanceContext(dataset=dataset, split=split, revision=revision, cap=cap)
 
     if verify_only:
         if not output_path.exists():
@@ -500,13 +526,13 @@ def write_jsonl(
             # Fast path: sidecar present = skip
             # Repair missing manifest if provenance params provided
             if revision and dataset and not _manifest_path(output_path).exists():
-                _repair_manifest_from_sidecar(output_path, revision, dataset, split)
+                _repair_manifest_from_sidecar(output_path, ctx)
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
         # Single-pass: count lines and compute SHA256 in one disk read
         existing, digest = _count_lines_and_hash(output_path)
         if existing == cap or (0 < existing < cap):
-            return _self_heal_artifact(output_path, existing, digest, cap, revision, dataset, split)
+            return _self_heal_artifact(output_path, existing, digest, ctx)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
@@ -531,16 +557,7 @@ def write_jsonl(
     log.info("Wrote %d rows -> %s (sha256=%s...)", written, output_path, digest[:8])
 
     # Finalize artifact: write sidecar and manifest together — no crash window
-    _finalize_artifact(
-        output_path,
-        digest=digest,
-        cap=cap,
-        rows_written=written,
-        hf_revision=revision,
-        dataset=dataset,
-        split=split,
-        force_used=force,
-    )
+    _finalize_artifact(output_path, ctx=ctx, digest=digest, rows_written=written, force_used=force)
 
     return written, digest
 
