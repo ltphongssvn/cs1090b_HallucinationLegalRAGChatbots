@@ -374,3 +374,28 @@ class TestDryRun:
         out = tmp_path / "out.jsonl"
         written, _ = write_jsonl(iter(rows), out, cap=5, dry_run=True)
         assert written == 5
+
+
+class TestHypothesisIdempotency:
+    def test_write_jsonl_idempotent_property(self, tmp_path):
+        from hypothesis import given, settings
+        from hypothesis import strategies as st
+        from hypothesis.strategies import composite
+
+        from scripts.ingest_lepard import write_jsonl
+
+        @composite
+        def valid_rows(draw):
+            n = draw(st.integers(min_value=1, max_value=20))
+            return [{"id": str(i), "quote": draw(st.text(max_size=50))} for i in range(n)]
+
+        @given(valid_rows())
+        @settings(max_examples=30)
+        def inner(rows):
+            out = tmp_path / f"out_{len(rows)}.jsonl"
+            cap = max(1, len(rows))
+            write_jsonl(iter(rows), out, cap=cap)
+            r2, _ = write_jsonl(iter(rows), out, cap=cap)
+            assert r2 == 0, "second run must be a no-op"
+
+        inner()
