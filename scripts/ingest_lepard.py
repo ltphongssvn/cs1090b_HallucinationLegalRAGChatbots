@@ -17,11 +17,13 @@ Features:
   - Self-heal: valid file without sidecar gets sidecar written on next run
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - SHA256 computed while writing — avoids second full file pass
+  - Provenance manifest JSON written alongside JSONL artifact
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
   - --force flag to bypass idempotency for forced re-ingestion
   - --dry-run flag to count rows without writing output file
+  - --verify-only flag to check SHA/provenance without re-downloading
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
 
@@ -33,15 +35,18 @@ Usage
     uv run python scripts/ingest_lepard.py --output-dir data/raw/lepard
     uv run python scripts/ingest_lepard.py --force
     uv run python scripts/ingest_lepard.py --dry-run
+    uv run python scripts/ingest_lepard.py --verify-only
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import logging
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -54,11 +59,51 @@ log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
+_MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest: out.jsonl -> out.jsonl.manifest.json
 
 
 def _sidecar_path(output_path: Path) -> Path:
     """Return the SHA256 sidecar path for a given output file."""
     return output_path.parent / (output_path.name + _SIDECAR_SUFFIX)
+
+
+def _manifest_path(output_path: Path) -> Path:
+    """Return the provenance manifest path for a given output file."""
+    return output_path.parent / (output_path.name + _MANIFEST_SUFFIX)
+
+
+def _git_sha() -> str:
+    """Return current git commit SHA or 'unknown'."""
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _write_provenance_manifest(
+    output_path: Path,
+    sha256: str,
+    cap: int,
+    hf_revision: str,
+    dataset: str,
+    force_used: bool = False,
+) -> None:
+    """Write provenance manifest JSON alongside JSONL artifact."""
+    import datasets as _ds
+
+    manifest = {
+        "ingestion_ts_utc": datetime.datetime.utcnow().isoformat(),
+        "script_git_commit": _git_sha(),
+        "hf_revision": hf_revision,
+        "dataset": dataset,
+        "cap": cap,
+        "python_version": sys.version[:6],
+        "datasets_version": _ds.__version__,
+        "force_used": force_used,
+        "sha256": sha256,
+    }
+    _manifest_path(output_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log.info("Provenance manifest written -> %s", _manifest_path(output_path).name)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +167,9 @@ def write_jsonl(
     cap: int,
     force: bool = False,
     dry_run: bool = False,
+    verify_only: bool = False,
+    revision: str = "",
+    dataset: str = "",
 ) -> tuple[int, str]:
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via unique
@@ -129,7 +177,9 @@ def write_jsonl(
     Computes SHA256 while writing — avoids second full file pass.
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
+    Writes provenance manifest JSON alongside artifact when revision+dataset provided.
     dry_run=True: counts rows without writing output file (CI preflight).
+    verify_only=True: checks SHA of existing file without re-downloading.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Args:
@@ -138,6 +188,9 @@ def write_jsonl(
         cap: Maximum rows to write. Must be > 0.
         force: If True, bypass idempotency and always rewrite.
         dry_run: If True, count rows only — no file written.
+        verify_only: If True, verify existing artifact SHA without rewriting.
+        revision: HF dataset revision SHA for provenance manifest.
+        dataset: HF dataset name for provenance manifest.
 
     Raises:
         ValueError: if cap <= 0.
@@ -145,8 +198,14 @@ def write_jsonl(
     if cap <= 0:
         raise ValueError(f"cap must be positive, got {cap}")
 
+    if verify_only:
+        if not output_path.exists():
+            raise FileNotFoundError(f"Cannot verify — {output_path} does not exist")
+        digest = compute_sha256(output_path)
+        log.info("Verified %s sha256=%s...", output_path.name, digest[:8])
+        return 0, digest
+
     if dry_run:
-        # Count rows without writing — useful for CI preflight validation
         written = 0
         for _ in tqdm(stream, total=cap, desc="Dry-run LePaRD", unit="row", disable=None):
             written += 1
@@ -158,20 +217,16 @@ def write_jsonl(
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
-            # Fast O(1) sidecar check — avoids O(N) line scan on large files
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
         with output_path.open(encoding="utf-8") as fh:
             existing = sum(1 for _ in fh)
-        # Skip if file has cap lines OR fewer lines than cap (short stream stabilized)
         if existing == cap or (0 < existing < cap):
             log.info("Skipping — %s already has %d lines; self-healing sidecar", output_path.name, existing)
-            # Self-heal: compute and write missing sidecar for valid existing file
             digest = compute_sha256(output_path, write_sidecar=True)
             return 0, digest
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Unique tmp name — safe for concurrent runs targeting same output path
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
     tmp = Path(tmp_name)
     written = 0
@@ -191,6 +246,17 @@ def write_jsonl(
             tmp.unlink()
     digest = h.hexdigest()
     log.info("Wrote %d rows -> %s (sha256=%s...)", written, output_path, digest[:8])
+
+    if revision and dataset:
+        _write_provenance_manifest(
+            output_path,
+            sha256=digest,
+            cap=cap,
+            hf_revision=revision,
+            dataset=dataset,
+            force_used=force,
+        )
+
     return written, digest
 
 
@@ -231,6 +297,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
     parser.add_argument("--force", action="store_true", help="Bypass idempotency and force re-ingestion.")
     parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
+    parser.add_argument("--verify-only", action="store_true", help="Verify existing artifact SHA only.")
     args = parser.parse_args()
 
     cfg = load_lepard_config(args.config)
@@ -240,18 +307,28 @@ def main() -> None:
     output_file = output_dir / cfg["output_file"].format(cap=cap)
 
     log.info(
-        "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s dry_run=%s",
+        "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s dry_run=%s verify_only=%s",
         cfg["dataset"],
         cfg["revision"],
         cap,
         args.force,
         args.dry_run,
+        args.verify_only,
     )
 
     try:
         validate_revision(cfg["revision"])
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
-        written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force, dry_run=args.dry_run)
+        written, sha256 = write_jsonl(
+            stream,
+            output_file,
+            cap=cap,
+            force=args.force,
+            dry_run=args.dry_run,
+            verify_only=args.verify_only,
+            revision=cfg["revision"],
+            dataset=cfg["dataset"],
+        )
         if written > 0 and not args.dry_run:
             sidecar = _sidecar_path(output_file)
             sidecar.write_text(sha256 + "\n", encoding="utf-8")

@@ -399,3 +399,57 @@ class TestHypothesisIdempotency:
             assert r2 == 0, "second run must be a no-op"
 
         inner()
+
+
+class TestProvenanceManifest:
+    def test_provenance_manifest_written_after_ingest(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        manifest = tmp_path / "out.jsonl.manifest.json"
+        assert manifest.exists(), "provenance manifest must be written alongside JSONL"
+
+    def test_provenance_manifest_has_required_fields(self, tmp_path):
+        import json
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        manifest = json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        assert "ingestion_ts_utc" in manifest
+        assert "script_git_commit" in manifest
+        assert "hf_revision" in manifest
+        assert "cap" in manifest
+        assert "python_version" in manifest
+        assert "datasets_version" in manifest
+        assert "sha256" in manifest
+
+
+class TestVerifyOnlyFlag:
+    def test_verify_only_does_not_rewrite_file(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        mtime1 = out.stat().st_mtime
+        write_jsonl(iter(rows), out, cap=5, verify_only=True)
+        assert out.stat().st_mtime == mtime1
+
+    def test_verify_only_returns_existing_sha256(self, tmp_path):
+        from scripts.ingest_lepard import compute_sha256, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        expected_sha = compute_sha256(out)
+        _, sha = write_jsonl(iter(rows), out, cap=5, verify_only=True)
+        assert sha == expected_sha
