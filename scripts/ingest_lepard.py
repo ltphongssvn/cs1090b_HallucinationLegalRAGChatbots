@@ -14,9 +14,10 @@ Features:
   - Config-driven via config/lepard.yaml (OmegaConf)
   - Pinned revision SHA for reproducibility (validated as 40-char hex)
   - Idempotent: O(1) SHA256 sidecar check before O(N) line scan
-  - Atomic write via tmp→rename — no partial artifacts on failure
+  - Self-heal: valid file without sidecar gets sidecar written on next run
+  - Atomic write via unique tmp→rename — safe for concurrent runs
   - SHA256 computed while writing — avoids second full file pass
-  - tqdm progress bar for live monitoring
+  - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
   - --force flag to bypass idempotency for forced re-ingestion
@@ -40,6 +41,7 @@ import json
 import logging
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -119,9 +121,11 @@ def write_jsonl(
     force: bool = False,
 ) -> tuple[int, str]:
     """
-    Write rows from stream to JSONL, respecting cap. Atomic write via tmp→rename.
+    Write rows from stream to JSONL, respecting cap. Atomic write via unique
+    tmp→rename — safe for concurrent runs in same directory.
     Computes SHA256 while writing — avoids second full file pass.
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
+    Self-heals: valid file without sidecar gets sidecar written on skip path.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Args:
@@ -146,16 +150,20 @@ def write_jsonl(
             existing = sum(1 for _ in fh)
         # Skip if file has cap lines OR fewer lines than cap (short stream stabilized)
         if existing == cap or (0 < existing < cap):
-            log.info("Skipping — %s already has %d lines", output_path.name, existing)
-            return 0, ""
+            log.info("Skipping — %s already has %d lines; self-healing sidecar", output_path.name, existing)
+            # Self-heal: compute and write missing sidecar for valid existing file
+            digest = compute_sha256(output_path, write_sidecar=True)
+            return 0, digest
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output_path.with_suffix(".jsonl.tmp")
+    # Unique tmp name — safe for concurrent runs targeting same output path
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
+    tmp = Path(tmp_name)
     written = 0
     h = hashlib.sha256()
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
-            for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row"):
+        with open(tmp_fd, "w", encoding="utf-8", newline="\n") as fh:
+            for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row", disable=None):
                 line = json.dumps(row) + "\n"
                 fh.write(line)
                 h.update(line.encode("utf-8"))
@@ -174,7 +182,8 @@ def write_jsonl(
 def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     """
     Compute SHA256 of file. Optionally write <path>.sha256 sidecar.
-    Useful for external verification of existing artifacts.
+    Useful for external verification of existing artifacts and self-healing
+    missing sidecars on valid existing files.
     """
     h = hashlib.sha256()
     with path.open("rb") as fh:

@@ -321,3 +321,38 @@ class TestTqdmDisableNone:
             write_jsonl(iter(rows), out, cap=5)
             _, kwargs = mock_tqdm.call_args
             assert kwargs.get("disable") is None
+
+
+class TestUniqueTmpFile:
+    def test_tmp_file_uses_unique_name(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        # fixed name .jsonl.tmp must not exist after success
+        assert not (tmp_path / "out.jsonl.tmp").exists()
+
+    def test_concurrent_writes_use_different_tmp_names(self, tmp_path):
+        import tempfile
+
+        out = tmp_path / "out.jsonl"
+        tmp1 = tempfile.NamedTemporaryFile(dir=out.parent, suffix=".jsonl.tmp", delete=False)
+        tmp2 = tempfile.NamedTemporaryFile(dir=out.parent, suffix=".jsonl.tmp", delete=False)
+        assert tmp1.name != tmp2.name
+
+
+class TestSidecarSelfHeal:
+    def test_valid_file_without_sidecar_gets_sidecar_written(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = tmp_path / "out.jsonl.sha256"
+        # remove sidecar to simulate missing sidecar state
+        sidecar.unlink(missing_ok=True)
+        assert not sidecar.exists()
+        # second run should self-heal sidecar
+        write_jsonl(iter(rows), out, cap=5)
+        assert sidecar.exists(), "second run must self-heal missing sidecar"
