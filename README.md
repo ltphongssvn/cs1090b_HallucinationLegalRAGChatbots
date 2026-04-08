@@ -1491,3 +1491,191 @@ All experiments are reproducible via:
 main (production) ← develop (integration) ← feature/* (work)
 ```
 After cloning: `uv run pre-commit install && uv run pre-commit install --hook-type pre-push`
+
+---
+
+## 500K LePaRD Cap Decision and Revised Scope
+
+### Original Decision
+
+The 500K cap on LePaRD ingestion was a conservative compute hedge made at project onset, when experiments were scoped to ~5,000 CourtListener opinions on constrained hardware. With GPU access now expanded to an NVIDIA L4, 23GB VRAM and CourtListener corpus scaled to 1.4M federal appellate opinions, the 500K cap creates three systematic problems.
+
+### Problems with Keeping 500K
+
+**1. Corpus asymmetry.**
+The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* — they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Recall@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
+
+**2. Retrieval evaluation validity.**
+LePaRD contains 4M+ ground-truth retrieval pairs. At 500K, the project uses approximately 12% of the available evaluation signal. For a comparative study of five architecture classes, more ground-truth pairs directly produce more statistically reliable MRR and NDCG@10 estimates — especially for the weaker baselines (TF-IDF, CNN) where score variance is high and confidence intervals are wide.
+
+**3. Fine-tuning data starvation.**
+The CNN and BiLSTM encoders are trained on LePaRD contrastive pairs using InfoNCE loss. At 500K training pairs, both architectures are likely underfit relative to what an L4 can saturate. The Transformer bi-encoder (Legal-BERT) similarly benefits from more positive/negative pairs for `MultipleNegativesRankingLoss`. Capping training data at 500K artificially limits the quality ceiling of every architecture under comparison, which undermines the comparative validity of the study.
+
+### Revised Scope
+
+With L4 compute available and no resource constraints, the project adopts the following revised data scope:
+
+| Split | Rows | Purpose |
+|---|---|---|
+| LePaRD train | ~4M | Encoder fine-tuning (CNN, BiLSTM, Legal-BERT) |
+| LePaRD test (held-out) | ~1M | Retrieval evaluation (Recall@k, NDCG@10, MRR) |
+| CourtListener federal appellate | ~1.4M | Candidate opinion corpus for retrieval |
+
+`config/lepard.yaml` is updated accordingly:
+
+```yaml
+cap: 4000000          # full train split for encoder fine-tuning
+smoke_cap: 1000       # CI smoke test unchanged
+output_file: lepard_train_{cap}_rev0194f95.jsonl
+```
+
+### Revised Proposal Language
+
+**Original:**
+"We scope experiments to ~500K for final evaluation, downloaded via CourtListener's paginated API."
+
+**Revised:**
+"We use the full LePaRD training split (~4M pairs) for retriever fine-tuning and a 1M-pair held-out test set for evaluation, consistent with our 1.4M CourtListener opinion corpus and the available L4 compute budget. This eliminates corpus asymmetry between the retrieval candidate space and the ground-truth evaluation signal, maximizes statistical power for Recall@k and NDCG@10 comparisons across five architecture classes, and ensures CNN, BiLSTM, and Transformer encoders are trained to capacity on available hardware."
+
+---
+
+```markdown
+## `scripts/ingest_lepard.py` — LePaRD Dataset Ingestion Pipeline
+
+### Role in the RAG Pipeline
+
+This script is **Stage 1: Raw Data Acquisition** in the hallucination-reduction legal RAG pipeline. It is the single authoritative boundary between the HuggingFace Hub and the local corpus. All downstream components — the NaN audit gate, embedding generation, vector indexing, and the RAG retriever — depend on the artifact this script produces being byte-exact, reproducible, and provenance-verified.
+
+```
+HuggingFace Hub (rmahari/LePaRD, ACL 2024)
+        │
+        ▼
+scripts/ingest_lepard.py              ← Stage 1: Raw Acquisition
+        │  produces:
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows)
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.sha256
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.manifest.json
+        │
+        │  versioned via DVC → S3:
+        │    s3://cs1090b-hallucinationlegalragchatbots/dvc
+        ▼
+scripts/audit_jsonl_nan.py            ← Stage 2: Data Quality Gate
+        ▼
+[embedding + indexing pipeline]       ← Stage 3: Vector Store Construction
+        ▼
+[RAG retriever + LLM]                 ← Stage 4: Inference
+```
+
+### Why LePaRD and Why 4M Rows
+
+LePaRD (Legal Passage Retrieval Dataset, Mahari et al., ACL 2024) contains 4M+ ground-truth `(legal argument context, cited precedent passage)` pairs extracted from actual U.S. federal judicial opinions. It is the **evaluation backbone** of this project: for each legal argument, we know exactly which precedent passage a federal judge cited, enabling automated measurement of retrieval quality (Recall@k, NDCG@10, MRR) without human annotation.
+
+The cap was revised from 500K → 4M rows for three reasons:
+
+1. **Corpus asymmetry**: evaluating against 1.4M CourtListener opinions with only 500K ground-truth pairs systematically underestimates Recall@k.
+2. **Statistical power**: 4M pairs produce reliable NDCG@10 estimates across all five architecture classes (TF-IDF, CNN, BiLSTM, Legal-BERT, KG-augmented).
+3. **Fine-tuning capacity**: CNN and BiLSTM encoders are underfit at 500K; the Google Colab Pro A100 High RAM runtime / Harvard OnDemand GPU Cluster L4/A10G  can saturate the full 4M training split.
+
+### Actual Acquisition Results (Google Colab Pro A100, April 2026)
+
+| Artifact | Size | Rows | SHA256 (first 8) |
+|---|---|---|---|
+| `lepard_train_4000000_rev0194f95.jsonl` | 5.4 GB | 4,000,000 | `see .sha256` |
+| `lepard_train_4000000_rev0194f95.jsonl.sha256` | 65 B | — | sidecar |
+| `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
+
+DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
+DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
+
+### Key Capabilities
+
+| Capability | Detail |
+|---|---|
+| **Pinned revision** | Validates 40-char lowercase hex SHA before any network call — mutable refs like `main` are rejected |
+| **Idempotent** | O(1) sidecar-presence fast path; skips re-download if artifact already exists |
+| **Self-healing** | Restores missing sidecar + manifest by recomputing SHA256 from disk bytes on next run |
+| **Atomic write** | Unique `tmp → rename` — no partial artifacts on failure or concurrent runs |
+| **Provenance bundle** | Writes `.jsonl` + `.sha256` + `.manifest.json` together — no crash window |
+| **Strict audit** | `--verify-only` fails closed: checks digest, sidecar, revision, dataset, split, cap, rows\_written, sha256 |
+| **Network resilience** | Retries initial HF load up to 3× on `OSError` with jitter (`wait_random_exponential`) — thundering-herd safe on shared clusters |
+| **Unicode-safe** | `ensure_ascii=False` preserves legal symbols (§, ¶, em-dash) critical for embedding fidelity |
+| **NaN pass-through** | NaN rows are not filtered here — `audit_jsonl_nan.py` is the downstream gate |
+| **DVC + S3** | Artifact versioned via DVC and pushed to S3 for reproducible pulls across machines |
+
+### Provenance Manifest (actual output)
+
+```json
+{
+  "ingestion_ts_utc": "2026-04-08T20:31:00+00:00",
+  "script_git_commit": "<40-char SHA>",
+  "hf_revision": "0194f95c3091acceab3b887c9b09ef432cf84052",
+  "dataset": "rmahari/LePaRD",
+  "split": "train",
+  "cap": 4000000,
+  "rows_written": 4000000,
+  "python_version": "3.11.15",
+  "datasets_version": "4.7.0",
+  "force_used": false,
+  "sha256": "<64-char hex>"
+}
+```
+
+### Configuration (`config/lepard.yaml`)
+
+```yaml
+dataset: rmahari/LePaRD
+split: train
+revision: 0194f95c3091acceab3b887c9b09ef432cf84052
+cap: 4000000
+smoke_cap: 1000
+output_dir: data/raw/lepard
+output_file: lepard_train_{cap}_rev0194f95.jsonl
+```
+
+### Demo CLI Commands (Friday TF Session)
+
+```bash
+# 1. CI smoke test — downloads 1K rows, writes full artifact bundle, runs in ~15s
+uv run python scripts/ingest_lepard.py --smoke
+
+# 2. Preflight dry-run — counts rows without writing any file
+uv run python scripts/ingest_lepard.py --dry-run
+
+# 3. Full 4M ingest — downloads 5.4GB, writes JSONL + sidecar + manifest
+uv run python scripts/ingest_lepard.py
+
+# 4. Strict provenance audit — fails closed on any mismatch
+uv run python scripts/ingest_lepard.py --verify-only
+
+# 5. Force re-ingest — purges stale artifacts and rewrites from scratch
+uv run python scripts/ingest_lepard.py --force
+
+# 6. Version and push artifact to S3 via DVC
+uv run dvc push lepard_4M.dvc
+
+# 7. Pull artifact on a new machine (reproduces exact 5.4GB artifact)
+uv run dvc pull lepard_4M.dvc
+
+# 8. Run the full test suite (79 tests, ~3s)
+uv run pytest tests/test_ingest_lepard.py -q
+
+# 9. Verify local artifact integrity after DVC pull
+ls -lh data/raw/lepard/
+wc -l data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl
+```
+
+### Test Coverage (79 tests, 3.27s on A100)
+
+The pipeline is covered by 79 pytest tests including:
+
+- **Idempotency**: second run is always a no-op (Hypothesis property-based)
+- **Strict verify**: fails closed on missing sidecar, missing manifest, tampered SHA256, cap mismatch, rows\_written mismatch, revision mismatch
+- **Self-heal**: restores full artifact bundle; preserves original ingestion timestamp; marks `provenance_reconstructed=True`
+- **Repair**: recomputes SHA256 from disk bytes — never trusts stale sidecar
+- **Retry**: `wait_none()` override confirms 3-attempt retry without sleep in CI
+- **Unicode**: legal symbols preserved end-to-end through `ensure_ascii=False`
+- **Atomic write**: no `.tmp` files left after successful or failed write
+- **Force flag**: purges stale sidecar + manifest before rewrite
+```
+
+---
