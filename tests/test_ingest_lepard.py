@@ -252,11 +252,6 @@ class TestHashWhileWriting:
         assert len(sha256) == 64
 
 
-# ---------------------------------------------------------------------------
-# RED: SHA256 sidecar idempotency, log.exception, docstring accuracy
-# ---------------------------------------------------------------------------
-
-
 class TestSha256SidecarIdempotency:
     def test_skips_when_sidecar_exists(self, tmp_path):
         from scripts.ingest_lepard import write_jsonl
@@ -264,9 +259,8 @@ class TestSha256SidecarIdempotency:
         rows = [{"id": str(i)} for i in range(10)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=10)
-        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar = tmp_path / "out.jsonl.sha256"
         sidecar.write_text("dummy_hash\n")
-        # second run must skip using sidecar, not line count
         r2, _ = write_jsonl(iter(rows), out, cap=10)
         assert r2 == 0
 
@@ -278,9 +272,8 @@ class TestSha256SidecarIdempotency:
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
-        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar = tmp_path / "out.jsonl.sha256"
         sidecar.write_text("any_hash\n")
-        # if sidecar present, sum(1 for ...) should NOT be called
         with patch("builtins.sum") as mock_sum:
             write_jsonl(iter(rows), out, cap=5)
             assert not mock_sum.called, "line-count scan must not run when sidecar exists"
@@ -292,19 +285,14 @@ class TestLogException:
 
         src = Path("scripts/ingest_lepard.py").read_text()
         assert "log.exception" in src, "main() must use log.exception to preserve traceback"
-        assert 'log.error("Ingestion failed' not in src, "log.error hides traceback — use log.exception"
-
-
-# ---------------------------------------------------------------------------
-# RED: _SIDECAR_SUFFIX constant, --force flag, provenance manifest
-# ---------------------------------------------------------------------------
+        assert 'log.error("Ingestion failed' not in src, "log.error hides traceback"
 
 
 class TestSidecarSuffixConstant:
     def test_sidecar_suffix_constant_importable(self):
         from scripts.ingest_lepard import _SIDECAR_SUFFIX
 
-        assert _SIDECAR_SUFFIX == ".jsonl.sha256"
+        assert _SIDECAR_SUFFIX == ".sha256"
 
 
 class TestForceFlag:
@@ -314,7 +302,7 @@ class TestForceFlag:
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
-        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar = tmp_path / "out.jsonl.sha256"
         sidecar.write_text("stale_hash\n")
         r2, _ = write_jsonl(iter(rows), out, cap=5, force=True)
         assert r2 == 5, "--force must rewrite even when sidecar exists"

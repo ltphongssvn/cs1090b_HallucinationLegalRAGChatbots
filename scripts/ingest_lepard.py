@@ -49,7 +49,13 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
-_SIDECAR_SUFFIX = ".jsonl.sha256"  # single source of truth for sidecar extension
+_SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
+
+
+def _sidecar_path(output_path: Path) -> Path:
+    """Return the SHA256 sidecar path for a given output file."""
+    return output_path.parent / (output_path.name + _SIDECAR_SUFFIX)
+
 
 # ---------------------------------------------------------------------------
 # Revision validation
@@ -131,7 +137,7 @@ def write_jsonl(
         raise ValueError(f"cap must be positive, got {cap}")
 
     if not force and output_path.exists():
-        sidecar = output_path.parent / (output_path.name + _SIDECAR_SUFFIX)
+        sidecar = _sidecar_path(output_path)
         if sidecar.exists():
             # Fast O(1) sidecar check — avoids O(N) line scan on large files
             log.info("Skipping — sidecar found for %s", output_path.name)
@@ -176,7 +182,7 @@ def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
             h.update(chunk)
     digest = h.hexdigest()
     if write_sidecar:
-        sidecar = path.parent / (path.name + ".sha256")
+        sidecar = _sidecar_path(path)
         sidecar.write_text(digest + "\n", encoding="utf-8")
         log.info("SHA256 written -> %s", sidecar.name)
     return digest
@@ -218,7 +224,7 @@ def main() -> None:
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
         written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force)
         if written > 0:
-            sidecar = output_file.parent / (output_file.name + _SIDECAR_SUFFIX)
+            sidecar = _sidecar_path(output_file)
             sidecar.write_text(sha256 + "\n", encoding="utf-8")
             log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
