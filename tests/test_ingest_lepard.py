@@ -482,3 +482,56 @@ class TestDryRun:
         out = tmp_path / "out.jsonl"
         written, _ = write_jsonl(iter(rows), out, cap=5, dry_run=True)
         assert written == 5
+
+
+class TestJsonDumpsEnsureAscii:
+    def test_unicode_preserved_in_output(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": "0", "quote": "café au lait — Smith v. Jones"}]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=1)
+        obj = json.loads(out.read_text(encoding="utf-8"))
+        assert obj["quote"] == "café au lait — Smith v. Jones"
+
+
+class TestTqdmMiniters:
+    def test_tqdm_called_with_miniters_1(self, tmp_path):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
+            mock_tqdm.side_effect = lambda x, **kw: x
+            write_jsonl(iter(rows), out, cap=5)
+            _, kwargs = mock_tqdm.call_args
+            assert kwargs.get("miniters") == 1
+
+
+class TestSmokeCap:
+    def test_smoke_and_cap_mutually_exclusive(self, tmp_path, monkeypatch):
+        import sys
+
+        from scripts.ingest_lepard import main
+
+        shard = tmp_path / "s.jsonl"
+        shard.write_text('{"id": "0"}\n')
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "ingest",
+                "--smoke",
+                "--cap",
+                "100",
+                "--output-dir",
+                str(tmp_path),
+            ],
+        )
+        import pytest
+
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code != 0, "--smoke and --cap must be mutually exclusive"

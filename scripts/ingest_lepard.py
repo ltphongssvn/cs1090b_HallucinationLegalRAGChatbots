@@ -18,10 +18,14 @@ Features:
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
+  - json.dumps with ensure_ascii=False — preserves legal unicode (café, —)
+  - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
+  - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest JSON written alongside JSONL artifact
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
+  - --smoke and --cap are mutually exclusive
   - --force flag: purges stale sidecar+manifest then re-ingests
   - --dry-run flag to count rows without writing output file
   - --verify-only flag to check SHA/provenance without re-downloading
@@ -164,6 +168,7 @@ def fetch_stream(
     Stream rows from HuggingFace dataset with pinned revision.
     Pinned revision ensures reproducibility — streaming order is deterministic
     for a fixed commit SHA (confirmed: revision=main is not pinned).
+    NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
     from datasets import load_dataset
 
@@ -186,6 +191,8 @@ def write_jsonl(
     tmp→rename — safe for concurrent runs in same directory.
     FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks.
     Computes SHA256 while writing — avoids second full file pass.
+    Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
+    tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
     force=True: purges stale sidecar+manifest before re-ingesting.
@@ -219,7 +226,7 @@ def write_jsonl(
 
     if dry_run:
         written = 0
-        for _ in tqdm(stream, total=cap, desc="Dry-run LePaRD", unit="row", disable=None):
+        for _ in tqdm(stream, total=cap, desc="Dry-run LePaRD", unit="row", disable=None, miniters=1):
             written += 1
             if written >= cap:
                 break
@@ -227,7 +234,6 @@ def write_jsonl(
         return written, ""
 
     if force:
-        # Purge stale sidecar and manifest before forced re-ingestion
         _purge_stale_artifacts(output_path)
 
     if not force and output_path.exists():
@@ -243,7 +249,6 @@ def write_jsonl(
             return 0, digest
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # FD-safe unique tmp: close raw fd before opening via Python to prevent leaks
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
     os.close(tmp_fd)  # close raw OS fd — open() below opens by name safely
     tmp = Path(tmp_name)
@@ -251,8 +256,10 @@ def write_jsonl(
     h = hashlib.sha256()
     try:
         with tmp.open("w", encoding="utf-8", newline="\n") as fh:
-            for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row", disable=None):
-                line = json.dumps(row) + "\n"
+            for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row", disable=None, miniters=1):
+                # ensure_ascii=False preserves legal unicode (café, em-dash, etc.)
+                # NaN rows passed through — audit_jsonl_nan.py is the downstream gate
+                line = json.dumps(row, ensure_ascii=False) + "\n"
                 fh.write(line)
                 h.update(line.encode("utf-8"))
                 written += 1
@@ -309,13 +316,17 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--smoke", action="store_true", help="Download smoke_cap rows only (for CI).")
-    parser.add_argument("--cap", type=int, default=None, help="Override cap from config.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Override output_dir from config.")
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
     parser.add_argument("--force", action="store_true", help="Purge stale artifacts and force re-ingestion.")
     parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
     parser.add_argument("--verify-only", action="store_true", help="Verify existing artifact SHA only.")
+
+    # --smoke and --cap are mutually exclusive
+    cap_group = parser.add_mutually_exclusive_group()
+    cap_group.add_argument("--smoke", action="store_true", help="Download smoke_cap rows only (for CI).")
+    cap_group.add_argument("--cap", type=int, default=None, help="Override cap from config.")
+
     args = parser.parse_args()
 
     cfg = load_lepard_config(args.config)
