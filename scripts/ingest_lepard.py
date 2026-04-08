@@ -38,8 +38,11 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from omegaconf import OmegaConf
+from tqdm import tqdm
 
 log = logging.getLogger(__name__)
+
+CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 
 # ---------------------------------------------------------------------------
 # Config
@@ -91,10 +94,12 @@ def write_jsonl(
             log.info("Skipping — %s already has %d lines", output_path.name, cap)
             return 0
 
+    if cap == 0:
+        return 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     with output_path.open("w", encoding="utf-8") as fh:
-        for row in stream:
+        for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row"):
             fh.write(json.dumps(row) + "\n")
             written += 1
             if written >= cap:
@@ -110,7 +115,7 @@ def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     """
     h = hashlib.sha256()
     with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(65536), b""):
+        for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
             h.update(chunk)
     digest = h.hexdigest()
     if write_sidecar:
