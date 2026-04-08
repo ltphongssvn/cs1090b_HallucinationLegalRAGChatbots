@@ -97,7 +97,7 @@ class TestLoadLepardConfig:
         cfg = load_lepard_config()
         assert cfg["dataset"] == "rmahari/LePaRD"
         assert cfg["revision"] == "0194f95c3091acceab3b887c9b09ef432cf84052"
-        assert cfg["cap"] == 500000
+        assert cfg["cap"] == 4000000
         assert cfg["smoke_cap"] == 1000
 
     def test_config_has_output_dir(self):
