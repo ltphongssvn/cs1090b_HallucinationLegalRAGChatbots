@@ -19,7 +19,9 @@ Features:
   - tqdm progress bar for live monitoring
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
+  - --force flag to bypass idempotency for forced re-ingestion
   - cap validated > 0 at entry
+  - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
 
 Usage
 -----
@@ -27,6 +29,7 @@ Usage
     uv run python scripts/ingest_lepard.py --smoke
     uv run python scripts/ingest_lepard.py --cap 10000
     uv run python scripts/ingest_lepard.py --output-dir data/raw/lepard
+    uv run python scripts/ingest_lepard.py --force
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
+_SIDECAR_SUFFIX = ".jsonl.sha256"  # single source of truth for sidecar extension
 
 # ---------------------------------------------------------------------------
 # Revision validation
@@ -106,6 +110,7 @@ def write_jsonl(
     stream: Iterable[dict[str, Any]],
     output_path: Path,
     cap: int,
+    force: bool = False,
 ) -> tuple[int, str]:
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via tmp→rename.
@@ -113,14 +118,20 @@ def write_jsonl(
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
+    Args:
+        stream: Iterable of row dicts to write.
+        output_path: Destination JSONL file path.
+        cap: Maximum rows to write. Must be > 0.
+        force: If True, bypass idempotency and always rewrite.
+
     Raises:
         ValueError: if cap <= 0.
     """
     if cap <= 0:
         raise ValueError(f"cap must be positive, got {cap}")
 
-    if output_path.exists():
-        sidecar = output_path.with_suffix(".jsonl.sha256")
+    if not force and output_path.exists():
+        sidecar = output_path.with_suffix(_SIDECAR_SUFFIX)
         if sidecar.exists():
             # Fast O(1) sidecar check — avoids O(N) line scan on large files
             log.info("Skipping — sidecar found for %s", output_path.name)
@@ -157,7 +168,7 @@ def write_jsonl(
 def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     """
     Compute SHA256 of file. Optionally write <path>.sha256 sidecar.
-    Sidecar enables downstream integrity checks without re-reading the data.
+    Useful for external verification of existing artifacts.
     """
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -165,7 +176,7 @@ def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
             h.update(chunk)
     digest = h.hexdigest()
     if write_sidecar:
-        sidecar = path.with_suffix(path.suffix + ".sha256")
+        sidecar = path.with_suffix(path.suffix + _SIDECAR_SUFFIX)
         sidecar.write_text(digest + "\n", encoding="utf-8")
         log.info("SHA256 written -> %s", sidecar.name)
     return digest
@@ -188,6 +199,7 @@ def main() -> None:
     parser.add_argument("--cap", type=int, default=None, help="Override cap from config.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Override output_dir from config.")
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
+    parser.add_argument("--force", action="store_true", help="Bypass idempotency and force re-ingestion.")
     args = parser.parse_args()
 
     cfg = load_lepard_config(args.config)
@@ -196,14 +208,15 @@ def main() -> None:
     output_dir = args.output_dir or Path(cfg["output_dir"])
     output_file = output_dir / cfg["output_file"].format(cap=cap)
 
-    log.info("LePaRD ingestion — dataset=%s revision=%s cap=%d", cfg["dataset"], cfg["revision"], cap)
+    log.info("LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s",
+             cfg["dataset"], cfg["revision"], cap, args.force)
 
     try:
         validate_revision(cfg["revision"])
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
-        written, sha256 = write_jsonl(stream, output_file, cap=cap)
+        written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force)
         if written > 0:
-            sidecar = output_file.with_suffix(".jsonl.sha256")
+            sidecar = output_file.with_suffix(_SIDECAR_SUFFIX)
             sidecar.write_text(sha256 + "\n", encoding="utf-8")
             log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
