@@ -1076,3 +1076,22 @@ class TestRepairVerifiesBytesBeforeTrustingSidecar:
         manifest_sha = json.loads(_manifest_path(out).read_text())["sha256"]
         assert manifest_sha != "stale_corrupt_hash", "repair must recompute sha256 from disk, not trust sidecar"
         assert len(manifest_sha) == 64, "repaired manifest must have valid sha256"
+
+
+class TestVerifyOnlyRowsWrittenCheck:
+    def test_verify_only_raises_on_rows_written_mismatch(self, tmp_path):
+        import json as _json
+        import pytest
+        from scripts.ingest_lepard import _manifest_path, write_jsonl
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5,
+                    revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+                    dataset="rmahari/LePaRD", split="train")
+        m = _json.loads(_manifest_path(out).read_text())
+        m["rows_written"] = 999
+        _manifest_path(out).write_text(_json.dumps(m))
+        with pytest.raises(ValueError, match="manifest mismatch"):
+            write_jsonl(iter([]), out, cap=5, verify_only=True,
+                        revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+                        dataset="rmahari/LePaRD", split="train")

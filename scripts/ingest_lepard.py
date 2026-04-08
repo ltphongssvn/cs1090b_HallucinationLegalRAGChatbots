@@ -31,9 +31,9 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
-  - --verify-only fails closed: missing sidecar raises ValueError
+  - --verify-only fails closed: missing sidecar/manifest raises ValueError
   - --verify-only checks digest, sidecar, AND manifest fields (revision, dataset,
-    split, cap, sha256) — raises ValueError on any mismatch
+    split, cap, rows_written, sha256) — raises ValueError on any mismatch
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -50,7 +50,8 @@ Idempotency design:
   integrity check. It is framed honestly: sidecar present = skip. For verified
   integrity, use --verify-only which is a strict audit that fails closed:
   missing sidecar raises ValueError; missing manifest raises ValueError if
-  provenance params are provided; digest and all manifest fields are checked.
+  provenance params are provided; digest and all manifest fields including
+  rows_written are checked.
 
 Repair design:
   _repair_manifest_from_sidecar() recomputes sha256 from disk bytes — never
@@ -469,8 +470,8 @@ def write_jsonl(
     verify_only=True: strict audit — fails closed:
       missing sidecar raises ValueError,
       missing manifest raises ValueError if provenance params provided,
-      digest and all manifest fields (revision, dataset, split, cap, sha256)
-      must all match — raises ValueError on any mismatch.
+      digest and all manifest fields (revision, dataset, split, cap,
+      rows_written, sha256) must all match — raises ValueError on any mismatch.
     Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
@@ -512,7 +513,7 @@ def write_jsonl(
             raise ValueError(
                 f"sidecar missing for {output_path.name}: cannot verify artifact integrity without sidecar"
             )
-        # Full manifest provenance audit: revision, dataset, split, cap, sha256
+        # Full manifest provenance audit: revision, dataset, split, cap, rows_written, sha256
         manifest_file = _manifest_path(output_path)
         if revision and dataset:
             if not manifest_file.exists():
@@ -530,6 +531,14 @@ def write_jsonl(
                     mismatches.append(f"split: stored={stored_manifest.get('split')} requested={split}")
                 if cap and stored_manifest.get("cap") != cap:
                     mismatches.append(f"cap: stored={stored_manifest.get('cap')} requested={cap}")
+                # Verify rows_written matches manifest
+                stored_rows = stored_manifest.get("rows_written")
+                if stored_rows is not None:
+                    # Count actual lines in file for comparison
+                    actual_rows, _ = _count_lines_and_hash(output_path)
+                    if stored_rows != actual_rows:
+                        mismatches.append(f"rows_written: manifest={stored_rows} actual={actual_rows}")
+                # Verify manifest sha256 matches computed digest
                 if stored_manifest.get("sha256") and stored_manifest.get("sha256") != digest:
                     mismatches.append(
                         f"sha256: manifest={stored_manifest.get('sha256')[:8]}... computed={digest[:8]}..."
