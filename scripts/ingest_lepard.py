@@ -14,6 +14,7 @@ Features:
   - Config-driven via config/lepard.yaml (OmegaConf)
   - Pinned revision SHA for reproducibility (validated as 40-char lowercase hex)
   - fetch_stream validates revision before any network call
+  - fetch_stream retries on transient network errors (tenacity, 3 attempts)
   - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
   - Self-heal: restores both sidecar AND manifest on valid existing file
@@ -56,6 +57,11 @@ Concurrency design:
   Path.replace() is atomic on POSIX. However this is not full concurrency
   control — concurrent runs are last-writer-wins, not serialized.
 
+Network retry design:
+  fetch_stream retries up to 3 times on transient network errors
+  (ConnectionResetError, OSError, TimeoutError) with exponential backoff
+  (1s, 2s). This handles HuggingFace Hub connection drops during long downloads.
+
 Usage
 -----
     uv run python scripts/ingest_lepard.py
@@ -83,6 +89,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from omegaconf import OmegaConf
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
 log = logging.getLogger(__name__)
@@ -90,6 +97,14 @@ log = logging.getLogger(__name__)
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
 _MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest suffix
+
+# Network retry config: 3 attempts, exponential backoff 1s→2s
+_FETCH_RETRY = retry(
+    retry=retry_if_exception_type((ConnectionResetError, OSError, TimeoutError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
 
 
 def _sidecar_path(output_path: Path) -> Path:
@@ -265,6 +280,18 @@ def load_lepard_config(config_path: Path = _CONFIG_PATH) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@_FETCH_RETRY
+def _load_hf_dataset(dataset: str, split: str, revision: str) -> Any:
+    """
+    Load HuggingFace dataset with retry on transient network errors.
+    Retries up to 3 times with exponential backoff (1s→2s→4s).
+    Separated from fetch_stream so retry wraps only the network call.
+    """
+    from datasets import load_dataset
+
+    return load_dataset(dataset, split=split, streaming=True, revision=revision)
+
+
 def fetch_stream(
     dataset: str,
     split: str,
@@ -273,12 +300,11 @@ def fetch_stream(
     """
     Stream rows from HuggingFace dataset with pinned revision.
     Validates revision is a 40-char lowercase hex SHA before any network call.
+    Retries load_dataset up to 3 times on transient network errors.
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
     validate_revision(revision)
-    from datasets import load_dataset
-
-    ds = load_dataset(dataset, split=split, streaming=True, revision=revision)
+    ds = _load_hf_dataset(dataset, split, revision)
     yield from ds  # type: ignore[misc]
 
 

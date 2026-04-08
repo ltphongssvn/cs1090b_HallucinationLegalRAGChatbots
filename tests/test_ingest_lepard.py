@@ -793,3 +793,32 @@ class TestCliHelpText:
         assert "Recompute SHA256" in help_text, "--verify-only must have help text"
         assert "smoke_cap" in help_text or "smoke" in help_text.lower(), "--smoke must have help text"
         assert "Override cap" in help_text, "--cap must have help text"
+
+
+class TestFetchStreamRetry:
+    def test_fetch_stream_retries_on_connection_error(self):
+        from unittest.mock import MagicMock, patch
+
+        from scripts.ingest_lepard import fetch_stream
+
+        attempt = 0
+
+        def flaky_load(*args, **kwargs):
+            nonlocal attempt
+            attempt += 1
+            if attempt < 3:
+                raise ConnectionResetError("flaky network")
+            ds = MagicMock()
+            ds.__iter__ = MagicMock(return_value=iter([{"id": "0"}]))
+            return ds
+
+        with patch("datasets.load_dataset", side_effect=flaky_load):
+            rows = list(
+                fetch_stream(
+                    "rmahari/LePaRD",
+                    "train",
+                    "0194f95c3091acceab3b887c9b09ef432cf84052",
+                )
+            )
+            assert len(rows) == 1, "fetch_stream must retry on connection error"
+            assert attempt == 3, "must retry exactly 3 times"
