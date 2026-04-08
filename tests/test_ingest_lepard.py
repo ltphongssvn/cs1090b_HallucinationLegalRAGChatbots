@@ -539,7 +539,6 @@ class TestFetchStreamRevisionValidation:
 
         from scripts.ingest_lepard import fetch_stream
 
-        # validate_revision called before network — raises immediately, no HF download
         with pytest.raises(ValueError, match="not a 40-char hex SHA"):
             next(fetch_stream("rmahari/LePaRD", "train", "main"))
 
@@ -579,12 +578,63 @@ class TestRevisionValidationEdgeCases:
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5, force=True)
         sidecar = _sidecar_path(out)
-        # simulate crash after data write before sidecar write
         sidecar.unlink(missing_ok=True)
         assert not sidecar.exists()
         r2, _ = write_jsonl(iter(rows), out, cap=5)
         assert r2 == 0, "next run must self-heal not rewrite"
         assert sidecar.exists(), "sidecar must be self-healed"
+
+
+class TestTimezoneAwareTimestamp:
+    def test_manifest_uses_timezone_aware_utc(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        manifest = json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        ts = manifest["ingestion_ts_utc"]
+        assert "+00:00" in ts or ts.endswith("Z"), "ingestion_ts_utc must be timezone-aware UTC"
+
+    def test_manifest_python_version_is_exact(self, tmp_path):
+        import sys
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        manifest = json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        expected = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        assert manifest["python_version"] == expected
+
+
+class TestVerifyOnlySidecarComparison:
+    def test_verify_only_compares_digest_against_sidecar(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(iter(rows), out, cap=5)
+        _, verify_digest = write_jsonl(iter([]), out, cap=5, verify_only=True)
+        assert verify_digest == digest
+
+    def test_verify_only_raises_when_sidecar_mismatches(self, tmp_path):
+        import pytest
+
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = _sidecar_path(out)
+        sidecar.write_text("wrong_hash\n")
+        with pytest.raises(ValueError, match="digest mismatch"):
+            write_jsonl(iter([]), out, cap=5, verify_only=True)
 
 
 class TestGitShaFallback:
@@ -625,69 +675,8 @@ class TestGitShaEnvFallback:
             assert not mock_sub.called, "subprocess must not be called when env var set"
 
 
-class TestTimezoneAwareTimestamp:
-    def test_manifest_uses_timezone_aware_utc(self, tmp_path):
-        from scripts.ingest_lepard import write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        write_jsonl(
-            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
-        )
-        import json as _json
-
-        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
-        ts = manifest["ingestion_ts_utc"]
-        # timezone-aware UTC includes +00:00 suffix
-        assert "+00:00" in ts or ts.endswith("Z"), "ingestion_ts_utc must be timezone-aware UTC"
-
-    def test_manifest_python_version_is_exact(self, tmp_path):
-        import json as _json
-        import sys
-
-        from scripts.ingest_lepard import write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        write_jsonl(
-            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
-        )
-        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
-        expected = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        assert manifest["python_version"] == expected
-
-
-class TestVerifyOnlySidecarComparison:
-    def test_verify_only_compares_digest_against_sidecar(self, tmp_path):
-        from scripts.ingest_lepard import _sidecar_path, write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        _, digest = write_jsonl(iter(rows), out, cap=5)
-        sidecar = _sidecar_path(out)
-        sidecar.write_text(digest + "\n")
-        # verify_only must compare computed digest against sidecar
-        _, verify_digest = write_jsonl(iter([]), out, cap=5, verify_only=True)
-        assert verify_digest == digest
-
-    def test_verify_only_raises_when_sidecar_mismatches(self, tmp_path):
-        import pytest
-
-        from scripts.ingest_lepard import _sidecar_path, write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        write_jsonl(iter(rows), out, cap=5)
-        sidecar = _sidecar_path(out)
-        sidecar.write_text("wrong_hash\n")
-        with pytest.raises(ValueError, match="digest mismatch"):
-            write_jsonl(iter([]), out, cap=5, verify_only=True)
-
-
 class TestManifestCompleteness:
     def test_manifest_includes_split(self, tmp_path):
-        import json as _json
-
         from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
@@ -700,13 +689,11 @@ class TestManifestCompleteness:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        manifest = json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
         assert "split" in manifest, "manifest must record dataset split"
         assert manifest["split"] == "train"
 
     def test_manifest_includes_rows_written(self, tmp_path):
-        import json as _json
-
         from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
@@ -714,14 +701,47 @@ class TestManifestCompleteness:
         write_jsonl(
             iter(rows),
             out,
-            cap=10,  # cap=10 but only 5 rows
+            cap=10,
             revision="0194f95c3091acceab3b887c9b09ef432cf84052",
             dataset="rmahari/LePaRD",
             split="train",
         )
-        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        manifest = json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
         assert "rows_written" in manifest, "manifest must record actual rows written"
         assert manifest["rows_written"] == 5, "rows_written must reflect actual rows not cap"
+
+
+class TestSinglePassSelfHeal:
+    def test_self_heal_uses_single_pass(self, tmp_path):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(iter(rows), out, cap=5)
+        _sidecar_path(out).unlink(missing_ok=True)
+        with patch("scripts.ingest_lepard.open", wraps=open) as mock_open:
+            write_jsonl(iter(rows), out, cap=5)
+            read_calls = [c for c in mock_open.call_args_list if str(out) in str(c)]
+            assert len(read_calls) <= 1, "self-heal must use single-pass read"
+
+
+class TestCliHelpText:
+    def test_all_flags_have_help_text(self):
+        import subprocess
+
+        result = subprocess.run(
+            ["uv", "run", "python", "scripts/ingest_lepard.py", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        help_text = result.stdout + result.stderr
+        assert "Purge stale" in help_text, "--force must have help text"
+        assert "Count rows" in help_text, "--dry-run must have help text"
+        assert "Recompute SHA256" in help_text, "--verify-only must have help text"
+        assert "smoke" in help_text.lower(), "--smoke must have help text"
+        assert "Override cap" in help_text, "--cap must have help text"
 
 
 class TestSelfHealManifest:
@@ -742,11 +762,8 @@ class TestSelfHealManifest:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        _sidecar_path(out).write_text(digest + "\n")
-        # delete both
-        _sidecar_path(out).unlink()
-        _manifest_path(out).unlink()
-        # self-heal run
+        _sidecar_path(out).unlink(missing_ok=True)
+        _manifest_path(out).unlink(missing_ok=True)
         write_jsonl(
             iter(rows),
             out,
@@ -759,74 +776,9 @@ class TestSelfHealManifest:
         assert _manifest_path(out).exists(), "self-heal must restore manifest"
 
 
-class TestSinglePassSelfHeal:
-    def test_self_heal_uses_single_pass(self, tmp_path):
-        from unittest.mock import patch
-
-        from scripts.ingest_lepard import _sidecar_path, write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        _, digest = write_jsonl(iter(rows), out, cap=5)
-        _sidecar_path(out).write_text(digest + "\n")
-        _sidecar_path(out).unlink()
-        # single-pass: open() called once for combined line-count + hash
-        with patch("scripts.ingest_lepard.open", wraps=open) as mock_open:
-            write_jsonl(iter(rows), out, cap=5)
-            # only one open call for the self-heal read
-            read_calls = [c for c in mock_open.call_args_list if str(out) in str(c)]
-            assert len(read_calls) <= 1, "self-heal must use single-pass read"
-
-
-class TestCliHelpText:
-    def test_all_flags_have_help_text(self):
-        import subprocess
-
-        result = subprocess.run(
-            ["uv", "run", "python", "scripts/ingest_lepard.py", "--help"],
-            capture_output=True,
-            text=True,
-        )
-        help_text = result.stdout + result.stderr
-        assert "Purge stale" in help_text, "--force must have help text"
-        assert "Count rows" in help_text, "--dry-run must have help text"
-        assert "Recompute SHA256" in help_text, "--verify-only must have help text"
-        assert "smoke_cap" in help_text or "smoke" in help_text.lower(), "--smoke must have help text"
-        assert "Override cap" in help_text, "--cap must have help text"
-
-
-class TestFetchStreamRetry:
-    def test_fetch_stream_retries_on_connection_error(self):
-        from unittest.mock import MagicMock, patch
-
-        from scripts.ingest_lepard import fetch_stream
-
-        attempt = 0
-
-        def flaky_load(*args, **kwargs):
-            nonlocal attempt
-            attempt += 1
-            if attempt < 3:
-                raise ConnectionResetError("flaky network")
-            ds = MagicMock()
-            ds.__iter__ = MagicMock(return_value=iter([{"id": "0"}]))
-            return ds
-
-        with patch("datasets.load_dataset", side_effect=flaky_load):
-            rows = list(
-                fetch_stream(
-                    "rmahari/LePaRD",
-                    "train",
-                    "0194f95c3091acceab3b887c9b09ef432cf84052",
-                )
-            )
-            assert len(rows) == 1, "fetch_stream must retry on connection error"
-            assert attempt == 3, "must retry exactly 3 times"
-
-
 class TestManifestRepairWhenSidecarPresent:
     def test_missing_manifest_repaired_when_sidecar_present(self, tmp_path):
-        from scripts.ingest_lepard import _manifest_path, _sidecar_path, write_jsonl
+        from scripts.ingest_lepard import _manifest_path, write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
@@ -838,10 +790,8 @@ class TestManifestRepairWhenSidecarPresent:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        _sidecar_path(out).write_text(digest + "\n")
-        _manifest_path(out).unlink()
+        _manifest_path(out).unlink(missing_ok=True)
         assert not _manifest_path(out).exists()
-        # next run — must repair manifest even when sidecar present
         write_jsonl(
             iter(rows),
             out,
@@ -855,7 +805,6 @@ class TestManifestRepairWhenSidecarPresent:
 
 class TestSelfHealPreservesOriginalProvenance:
     def test_self_heal_preserves_original_manifest_timestamp(self, tmp_path):
-        import json as _json
         import time
 
         from scripts.ingest_lepard import _manifest_path, _sidecar_path, write_jsonl
@@ -870,10 +819,8 @@ class TestSelfHealPreservesOriginalProvenance:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        _sidecar_path(out).write_text(digest + "\n")
-        original_ts = _json.loads(_manifest_path(out).read_text())["ingestion_ts_utc"]
-        # delete sidecar only — manifest survives
-        _sidecar_path(out).unlink()
+        original_ts = json.loads(_manifest_path(out).read_text())["ingestion_ts_utc"]
+        _sidecar_path(out).unlink(missing_ok=True)
         time.sleep(0.05)
         write_jsonl(
             iter(rows),
@@ -883,9 +830,42 @@ class TestSelfHealPreservesOriginalProvenance:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        repaired = _json.loads(_manifest_path(out).read_text())
+        repaired = json.loads(_manifest_path(out).read_text())
         assert repaired["ingestion_ts_utc"] == original_ts, "self-heal must preserve original provenance timestamp"
         assert repaired.get("provenance_reconstructed") is True, "self-heal must mark manifest as reconstructed"
+
+
+class TestFetchStreamRetry:
+    def test_fetch_stream_retries_on_connection_error(self):
+        from unittest.mock import MagicMock, patch
+
+        from tenacity import wait_none
+
+        import scripts.ingest_lepard as m
+
+        attempt = 0
+
+        def flaky(*args, **kwargs):
+            nonlocal attempt
+            attempt += 1
+            if attempt < 3:
+                raise ConnectionResetError("flaky network")
+            ds = MagicMock()
+            ds.__iter__ = MagicMock(return_value=iter([{"id": "0"}]))
+            return ds
+
+        # override wait to instant so test does not sleep
+        m._load_hf_dataset.retry.wait = wait_none()
+        with patch("datasets.load_dataset", side_effect=flaky):
+            rows = list(
+                m.fetch_stream(
+                    "rmahari/LePaRD",
+                    "train",
+                    "0194f95c3091acceab3b887c9b09ef432cf84052",
+                )
+            )
+            assert len(rows) == 1, "fetch_stream must retry on connection error"
+            assert attempt == 3, "must retry exactly 3 times"
 
 
 class TestFreshWriteFinalization:
@@ -909,7 +889,7 @@ class TestVerifyOnlyManifestCheck:
     def test_verify_only_checks_manifest_revision(self, tmp_path):
         import pytest
 
-        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+        from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
@@ -921,8 +901,6 @@ class TestVerifyOnlyManifestCheck:
             dataset="rmahari/LePaRD",
             split="train",
         )
-        _sidecar_path(out).write_text(digest + "\n")
-        # verify with wrong revision — should fail if manifest is consulted
         with pytest.raises(ValueError, match="manifest mismatch"):
             write_jsonl(
                 iter([]),
