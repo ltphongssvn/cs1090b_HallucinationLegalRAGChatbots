@@ -306,3 +306,18 @@ class TestForceFlag:
         sidecar.write_text("stale_hash\n")
         r2, _ = write_jsonl(iter(rows), out, cap=5, force=True)
         assert r2 == 5, "--force must rewrite even when sidecar exists"
+
+
+class TestTqdmDisableNone:
+    def test_tqdm_called_with_disable_none(self, tmp_path):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
+            mock_tqdm.side_effect = lambda x, **kw: x
+            write_jsonl(iter(rows), out, cap=5)
+            _, kwargs = mock_tqdm.call_args
+            assert kwargs.get("disable") is None
