@@ -26,6 +26,25 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+__all__ = [
+    "DEFAULT_FIXTURES",
+    "DEFAULT_LEPARD",
+    "DEFAULT_CL_IDS",
+    "DEFAULT_COURT_MAP",
+    "IdOverlap",
+    "PairOverlap",
+    "CompatReport",
+    "load_lepard_pairs",
+    "load_cl_ids",
+    "load_court_map",
+    "compute_id_overlap",
+    "compute_pair_overlap",
+    "analyze_court_distribution",
+    "run_full_analysis",
+    "format_report",
+    "main",
+]
+
 DEFAULT_FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 DEFAULT_LEPARD = DEFAULT_FIXTURES / "lepard_sample_1k.jsonl"
 DEFAULT_CL_IDS = DEFAULT_FIXTURES / "cl_ids.txt.gz"
@@ -63,7 +82,7 @@ class PairOverlap:
 class CompatReport:
     id_overlap: IdOverlap
     pair_overlap: PairOverlap
-    court_distribution: dict = field(default_factory=dict)
+    court_distribution: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -174,7 +193,7 @@ def analyze_court_distribution(pairs, cl_ids, court_map):
             matched.add(s)
         if d in cl_ids:
             matched.add(d)
-    dist = {}
+    dist: dict[str, int] = {}
     for mid in matched:
         court = court_map.get(mid)
         if court is not None:
