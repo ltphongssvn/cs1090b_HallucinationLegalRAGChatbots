@@ -15,7 +15,7 @@ Features:
   - ProvenanceContext dataclass — single object for dataset/split/revision/cap
   - Pinned revision SHA for reproducibility (validated as 40-char lowercase hex)
   - fetch_stream validates revision before any network call
-  - fetch_stream retries on OSError (covers ConnectionResetError, TimeoutError)
+  - fetch_stream retries on OSError with jitter (wait_random_exponential)
   - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
   - Self-heal: restores both sidecar AND manifest on valid existing file
@@ -30,7 +30,7 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
-  - --verify-only checks digest AND manifest fields (revision, dataset, split)
+  - --verify-only checks digest AND manifest fields (revision, dataset, split, cap)
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -46,7 +46,8 @@ Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
   integrity check. It is framed honestly: sidecar present = skip. For verified
   integrity, use --verify-only which recomputes SHA256 from disk bytes,
-  compares against the stored sidecar, and checks manifest provenance fields.
+  compares against the stored sidecar, and checks manifest fields:
+  revision, dataset, split, AND cap.
   If manifest is missing when sidecar is present, manifest is repaired.
 
 Self-heal design:
@@ -67,9 +68,9 @@ Concurrency design:
   control — concurrent runs are last-writer-wins, not serialized.
 
 Network retry design:
-  fetch_stream retries up to 3 times on OSError with exponential backoff
-  (1s→2s→4s). OSError covers ConnectionResetError and TimeoutError as subclasses —
-  no redundant exception types in the retry predicate.
+  fetch_stream retries up to 3 times on OSError with wait_random_exponential
+  backoff (jitter prevents thundering herd when multiple workers hit HF Hub).
+  OSError covers ConnectionResetError and TimeoutError as subclasses.
   Note: retry covers _load_hf_dataset() only, not mid-stream iteration failures.
 
 Usage
@@ -100,7 +101,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from omegaconf import OmegaConf
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 from tqdm import tqdm
 
 log = logging.getLogger(__name__)
@@ -109,12 +110,13 @@ CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
 _MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest suffix
 
-# Network retry config: 3 attempts, exponential backoff 1s→2s→4s
+# Network retry config: 3 attempts, random exponential backoff with jitter
+# wait_random_exponential prevents thundering herd when multiple workers hit HF Hub
 # OSError covers ConnectionResetError and TimeoutError as subclasses — no redundancy
 _FETCH_RETRY = retry(
     retry=retry_if_exception_type(OSError),
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=4),
+    wait=wait_random_exponential(multiplier=1, max=4),
     reraise=True,
 )
 
@@ -403,7 +405,8 @@ def load_lepard_config(config_path: Path = _CONFIG_PATH) -> dict[str, Any]:
 def _load_hf_dataset(dataset: str, split: str, revision: str) -> Any:
     """
     Load HuggingFace dataset with retry on OSError (covers ConnectionResetError,
-    TimeoutError as subclasses). Retries up to 3 times with exponential backoff.
+    TimeoutError as subclasses). Retries up to 3 times with random exponential
+    backoff (jitter prevents thundering herd across multiple workers).
     Separated from fetch_stream so retry wraps only the network call.
     """
     from datasets import load_dataset
@@ -419,7 +422,7 @@ def fetch_stream(
     """
     Stream rows from HuggingFace dataset with pinned revision.
     Validates revision is a 40-char lowercase hex SHA before any network call.
-    Retries load_dataset up to 3 times on OSError.
+    Retries load_dataset up to 3 times on OSError with jitter.
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
     validate_revision(revision)
@@ -452,7 +455,7 @@ def write_jsonl(
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
     verify_only=True: recomputes SHA256, compares against sidecar AND manifest
-      fields (revision, dataset, split) — raises ValueError on mismatch.
+      fields (revision, dataset, split, cap) — raises ValueError on mismatch.
     Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
@@ -491,6 +494,7 @@ def write_jsonl(
             log.info("Verified %s — digest matches sidecar", output_path.name)
         else:
             log.warning("Verified %s — no sidecar to compare against", output_path.name)
+        # Check manifest fields: revision, dataset, split, AND cap
         manifest_file = _manifest_path(output_path)
         if manifest_file.exists() and revision and dataset:
             try:
@@ -502,6 +506,8 @@ def write_jsonl(
                     mismatches.append(f"dataset: stored={stored_manifest.get('dataset')} requested={dataset}")
                 if split and stored_manifest.get("split") != split:
                     mismatches.append(f"split: stored={stored_manifest.get('split')} requested={split}")
+                if cap and stored_manifest.get("cap") != cap:
+                    mismatches.append(f"cap: stored={stored_manifest.get('cap')} requested={cap}")
                 if mismatches:
                     raise ValueError(f"manifest mismatch for {output_path.name}: " + "; ".join(mismatches))
                 log.info("Verified %s — manifest fields match", output_path.name)
