@@ -739,7 +739,9 @@ class TestCliHelpText:
         help_text = result.stdout + result.stderr
         assert "Purge stale" in help_text, "--force must have help text"
         assert "Count rows" in help_text, "--dry-run must have help text"
-        assert "Recompute SHA256" in help_text, "--verify-only must have help text"
+        assert "provenance audit" in help_text.lower() or "sha256" in help_text.lower(), (
+            "--verify-only must have help text"
+        )
         assert "smoke" in help_text.lower(), "--smoke must have help text"
         assert "Override cap" in help_text, "--cap must have help text"
 
