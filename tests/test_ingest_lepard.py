@@ -854,7 +854,6 @@ class TestFetchStreamRetry:
             ds.__iter__ = MagicMock(return_value=iter([{"id": "0"}]))
             return ds
 
-        # override wait to instant so test does not sleep
         m._load_hf_dataset.retry.wait = wait_none()
         with patch("datasets.load_dataset", side_effect=flaky):
             rows = list(
@@ -941,3 +940,11 @@ class TestProvenanceContext:
         )
         with pytest.raises((AttributeError, TypeError)):
             ctx.dataset = "other"  # type: ignore[misc]
+
+
+class TestRetryExceptionType:
+    def test_fetch_retry_uses_oserror_only(self):
+        src = open("scripts/ingest_lepard.py").read()
+        assert "retry_if_exception_type(OSError)" in src, (
+            "_FETCH_RETRY must use OSError only — ConnectionResetError/TimeoutError are redundant subclasses"
+        )

@@ -15,7 +15,7 @@ Features:
   - ProvenanceContext dataclass — single object for dataset/split/revision/cap
   - Pinned revision SHA for reproducibility (validated as 40-char lowercase hex)
   - fetch_stream validates revision before any network call
-  - fetch_stream retries on transient network errors (tenacity, 3 attempts)
+  - fetch_stream retries on OSError (covers ConnectionResetError, TimeoutError)
   - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
   - Self-heal: restores both sidecar AND manifest on valid existing file
@@ -30,7 +30,7 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
-  - --verify-only checks digest AND manifest fields (revision, dataset, split, cap)
+  - --verify-only checks digest AND manifest fields (revision, dataset, split)
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -67,9 +67,10 @@ Concurrency design:
   control — concurrent runs are last-writer-wins, not serialized.
 
 Network retry design:
-  fetch_stream retries up to 3 times on transient network errors
-  (ConnectionResetError, OSError, TimeoutError) with exponential backoff
-  (1s→2s→4s). This handles HuggingFace Hub connection drops during long downloads.
+  fetch_stream retries up to 3 times on OSError with exponential backoff
+  (1s→2s→4s). OSError covers ConnectionResetError and TimeoutError as subclasses —
+  no redundant exception types in the retry predicate.
+  Note: retry covers _load_hf_dataset() only, not mid-stream iteration failures.
 
 Usage
 -----
@@ -109,8 +110,9 @@ _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl
 _MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest suffix
 
 # Network retry config: 3 attempts, exponential backoff 1s→2s→4s
+# OSError covers ConnectionResetError and TimeoutError as subclasses — no redundancy
 _FETCH_RETRY = retry(
-    retry=retry_if_exception_type((ConnectionResetError, OSError, TimeoutError)),
+    retry=retry_if_exception_type(OSError),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=4),
     reraise=True,
@@ -288,6 +290,7 @@ def _repair_manifest_from_sidecar(
     Reads digest from sidecar, counts lines for rows_written,
     and writes manifest marked provenance_reconstructed=True.
     Accepts ProvenanceContext — single object instead of 3 loose params.
+    cap from ctx preserves requested cap semantics (not conflated with rows_written).
     """
     sidecar = _sidecar_path(output_path)
     digest = sidecar.read_text(encoding="utf-8").strip()
@@ -399,8 +402,8 @@ def load_lepard_config(config_path: Path = _CONFIG_PATH) -> dict[str, Any]:
 @_FETCH_RETRY
 def _load_hf_dataset(dataset: str, split: str, revision: str) -> Any:
     """
-    Load HuggingFace dataset with retry on transient network errors.
-    Retries up to 3 times with exponential backoff (1s→2s→4s).
+    Load HuggingFace dataset with retry on OSError (covers ConnectionResetError,
+    TimeoutError as subclasses). Retries up to 3 times with exponential backoff.
     Separated from fetch_stream so retry wraps only the network call.
     """
     from datasets import load_dataset
@@ -416,7 +419,7 @@ def fetch_stream(
     """
     Stream rows from HuggingFace dataset with pinned revision.
     Validates revision is a 40-char lowercase hex SHA before any network call.
-    Retries load_dataset up to 3 times on transient network errors.
+    Retries load_dataset up to 3 times on OSError.
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
     validate_revision(revision)
@@ -488,7 +491,6 @@ def write_jsonl(
             log.info("Verified %s — digest matches sidecar", output_path.name)
         else:
             log.warning("Verified %s — no sidecar to compare against", output_path.name)
-        # Check manifest fields if provenance params provided
         manifest_file = _manifest_path(output_path)
         if manifest_file.exists() and revision and dataset:
             try:
@@ -523,13 +525,10 @@ def write_jsonl(
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
-            # Fast path: sidecar present = skip
-            # Repair missing manifest if provenance params provided
             if revision and dataset and not _manifest_path(output_path).exists():
                 _repair_manifest_from_sidecar(output_path, ctx)
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
-        # Single-pass: count lines and compute SHA256 in one disk read
         existing, digest = _count_lines_and_hash(output_path)
         if existing == cap or (0 < existing < cap):
             return _self_heal_artifact(output_path, existing, digest, ctx)
@@ -556,7 +555,6 @@ def write_jsonl(
     digest = h.hexdigest()
     log.info("Wrote %d rows -> %s (sha256=%s...)", written, output_path, digest[:8])
 
-    # Finalize artifact: write sidecar and manifest together — no crash window
     _finalize_artifact(output_path, ctx=ctx, digest=digest, rows_written=written, force_used=force)
 
     return written, digest
