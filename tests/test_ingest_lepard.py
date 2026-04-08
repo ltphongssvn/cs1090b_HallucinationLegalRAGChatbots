@@ -36,7 +36,7 @@ class TestWriteJsonl:
 
         rows = [{"id": str(i), "text": f"case {i}"} for i in range(100)]
         out = tmp_path / "out.jsonl"
-        written = write_jsonl(iter(rows), out, cap=100)
+        written, _ = write_jsonl(iter(rows), out, cap=100)
         assert written == 100
         assert out.exists()
 
@@ -45,7 +45,7 @@ class TestWriteJsonl:
 
         rows = [{"id": str(i)} for i in range(1000)]
         out = tmp_path / "out.jsonl"
-        written = write_jsonl(iter(rows), out, cap=50)
+        written, _ = write_jsonl(iter(rows), out, cap=50)
         assert written == 50
         lines = out.read_text().strip().split("\n")
         assert len(lines) == 50
@@ -107,11 +107,6 @@ class TestLoadLepardConfig:
         assert "output_dir" in cfg
 
 
-# ---------------------------------------------------------------------------
-# RED: CHUNK_SIZE, SHA256 idempotency, tqdm, exceptions, zero-cap, atomic write
-# ---------------------------------------------------------------------------
-
-
 class TestChunkSizeConstant:
     def test_chunk_size_importable(self):
         from scripts.ingest_lepard import CHUNK_SIZE
@@ -157,13 +152,15 @@ class TestFetchStreamExceptions:
 
 
 class TestZeroCapHandling:
-    def test_cap_zero_writes_zero_rows(self, tmp_path):
+    def test_cap_zero_raises(self, tmp_path):
+        import pytest
+
         from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(10)]
         out = tmp_path / "out.jsonl"
-        written = write_jsonl(iter(rows), out, cap=0)
-        assert written == 0
+        with pytest.raises(ValueError, match="cap must be positive"):
+            write_jsonl(iter(rows), out, cap=0)
 
 
 class TestAtomicWrite:
@@ -176,11 +173,6 @@ class TestAtomicWrite:
         assert not out.with_suffix(".jsonl.tmp").exists()
 
 
-# ---------------------------------------------------------------------------
-# RED: short-stream bug, revision SHA validation, atomic write, context manager
-# ---------------------------------------------------------------------------
-
-
 class TestShortStreamIdempotency:
     def test_short_stream_stabilizes_on_second_run(self, tmp_path):
         from scripts.ingest_lepard import write_jsonl
@@ -188,7 +180,7 @@ class TestShortStreamIdempotency:
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=1000)
-        r2 = write_jsonl(iter(rows), out, cap=1000)
+        r2, _ = write_jsonl(iter(rows), out, cap=1000)
         assert r2 == 0, "short stream must not be rewritten on second run"
 
 
@@ -225,11 +217,6 @@ class TestAtomicWriteSafety:
         assert out.exists()
 
 
-# ---------------------------------------------------------------------------
-# RED: cap validation, atomic write, hash-while-writing
-# ---------------------------------------------------------------------------
-
-
 class TestCapValidation:
     def test_negative_cap_raises(self, tmp_path):
         import pytest
@@ -241,7 +228,7 @@ class TestCapValidation:
         with pytest.raises(ValueError, match="cap must be positive"):
             write_jsonl(iter(rows), out, cap=-1)
 
-    def test_zero_cap_raises(self, tmp_path):
+    def test_zero_cap_raises_via_cap_validation(self, tmp_path):
         import pytest
 
         from scripts.ingest_lepard import write_jsonl
@@ -259,7 +246,6 @@ class TestHashWhileWriting:
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
         result = write_jsonl(iter(rows), out, cap=5)
-        # result must be (rows_written, sha256) not just int
         assert isinstance(result, tuple), "write_jsonl must return (rows_written, sha256)"
         rows_written, sha256 = result
         assert rows_written == 5
