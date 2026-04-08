@@ -21,7 +21,7 @@ Features:
   - Self-heal preserves original provenance; marks reconstructed manifest
   - Sidecar-present fast path repairs missing manifest without re-downloading
   - Single-pass self-heal: line count + SHA256 computed in one disk read
-  - Crash-safe: missing sidecar/manifest after crash triggers full self-heal
+  - Crash-safe: sidecar written inside write_jsonl — no crash window
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
@@ -29,7 +29,7 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
-  - --verify-only compares computed digest against sidecar content
+  - --verify-only checks digest AND manifest fields (revision, dataset, split, cap)
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -37,15 +37,15 @@ Features:
   - --smoke and --cap are mutually exclusive
   - --force flag: purges stale sidecar+manifest then re-ingests
   - --dry-run flag to count rows without writing output file
-  - --verify-only flag: recomputes SHA256 and compares against sidecar
+  - --verify-only flag: recomputes SHA256, compares against sidecar and manifest
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
   integrity check. It is framed honestly: sidecar present = skip. For verified
-  integrity, use --verify-only which recomputes SHA256 from disk bytes and
-  compares against the stored sidecar content.
+  integrity, use --verify-only which recomputes SHA256 from disk bytes,
+  compares against the stored sidecar, and checks manifest provenance fields.
   If manifest is missing when sidecar is present, manifest is repaired.
 
 Self-heal design:
@@ -56,6 +56,10 @@ Self-heal design:
   If original manifest exists, its timestamp is preserved and
   provenance_reconstructed=True is added — never silently overwrites provenance.
 
+Finalization design:
+  Sidecar and manifest are both written inside write_jsonl() — no crash window
+  between data file commit and metadata publication.
+
 Concurrency design:
   Unique temp names via mkstemp are collision-safe for temp file creation.
   Path.replace() is atomic on POSIX. However this is not full concurrency
@@ -64,7 +68,7 @@ Concurrency design:
 Network retry design:
   fetch_stream retries up to 3 times on transient network errors
   (ConnectionResetError, OSError, TimeoutError) with exponential backoff
-  (1s, 2s). This handles HuggingFace Hub connection drops during long downloads.
+  (1s→2s→4s). This handles HuggingFace Hub connection drops during long downloads.
 
 Usage
 -----
@@ -165,6 +169,13 @@ def _count_lines_and_hash(path: Path) -> tuple[int, str]:
     return lines, h.hexdigest()
 
 
+def _write_sidecar(output_path: Path, digest: str) -> None:
+    """Write SHA256 sidecar alongside JSONL artifact."""
+    sidecar = _sidecar_path(output_path)
+    sidecar.write_text(digest + "\n", encoding="utf-8")
+    log.info("SHA256 sidecar written -> %s", sidecar.name)
+
+
 def _write_provenance_manifest(
     output_path: Path,
     sha256: str,
@@ -206,6 +217,34 @@ def _write_provenance_manifest(
     log.info("Provenance manifest written -> %s", _manifest_path(output_path).name)
 
 
+def _finalize_artifact(
+    output_path: Path,
+    digest: str,
+    cap: int,
+    rows_written: int,
+    hf_revision: str,
+    dataset: str,
+    split: str,
+    force_used: bool = False,
+) -> None:
+    """
+    Write sidecar and manifest together — no crash window between data and metadata.
+    Called after successful tmp.replace(output_path) to complete artifact bundle.
+    """
+    _write_sidecar(output_path, digest)
+    if hf_revision and dataset:
+        _write_provenance_manifest(
+            output_path,
+            sha256=digest,
+            cap=cap,
+            rows_written=rows_written,
+            hf_revision=hf_revision,
+            dataset=dataset,
+            split=split,
+            force_used=force_used,
+        )
+
+
 def _repair_manifest_from_sidecar(
     output_path: Path,
     revision: str,
@@ -220,7 +259,6 @@ def _repair_manifest_from_sidecar(
     """
     sidecar = _sidecar_path(output_path)
     digest = sidecar.read_text(encoding="utf-8").strip()
-    # count lines for rows_written — single pass not needed here (manifest only)
     with output_path.open(encoding="utf-8") as fh:
         rows_written = sum(1 for _ in fh)
     log.info("Repairing missing manifest for %s", output_path.name)
@@ -268,12 +306,9 @@ def _self_heal_artifact(
         output_path.name,
         existing,
     )
-    sidecar = _sidecar_path(output_path)
-    sidecar.write_text(digest + "\n", encoding="utf-8")
-    log.info("SHA256 written -> %s", sidecar.name)
+    _write_sidecar(output_path, digest)
 
     if revision and dataset:
-        # Preserve original timestamp if manifest exists — never overwrite provenance
         original_ts = ""
         manifest = _manifest_path(output_path)
         if manifest.exists():
@@ -389,8 +424,9 @@ def write_jsonl(
       Preserves original provenance; marks manifest provenance_reconstructed=True.
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
-    verify_only=True: recomputes SHA256 and compares against stored sidecar.
-    Writes provenance manifest (split, rows_written, sha256, etc.) alongside artifact.
+    verify_only=True: recomputes SHA256, compares against sidecar AND manifest
+      fields (revision, dataset, split, cap) — raises ValueError on mismatch.
+    Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
@@ -400,13 +436,13 @@ def write_jsonl(
         cap: Maximum rows to write. Must be > 0.
         force: If True, purge stale artifacts and always rewrite.
         dry_run: If True, count rows only — no file written.
-        verify_only: If True, verify existing artifact SHA against sidecar.
+        verify_only: If True, verify existing artifact SHA and manifest fields.
         revision: HF dataset revision SHA for provenance manifest.
         dataset: HF dataset name for provenance manifest.
         split: HF dataset split for provenance manifest.
 
     Raises:
-        ValueError: if cap <= 0 or digest mismatch in verify_only mode.
+        ValueError: if cap <= 0, digest mismatch, or manifest field mismatch.
         FileNotFoundError: if verify_only and output_path does not exist.
     """
     if cap <= 0:
@@ -426,6 +462,23 @@ def write_jsonl(
             log.info("Verified %s — digest matches sidecar", output_path.name)
         else:
             log.warning("Verified %s — no sidecar to compare against", output_path.name)
+        # Check manifest fields if provenance params provided
+        manifest_file = _manifest_path(output_path)
+        if manifest_file.exists() and revision and dataset:
+            try:
+                stored_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                mismatches = []
+                if revision and stored_manifest.get("hf_revision") != revision:
+                    mismatches.append(f"revision: stored={stored_manifest.get('hf_revision')} requested={revision}")
+                if dataset and stored_manifest.get("dataset") != dataset:
+                    mismatches.append(f"dataset: stored={stored_manifest.get('dataset')} requested={dataset}")
+                if split and stored_manifest.get("split") != split:
+                    mismatches.append(f"split: stored={stored_manifest.get('split')} requested={split}")
+                if mismatches:
+                    raise ValueError(f"manifest mismatch for {output_path.name}: " + "; ".join(mismatches))
+                log.info("Verified %s — manifest fields match", output_path.name)
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("Could not read manifest for verification: %s", e)
         log.info("sha256=%s...", digest[:8])
         return 0, digest
 
@@ -477,17 +530,17 @@ def write_jsonl(
     digest = h.hexdigest()
     log.info("Wrote %d rows -> %s (sha256=%s...)", written, output_path, digest[:8])
 
-    if revision and dataset:
-        _write_provenance_manifest(
-            output_path,
-            sha256=digest,
-            cap=cap,
-            rows_written=written,
-            hf_revision=revision,
-            dataset=dataset,
-            split=split,
-            force_used=force,
-        )
+    # Finalize artifact: write sidecar and manifest together — no crash window
+    _finalize_artifact(
+        output_path,
+        digest=digest,
+        cap=cap,
+        rows_written=written,
+        hf_revision=revision,
+        dataset=dataset,
+        split=split,
+        force_used=force,
+    )
 
     return written, digest
 
@@ -548,7 +601,7 @@ def main() -> None:
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="Recompute SHA256 from disk and compare against sidecar.",
+        help="Recompute SHA256 from disk, compare against sidecar and manifest fields.",
     )
 
     cap_group = parser.add_mutually_exclusive_group()
@@ -595,10 +648,6 @@ def main() -> None:
             dataset=cfg["dataset"],
             split=cfg["split"],
         )
-        if written > 0 and not args.dry_run:
-            sidecar = _sidecar_path(output_file)
-            sidecar.write_text(sha256 + "\n", encoding="utf-8")
-            log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
     except Exception:
         log.exception("Ingestion failed")
