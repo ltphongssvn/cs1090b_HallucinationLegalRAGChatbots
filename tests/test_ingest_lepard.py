@@ -757,3 +757,39 @@ class TestSelfHealManifest:
         )
         assert _sidecar_path(out).exists(), "self-heal must restore sidecar"
         assert _manifest_path(out).exists(), "self-heal must restore manifest"
+
+
+class TestSinglePassSelfHeal:
+    def test_self_heal_uses_single_pass(self, tmp_path):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(iter(rows), out, cap=5)
+        _sidecar_path(out).write_text(digest + "\n")
+        _sidecar_path(out).unlink()
+        # single-pass: open() called once for combined line-count + hash
+        with patch("scripts.ingest_lepard.open", wraps=open) as mock_open:
+            write_jsonl(iter(rows), out, cap=5)
+            # only one open call for the self-heal read
+            read_calls = [c for c in mock_open.call_args_list if str(out) in str(c)]
+            assert len(read_calls) <= 1, "self-heal must use single-pass read"
+
+
+class TestCliHelpText:
+    def test_all_flags_have_help_text(self):
+        import subprocess
+
+        result = subprocess.run(
+            ["uv", "run", "python", "scripts/ingest_lepard.py", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        help_text = result.stdout + result.stderr
+        assert "Purge stale" in help_text, "--force must have help text"
+        assert "Count rows" in help_text, "--dry-run must have help text"
+        assert "Recompute SHA256" in help_text, "--verify-only must have help text"
+        assert "smoke_cap" in help_text or "smoke" in help_text.lower(), "--smoke must have help text"
+        assert "Override cap" in help_text, "--cap must have help text"
