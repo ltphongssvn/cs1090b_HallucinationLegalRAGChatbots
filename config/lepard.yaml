@@ -1,7 +1,7 @@
 dataset: rmahari/LePaRD
 split: train
 revision: 0194f95c3091acceab3b887c9b09ef432cf84052
-cap: 500000
+cap: 4000000
 smoke_cap: 1000
 output_dir: data/raw/lepard
 output_file: lepard_train_{cap}_rev0194f95.jsonl
