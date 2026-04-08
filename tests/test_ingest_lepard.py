@@ -115,12 +115,14 @@ class TestLoadLepardConfig:
 class TestChunkSizeConstant:
     def test_chunk_size_constant_importable(self):
         from scripts.ingest_lepard import CHUNK_SIZE
+
         assert CHUNK_SIZE == 64 * 1024
 
 
 class TestSha256Idempotency:
     def test_idempotent_skips_when_sha256_sidecar_matches(self, tmp_path):
         from scripts.ingest_lepard import compute_sha256, write_jsonl
+
         rows = [{"id": str(i)} for i in range(10)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=10)
@@ -134,7 +136,9 @@ class TestSha256Idempotency:
 class TestTqdmProgress:
     def test_write_jsonl_uses_tqdm(self, tmp_path):
         from unittest.mock import patch
+
         from scripts.ingest_lepard import write_jsonl
+
         rows = [{"id": str(i)} for i in range(10)]
         out = tmp_path / "out.jsonl"
         with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
@@ -145,7 +149,9 @@ class TestTqdmProgress:
 
 class TestSpecificExceptions:
     def test_fetch_stream_raises_on_bad_dataset(self):
-        from scripts.ingest_lepard import fetch_stream
         import pytest
+
+        from scripts.ingest_lepard import fetch_stream
+
         with pytest.raises((Exception,)):
             list(fetch_stream("nonexistent/dataset_xyz_123", "train", "main"))
