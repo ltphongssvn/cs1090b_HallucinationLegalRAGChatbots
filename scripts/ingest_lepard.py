@@ -12,11 +12,12 @@ LePaRD (Legal Passage Retrieval Dataset — ACL 2024)
 
 Features:
   - Config-driven via config/lepard.yaml (OmegaConf)
-  - Pinned revision SHA for reproducibility (validated as 40-char hex)
+  - Pinned revision SHA for reproducibility (validated as 40-char lowercase hex)
   - fetch_stream validates revision before any network call
   - Output filename includes revision prefix — prevents same-cap collision
-  - Idempotent: O(1) SHA256 sidecar check before O(N) line scan
+  - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
   - Self-heal: valid file without sidecar gets sidecar written on next run
+  - Crash-safe: missing sidecar after crash triggers self-heal on next run
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
@@ -33,6 +34,16 @@ Features:
   - --verify-only flag to check SHA/provenance without re-downloading
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
+
+Idempotency design:
+  The sidecar-presence fast path is a trust-based shortcut, not a verified
+  integrity check. It is framed honestly: sidecar present = skip. For verified
+  integrity, use --verify-only which recomputes SHA256 from disk bytes.
+
+Concurrency design:
+  Unique temp names via mkstemp are collision-safe for temp file creation.
+  Path.replace() is atomic on POSIX. However this is not full concurrency
+  control — concurrent runs are last-writer-wins, not serialized.
 
 Usage
 -----
@@ -131,9 +142,10 @@ _HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def validate_revision(revision: str) -> str:
     """
-    Validate that revision is a 40-char hex commit SHA — not a branch/tag.
-    Branch names like 'main' are mutable; only commit SHAs are immutable
-    research artifacts.
+    Validate that revision is a 40-char lowercase hex commit SHA — not a
+    branch/tag. Branch names like 'main' are mutable; only commit SHAs are
+    immutable research artifacts. Uppercase hex is also rejected — git always
+    outputs lowercase SHAs.
     """
     if not _HEX_SHA_RE.match(revision):
         raise ValueError(
@@ -168,7 +180,7 @@ def fetch_stream(
 ) -> Iterator[dict[str, Any]]:
     """
     Stream rows from HuggingFace dataset with pinned revision.
-    Validates revision is a 40-char hex SHA before any network call —
+    Validates revision is a 40-char lowercase hex SHA before any network call —
     enforces immutability at the fetch boundary, not just in main().
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
@@ -196,12 +208,15 @@ def write_jsonl(
     Computes SHA256 while writing — avoids second full file pass.
     Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
     tqdm(miniters=1) for network-shaped iteration progress visibility.
-    Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
+    Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
+      Note: sidecar presence is a trust shortcut, not a verified integrity check.
+      Use --verify-only for verified SHA checking.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
+      This also handles crash-after-replace: missing sidecar = self-heal.
     force=True: purges stale sidecar+manifest before re-ingesting.
     Writes provenance manifest JSON alongside artifact when revision+dataset provided.
     dry_run=True: counts rows without writing output file (CI preflight).
-    verify_only=True: checks SHA of existing file without re-downloading.
+    verify_only=True: recomputes SHA256 from disk bytes for verified checking.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Args:
@@ -242,6 +257,7 @@ def write_jsonl(
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
+            # Trust-based fast path — sidecar presence = skip (not verified integrity)
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
         with output_path.open(encoding="utf-8") as fh:
@@ -252,6 +268,8 @@ def write_jsonl(
                 output_path.name,
                 existing,
             )
+            # Self-heal: write missing sidecar for valid existing file.
+            # Also handles crash-after-replace: missing sidecar triggers self-heal.
             digest = compute_sha256(output_path, write_sidecar=True)
             return 0, digest
 
@@ -294,9 +312,9 @@ def write_jsonl(
 
 def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     """
-    Compute SHA256 of file. Optionally write <path>.sha256 sidecar.
-    Useful for external verification of existing artifacts and self-healing
-    missing sidecars on valid existing files.
+    Compute SHA256 of file from disk bytes. Optionally write <path>.sha256 sidecar.
+    This is the verified integrity path — use this for --verify-only and self-heal.
+    O(N) in file size — use sidecar-presence fast path for routine skipping.
     """
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -327,7 +345,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
     parser.add_argument("--force", action="store_true", help="Purge stale artifacts and force re-ingestion.")
     parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
-    parser.add_argument("--verify-only", action="store_true", help="Verify existing artifact SHA only.")
+    parser.add_argument("--verify-only", action="store_true", help="Recompute SHA256 from disk for verified check.")
 
     # --smoke and --cap are mutually exclusive
     cap_group = parser.add_mutually_exclusive_group()

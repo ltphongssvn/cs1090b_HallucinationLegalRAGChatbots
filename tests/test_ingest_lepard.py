@@ -553,3 +553,35 @@ class TestRevisionInOutputFilename:
         assert "rev" in output_file or cfg["revision"][:8] in output_file, (
             "output_file must include revision prefix to prevent same-cap collision"
         )
+
+
+class TestRevisionValidationEdgeCases:
+    def test_uppercase_sha_rejected(self):
+        import pytest
+
+        from scripts.ingest_lepard import validate_revision
+
+        with pytest.raises(ValueError, match="not a 40-char hex SHA"):
+            validate_revision("0194F95C3091ACCEAB3B887C9B09EF432CF84052")
+
+    def test_short_sha_rejected(self):
+        import pytest
+
+        from scripts.ingest_lepard import validate_revision
+
+        with pytest.raises(ValueError):
+            validate_revision("0194f95c")
+
+    def test_crash_after_replace_self_heals_on_next_run(self, tmp_path):
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5, force=True)
+        sidecar = _sidecar_path(out)
+        # simulate crash after data write before sidecar write
+        sidecar.unlink(missing_ok=True)
+        assert not sidecar.exists()
+        r2, _ = write_jsonl(iter(rows), out, cap=5)
+        assert r2 == 0, "next run must self-heal not rewrite"
+        assert sidecar.exists(), "sidecar must be self-healed"
