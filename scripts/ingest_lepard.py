@@ -24,7 +24,7 @@ Features:
   - json.dumps with ensure_ascii=False — preserves legal unicode
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
-  - Provenance manifest with timezone-aware UTC + exact python version
+  - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
   - --verify-only compares computed digest against sidecar content
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
@@ -36,6 +36,7 @@ Features:
   - --verify-only flag: recomputes SHA256 and compares against sidecar
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
+  - _git_sha() narrows to specific subprocess exceptions
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
@@ -97,10 +98,7 @@ def _manifest_path(output_path: Path) -> Path:
 def _git_sha() -> str:
     """
     Return current git commit SHA or 'unknown'.
-    Checks GIT_COMMIT_SHA environment variable first — container-safe:
-    in Docker/Kubernetes environments the .git directory is often stripped,
-    so the SHA should be injected at build time via:
-        ENV GIT_COMMIT_SHA=$(git rev-parse HEAD)
+    Checks GIT_COMMIT_SHA environment variable first — container-safe.
     Falls back to subprocess for local development.
     Narrows to specific subprocess exceptions:
       FileNotFoundError  — git not installed
@@ -131,11 +129,17 @@ def _write_provenance_manifest(
     output_path: Path,
     sha256: str,
     cap: int,
+    rows_written: int,
     hf_revision: str,
     dataset: str,
+    split: str = "",
     force_used: bool = False,
 ) -> None:
-    """Write provenance manifest JSON alongside JSONL artifact."""
+    """
+    Write provenance manifest JSON alongside JSONL artifact.
+    Includes split and rows_written for complete artifact provenance.
+    rows_written may be less than cap if stream ended early (short stream).
+    """
     import datasets as _ds
 
     manifest = {
@@ -143,7 +147,9 @@ def _write_provenance_manifest(
         "script_git_commit": _git_sha(),
         "hf_revision": hf_revision,
         "dataset": dataset,
+        "split": split,
         "cap": cap,
+        "rows_written": rows_written,
         "python_version": _python_version(),
         "datasets_version": _ds.__version__,
         "force_used": force_used,
@@ -172,8 +178,7 @@ def validate_revision(revision: str) -> str:
     """
     Validate that revision is a 40-char lowercase hex commit SHA — not a
     branch/tag. Branch names like 'main' are mutable; only commit SHAs are
-    immutable research artifacts. Uppercase hex is also rejected — git always
-    outputs lowercase SHAs.
+    immutable research artifacts. Uppercase hex is also rejected.
     """
     if not _HEX_SHA_RE.match(revision):
         raise ValueError(
@@ -208,11 +213,10 @@ def fetch_stream(
 ) -> Iterator[dict[str, Any]]:
     """
     Stream rows from HuggingFace dataset with pinned revision.
-    Validates revision is a 40-char lowercase hex SHA before any network call —
-    enforces immutability at the fetch boundary, not just in main().
+    Validates revision is a 40-char lowercase hex SHA before any network call.
     NaN rows are passed through — audit_jsonl_nan.py is the downstream gate.
     """
-    validate_revision(revision)  # enforce immutable SHA before network call
+    validate_revision(revision)
     from datasets import load_dataset
 
     ds = load_dataset(dataset, split=split, streaming=True, revision=revision)
@@ -228,6 +232,7 @@ def write_jsonl(
     verify_only: bool = False,
     revision: str = "",
     dataset: str = "",
+    split: str = "",
 ) -> tuple[int, str]:
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via unique
@@ -237,14 +242,10 @@ def write_jsonl(
     Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
     tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
-      Note: sidecar presence is a trust shortcut, not a verified integrity check.
-      Use --verify-only for verified SHA checking against stored sidecar.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
-      This also handles crash-after-replace: missing sidecar triggers self-heal.
     force=True: purges stale sidecar+manifest before re-ingesting.
-    verify_only=True: recomputes SHA256 from disk bytes and compares against
-      stored sidecar content — raises ValueError on mismatch.
-    Writes provenance manifest JSON alongside artifact when revision+dataset provided.
+    verify_only=True: recomputes SHA256 and compares against stored sidecar.
+    Writes provenance manifest (split, rows_written, sha256, etc.) alongside artifact.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
@@ -257,6 +258,7 @@ def write_jsonl(
         verify_only: If True, verify existing artifact SHA against sidecar.
         revision: HF dataset revision SHA for provenance manifest.
         dataset: HF dataset name for provenance manifest.
+        split: HF dataset split for provenance manifest.
 
     Raises:
         ValueError: if cap <= 0 or digest mismatch in verify_only mode.
@@ -312,7 +314,7 @@ def write_jsonl(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
-    os.close(tmp_fd)  # close raw OS fd — open() below opens by name safely
+    os.close(tmp_fd)
     tmp = Path(tmp_name)
     written = 0
     h = hashlib.sha256()
@@ -337,8 +339,10 @@ def write_jsonl(
             output_path,
             sha256=digest,
             cap=cap,
+            rows_written=written,
             hf_revision=revision,
             dataset=dataset,
+            split=split,
             force_used=force,
         )
 
@@ -348,7 +352,6 @@ def write_jsonl(
 def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     """
     Compute SHA256 of file from disk bytes. Optionally write <path>.sha256 sidecar.
-    This is the verified integrity path — use this for --verify-only and self-heal.
     O(N) in file size — use sidecar-presence fast path for routine skipping.
     """
     h = hashlib.sha256()
@@ -418,6 +421,7 @@ def main() -> None:
             verify_only=args.verify_only,
             revision=cfg["revision"],
             dataset=cfg["dataset"],
+            split=cfg["split"],
         )
         if written > 0 and not args.dry_run:
             sidecar = _sidecar_path(output_file)

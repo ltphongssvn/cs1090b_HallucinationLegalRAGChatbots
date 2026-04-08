@@ -682,3 +682,43 @@ class TestVerifyOnlySidecarComparison:
         sidecar.write_text("wrong_hash\n")
         with pytest.raises(ValueError, match="digest mismatch"):
             write_jsonl(iter([]), out, cap=5, verify_only=True)
+
+
+class TestManifestCompleteness:
+    def test_manifest_includes_split(self, tmp_path):
+        import json as _json
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        assert "split" in manifest, "manifest must record dataset split"
+        assert manifest["split"] == "train"
+
+    def test_manifest_includes_rows_written(self, tmp_path):
+        import json as _json
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=10,  # cap=10 but only 5 rows
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        assert "rows_written" in manifest, "manifest must record actual rows written"
+        assert manifest["rows_written"] == 5, "rows_written must reflect actual rows not cap"
