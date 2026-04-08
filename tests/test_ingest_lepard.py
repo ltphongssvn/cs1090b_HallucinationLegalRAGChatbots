@@ -585,3 +585,22 @@ class TestRevisionValidationEdgeCases:
         r2, _ = write_jsonl(iter(rows), out, cap=5)
         assert r2 == 0, "next run must self-heal not rewrite"
         assert sidecar.exists(), "sidecar must be self-healed"
+
+
+class TestGitShaFallback:
+    def test_git_sha_returns_unknown_when_git_missing(self):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import _git_sha
+
+        with patch("subprocess.check_output", side_effect=FileNotFoundError):
+            assert _git_sha() == "unknown"
+
+    def test_git_sha_returns_unknown_when_not_git_repo(self):
+        import subprocess
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import _git_sha
+
+        with patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(128, "git")):
+            assert _git_sha() == "unknown"

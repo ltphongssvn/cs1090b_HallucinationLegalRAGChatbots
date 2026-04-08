@@ -34,6 +34,7 @@ Features:
   - --verify-only flag to check SHA/provenance without re-downloading
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
+  - _git_sha() narrows to specific subprocess exceptions
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
@@ -92,10 +93,16 @@ def _manifest_path(output_path: Path) -> Path:
 
 
 def _git_sha() -> str:
-    """Return current git commit SHA or 'unknown'."""
+    """
+    Return current git commit SHA or 'unknown'.
+    Narrows to specific subprocess exceptions:
+      FileNotFoundError  — git not installed
+      CalledProcessError — not a git repo or git error
+      OSError            — OS-level failure
+    """
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-    except Exception:
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
         return "unknown"
 
 
@@ -212,7 +219,7 @@ def write_jsonl(
       Note: sidecar presence is a trust shortcut, not a verified integrity check.
       Use --verify-only for verified SHA checking.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
-      This also handles crash-after-replace: missing sidecar = self-heal.
+      This also handles crash-after-replace: missing sidecar triggers self-heal.
     force=True: purges stale sidecar+manifest before re-ingesting.
     Writes provenance manifest JSON alongside artifact when revision+dataset provided.
     dry_run=True: counts rows without writing output file (CI preflight).
