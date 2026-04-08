@@ -250,3 +250,46 @@ class TestHashWhileWriting:
         rows_written, sha256 = result
         assert rows_written == 5
         assert len(sha256) == 64
+
+
+# ---------------------------------------------------------------------------
+# RED: SHA256 sidecar idempotency, log.exception, docstring accuracy
+# ---------------------------------------------------------------------------
+
+
+class TestSha256SidecarIdempotency:
+    def test_skips_when_sidecar_exists(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(10)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=10)
+        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar.write_text("dummy_hash\n")
+        # second run must skip using sidecar, not line count
+        r2, _ = write_jsonl(iter(rows), out, cap=10)
+        assert r2 == 0
+
+    def test_no_line_count_scan_when_sidecar_present(self, tmp_path):
+        from unittest.mock import patch
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar.write_text("any_hash\n")
+        # if sidecar present, sum(1 for ...) should NOT be called
+        with patch("builtins.sum") as mock_sum:
+            write_jsonl(iter(rows), out, cap=5)
+            assert not mock_sum.called, "line-count scan must not run when sidecar exists"
+
+
+class TestLogException:
+    def test_main_uses_log_exception_not_log_error(self):
+        from pathlib import Path
+
+        src = Path("scripts/ingest_lepard.py").read_text()
+        assert "log.exception" in src, "main() must use log.exception to preserve traceback"
+        assert 'log.error("Ingestion failed' not in src, "log.error hides traceback — use log.exception"
