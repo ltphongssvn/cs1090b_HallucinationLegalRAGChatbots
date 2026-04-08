@@ -24,7 +24,8 @@ Features:
   - json.dumps with ensure_ascii=False — preserves legal unicode
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
-  - Provenance manifest JSON written alongside JSONL artifact
+  - Provenance manifest with timezone-aware UTC + exact python version
+  - --verify-only compares computed digest against sidecar content
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
   - tqdm progress bar (disable=None auto-disables on non-TTY for CI)
   - log.exception preserves full traceback in CI logs
@@ -32,15 +33,15 @@ Features:
   - --smoke and --cap are mutually exclusive
   - --force flag: purges stale sidecar+manifest then re-ingests
   - --dry-run flag to count rows without writing output file
-  - --verify-only flag to check SHA/provenance without re-downloading
+  - --verify-only flag: recomputes SHA256 and compares against sidecar
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
-  - _git_sha() narrows to specific subprocess exceptions
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
   integrity check. It is framed honestly: sidecar present = skip. For verified
-  integrity, use --verify-only which recomputes SHA256 from disk bytes.
+  integrity, use --verify-only which recomputes SHA256 from disk bytes and
+  compares against the stored sidecar content.
 
 Concurrency design:
   Unique temp names via mkstemp are collision-safe for temp file creation.
@@ -106,15 +107,24 @@ def _git_sha() -> str:
       CalledProcessError — not a git repo or git error
       OSError            — OS-level failure
     """
-    # Container-safe: check env var first (injected at Docker build time)
     env_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
     if env_sha:
         return env_sha
-
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
     except (FileNotFoundError, subprocess.CalledProcessError, OSError):
         return "unknown"
+
+
+def _python_version() -> str:
+    """Return exact Python version string using version_info — not brittle slice."""
+    v = sys.version_info
+    return f"{v.major}.{v.minor}.{v.micro}"
+
+
+def _utc_now() -> str:
+    """Return timezone-aware UTC timestamp — replaces deprecated utcnow()."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _write_provenance_manifest(
@@ -129,12 +139,12 @@ def _write_provenance_manifest(
     import datasets as _ds
 
     manifest = {
-        "ingestion_ts_utc": datetime.datetime.utcnow().isoformat(),
+        "ingestion_ts_utc": _utc_now(),
         "script_git_commit": _git_sha(),
         "hf_revision": hf_revision,
         "dataset": dataset,
         "cap": cap,
-        "python_version": sys.version[:6],
+        "python_version": _python_version(),
         "datasets_version": _ds.__version__,
         "force_used": force_used,
         "sha256": sha256,
@@ -228,13 +238,14 @@ def write_jsonl(
     tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
       Note: sidecar presence is a trust shortcut, not a verified integrity check.
-      Use --verify-only for verified SHA checking.
+      Use --verify-only for verified SHA checking against stored sidecar.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
       This also handles crash-after-replace: missing sidecar triggers self-heal.
     force=True: purges stale sidecar+manifest before re-ingesting.
+    verify_only=True: recomputes SHA256 from disk bytes and compares against
+      stored sidecar content — raises ValueError on mismatch.
     Writes provenance manifest JSON alongside artifact when revision+dataset provided.
     dry_run=True: counts rows without writing output file (CI preflight).
-    verify_only=True: recomputes SHA256 from disk bytes for verified checking.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Args:
@@ -243,12 +254,13 @@ def write_jsonl(
         cap: Maximum rows to write. Must be > 0.
         force: If True, purge stale artifacts and always rewrite.
         dry_run: If True, count rows only — no file written.
-        verify_only: If True, verify existing artifact SHA without rewriting.
+        verify_only: If True, verify existing artifact SHA against sidecar.
         revision: HF dataset revision SHA for provenance manifest.
         dataset: HF dataset name for provenance manifest.
 
     Raises:
-        ValueError: if cap <= 0.
+        ValueError: if cap <= 0 or digest mismatch in verify_only mode.
+        FileNotFoundError: if verify_only and output_path does not exist.
     """
     if cap <= 0:
         raise ValueError(f"cap must be positive, got {cap}")
@@ -257,7 +269,17 @@ def write_jsonl(
         if not output_path.exists():
             raise FileNotFoundError(f"Cannot verify — {output_path} does not exist")
         digest = compute_sha256(output_path)
-        log.info("Verified %s sha256=%s...", output_path.name, digest[:8])
+        sidecar = _sidecar_path(output_path)
+        if sidecar.exists():
+            stored = sidecar.read_text(encoding="utf-8").strip()
+            if digest != stored:
+                raise ValueError(
+                    f"digest mismatch for {output_path.name}: computed={digest[:8]}... stored={stored[:8]}..."
+                )
+            log.info("Verified %s — digest matches sidecar", output_path.name)
+        else:
+            log.warning("Verified %s — no sidecar to compare against", output_path.name)
+        log.info("sha256=%s...", digest[:8])
         return 0, digest
 
     if dry_run:
@@ -275,7 +297,6 @@ def write_jsonl(
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
-            # Trust-based fast path — sidecar presence = skip (not verified integrity)
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
         with output_path.open(encoding="utf-8") as fh:
@@ -286,8 +307,6 @@ def write_jsonl(
                 output_path.name,
                 existing,
             )
-            # Self-heal: write missing sidecar for valid existing file.
-            # Also handles crash-after-replace: missing sidecar triggers self-heal.
             digest = compute_sha256(output_path, write_sidecar=True)
             return 0, digest
 
@@ -300,8 +319,6 @@ def write_jsonl(
     try:
         with tmp.open("w", encoding="utf-8", newline="\n") as fh:
             for row in tqdm(stream, total=cap, desc="Ingesting LePaRD", unit="row", disable=None, miniters=1):
-                # ensure_ascii=False preserves legal unicode (café, em-dash, etc.)
-                # NaN rows passed through — audit_jsonl_nan.py is the downstream gate
                 line = json.dumps(row, ensure_ascii=False) + "\n"
                 fh.write(line)
                 h.update(line.encode("utf-8"))
@@ -363,9 +380,10 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
     parser.add_argument("--force", action="store_true", help="Purge stale artifacts and force re-ingestion.")
     parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
-    parser.add_argument("--verify-only", action="store_true", help="Recompute SHA256 from disk for verified check.")
+    parser.add_argument(
+        "--verify-only", action="store_true", help="Recompute SHA256 from disk and compare against sidecar."
+    )
 
-    # --smoke and --cap are mutually exclusive
     cap_group = parser.add_mutually_exclusive_group()
     cap_group.add_argument("--smoke", action="store_true", help="Download smoke_cap rows only (for CI).")
     cap_group.add_argument("--cap", type=int, default=None, help="Override cap from config.")

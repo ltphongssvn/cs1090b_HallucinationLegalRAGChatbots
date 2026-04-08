@@ -623,3 +623,62 @@ class TestGitShaEnvFallback:
             result = _git_sha()
             assert result == "env_sha_value"
             assert not mock_sub.called, "subprocess must not be called when env var set"
+
+
+class TestTimezoneAwareTimestamp:
+    def test_manifest_uses_timezone_aware_utc(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        import json as _json
+
+        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        ts = manifest["ingestion_ts_utc"]
+        # timezone-aware UTC includes +00:00 suffix
+        assert "+00:00" in ts or ts.endswith("Z"), "ingestion_ts_utc must be timezone-aware UTC"
+
+    def test_manifest_python_version_is_exact(self, tmp_path):
+        import json as _json
+        import sys
+
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(
+            iter(rows), out, cap=5, revision="0194f95c3091acceab3b887c9b09ef432cf84052", dataset="rmahari/LePaRD"
+        )
+        manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
+        expected = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        assert manifest["python_version"] == expected
+
+
+class TestVerifyOnlySidecarComparison:
+    def test_verify_only_compares_digest_against_sidecar(self, tmp_path):
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(iter(rows), out, cap=5)
+        sidecar = _sidecar_path(out)
+        sidecar.write_text(digest + "\n")
+        # verify_only must compare computed digest against sidecar
+        _, verify_digest = write_jsonl(iter([]), out, cap=5, verify_only=True)
+        assert verify_digest == digest
+
+    def test_verify_only_raises_when_sidecar_mismatches(self, tmp_path):
+        import pytest
+
+        from scripts.ingest_lepard import _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = _sidecar_path(out)
+        sidecar.write_text("wrong_hash\n")
+        with pytest.raises(ValueError, match="digest mismatch"):
+            write_jsonl(iter([]), out, cap=5, verify_only=True)
