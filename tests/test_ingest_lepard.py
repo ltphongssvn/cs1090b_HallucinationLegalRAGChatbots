@@ -293,3 +293,28 @@ class TestLogException:
         src = Path("scripts/ingest_lepard.py").read_text()
         assert "log.exception" in src, "main() must use log.exception to preserve traceback"
         assert 'log.error("Ingestion failed' not in src, "log.error hides traceback — use log.exception"
+
+
+# ---------------------------------------------------------------------------
+# RED: _SIDECAR_SUFFIX constant, --force flag, provenance manifest
+# ---------------------------------------------------------------------------
+
+
+class TestSidecarSuffixConstant:
+    def test_sidecar_suffix_constant_importable(self):
+        from scripts.ingest_lepard import _SIDECAR_SUFFIX
+
+        assert _SIDECAR_SUFFIX == ".jsonl.sha256"
+
+
+class TestForceFlag:
+    def test_write_jsonl_force_rewrites_existing(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        sidecar = out.with_suffix(".jsonl.sha256")
+        sidecar.write_text("stale_hash\n")
+        r2, _ = write_jsonl(iter(rows), out, cap=5, force=True)
+        assert r2 == 5, "--force must rewrite even when sidecar exists"
