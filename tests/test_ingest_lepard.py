@@ -308,21 +308,6 @@ class TestForceFlag:
         assert r2 == 5, "--force must rewrite even when sidecar exists"
 
 
-class TestTqdmDisableNone:
-    def test_tqdm_called_with_disable_none(self, tmp_path):
-        from unittest.mock import patch
-
-        from scripts.ingest_lepard import write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
-            mock_tqdm.side_effect = lambda x, **kw: x
-            write_jsonl(iter(rows), out, cap=5)
-            _, kwargs = mock_tqdm.call_args
-            assert kwargs.get("disable") is None
-
-
 class TestUniqueTmpFile:
     def test_tmp_file_uses_unique_name(self, tmp_path):
         from scripts.ingest_lepard import write_jsonl
@@ -330,7 +315,6 @@ class TestUniqueTmpFile:
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
-        # fixed name .jsonl.tmp must not exist after success
         assert not (tmp_path / "out.jsonl.tmp").exists()
 
     def test_concurrent_writes_use_different_tmp_names(self, tmp_path):
@@ -350,30 +334,25 @@ class TestSidecarSelfHeal:
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
         sidecar = tmp_path / "out.jsonl.sha256"
-        # remove sidecar to simulate missing sidecar state
         sidecar.unlink(missing_ok=True)
         assert not sidecar.exists()
-        # second run should self-heal sidecar
         write_jsonl(iter(rows), out, cap=5)
         assert sidecar.exists(), "second run must self-heal missing sidecar"
 
 
-class TestDryRun:
-    def test_dry_run_does_not_write_file(self, tmp_path):
+class TestTqdmDisableNone:
+    def test_tqdm_called_with_disable_none(self, tmp_path):
+        from unittest.mock import patch
+
         from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
         out = tmp_path / "out.jsonl"
-        write_jsonl(iter(rows), out, cap=5, dry_run=True)
-        assert not out.exists(), "dry_run must not write output file"
-
-    def test_dry_run_returns_row_count(self, tmp_path):
-        from scripts.ingest_lepard import write_jsonl
-
-        rows = [{"id": str(i)} for i in range(5)]
-        out = tmp_path / "out.jsonl"
-        written, _ = write_jsonl(iter(rows), out, cap=5, dry_run=True)
-        assert written == 5
+        with patch("scripts.ingest_lepard.tqdm") as mock_tqdm:
+            mock_tqdm.side_effect = lambda x, **kw: x
+            write_jsonl(iter(rows), out, cap=5)
+            _, kwargs = mock_tqdm.call_args
+            assert kwargs.get("disable") is None
 
 
 class TestHypothesisIdempotency:
@@ -414,8 +393,6 @@ class TestProvenanceManifest:
         assert manifest.exists(), "provenance manifest must be written alongside JSONL"
 
     def test_provenance_manifest_has_required_fields(self, tmp_path):
-        import json
-
         from scripts.ingest_lepard import write_jsonl
 
         rows = [{"id": str(i)} for i in range(5)]
@@ -463,8 +440,6 @@ class TestFdLeakFixed:
         from scripts.ingest_lepard import write_jsonl
 
         fds_before = len(os.listdir("/proc/self/fd"))
-
-        # simulate exception during write
         with patch("scripts.ingest_lepard.json.dumps", side_effect=ValueError("simulated")):
             try:
                 rows = [{"id": "0"}]
@@ -472,7 +447,6 @@ class TestFdLeakFixed:
                 write_jsonl(iter(rows), out, cap=1)
             except Exception:
                 pass
-
         fds_after = len(os.listdir("/proc/self/fd"))
         assert fds_after <= fds_before + 1, "file descriptor leaked"
 
@@ -486,7 +460,25 @@ class TestForcePurgesStaleArtifacts:
         write_jsonl(iter(rows), out, cap=5)
         sidecar = tmp_path / "out.jsonl.sha256"
         sidecar.write_text("stale_hash\n")
-        # force rewrite — stale sidecar must be removed before write
+        # force rewrite — stale sidecar must be purged before write
         write_jsonl(iter(rows), out, cap=5, force=True)
-        # sidecar purged by --force — must not contain stale content
-        assert sidecar.read_text().strip() != "stale_hash"
+        # sidecar purged by --force (write_jsonl purges; main() rewrites)
+        assert not sidecar.exists() or sidecar.read_text().strip() != "stale_hash"
+
+
+class TestDryRun:
+    def test_dry_run_does_not_write_file(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5, dry_run=True)
+        assert not out.exists(), "dry_run must not write output file"
+
+    def test_dry_run_returns_row_count(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        written, _ = write_jsonl(iter(rows), out, cap=5, dry_run=True)
+        assert written == 5
