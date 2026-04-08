@@ -216,7 +216,10 @@ def main() -> None:
 
     log.info(
         "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s",
-        cfg["dataset"], cfg["revision"], cap, args.force,
+        cfg["dataset"],
+        cfg["revision"],
+        cap,
+        args.force,
     )
 
     try:
