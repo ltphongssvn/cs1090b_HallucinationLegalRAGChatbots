@@ -356,3 +356,21 @@ class TestSidecarSelfHeal:
         # second run should self-heal sidecar
         write_jsonl(iter(rows), out, cap=5)
         assert sidecar.exists(), "second run must self-heal missing sidecar"
+
+
+class TestDryRun:
+    def test_dry_run_does_not_write_file(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5, dry_run=True)
+        assert not out.exists(), "dry_run must not write output file"
+
+    def test_dry_run_returns_row_count(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        written, _ = write_jsonl(iter(rows), out, cap=5, dry_run=True)
+        assert written == 5

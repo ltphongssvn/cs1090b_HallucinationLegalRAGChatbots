@@ -21,6 +21,7 @@ Features:
   - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
   - --force flag to bypass idempotency for forced re-ingestion
+  - --dry-run flag to count rows without writing output file
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
 
@@ -31,6 +32,7 @@ Usage
     uv run python scripts/ingest_lepard.py --cap 10000
     uv run python scripts/ingest_lepard.py --output-dir data/raw/lepard
     uv run python scripts/ingest_lepard.py --force
+    uv run python scripts/ingest_lepard.py --dry-run
 """
 
 from __future__ import annotations
@@ -119,6 +121,7 @@ def write_jsonl(
     output_path: Path,
     cap: int,
     force: bool = False,
+    dry_run: bool = False,
 ) -> tuple[int, str]:
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via unique
@@ -126,6 +129,7 @@ def write_jsonl(
     Computes SHA256 while writing — avoids second full file pass.
     Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Self-heals: valid file without sidecar gets sidecar written on skip path.
+    dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Args:
@@ -133,12 +137,23 @@ def write_jsonl(
         output_path: Destination JSONL file path.
         cap: Maximum rows to write. Must be > 0.
         force: If True, bypass idempotency and always rewrite.
+        dry_run: If True, count rows only — no file written.
 
     Raises:
         ValueError: if cap <= 0.
     """
     if cap <= 0:
         raise ValueError(f"cap must be positive, got {cap}")
+
+    if dry_run:
+        # Count rows without writing — useful for CI preflight validation
+        written = 0
+        for _ in tqdm(stream, total=cap, desc="Dry-run LePaRD", unit="row", disable=None):
+            written += 1
+            if written >= cap:
+                break
+        log.info("Dry-run complete — would write %d rows to %s", written, output_path)
+        return written, ""
 
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
@@ -215,6 +230,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=None, help="Override output_dir from config.")
     parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
     parser.add_argument("--force", action="store_true", help="Bypass idempotency and force re-ingestion.")
+    parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
     args = parser.parse_args()
 
     cfg = load_lepard_config(args.config)
@@ -224,18 +240,19 @@ def main() -> None:
     output_file = output_dir / cfg["output_file"].format(cap=cap)
 
     log.info(
-        "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s",
+        "LePaRD ingestion — dataset=%s revision=%s cap=%d force=%s dry_run=%s",
         cfg["dataset"],
         cfg["revision"],
         cap,
         args.force,
+        args.dry_run,
     )
 
     try:
         validate_revision(cfg["revision"])
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
-        written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force)
-        if written > 0:
+        written, sha256 = write_jsonl(stream, output_file, cap=cap, force=args.force, dry_run=args.dry_run)
+        if written > 0 and not args.dry_run:
             sidecar = _sidecar_path(output_file)
             sidecar.write_text(sha256 + "\n", encoding="utf-8")
             log.info("SHA256 sidecar written -> %s", sidecar.name)
