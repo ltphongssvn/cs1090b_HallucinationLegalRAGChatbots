@@ -30,6 +30,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import re
 import hashlib
 import json
 import logging
@@ -43,6 +44,27 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
+
+# ---------------------------------------------------------------------------
+# Revision validation
+# ---------------------------------------------------------------------------
+
+_HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def validate_revision(revision: str) -> str:
+    """
+    Validate that revision is a 40-char hex commit SHA — not a branch/tag.
+    Branch names like 'main' are mutable; only commit SHAs are immutable
+    research artifacts.
+    """
+    if not _HEX_SHA_RE.match(revision):
+        raise ValueError(
+            f"revision={revision!r} is not a 40-char hex SHA. "
+            "Use an exact commit SHA for reproducible research artifacts."
+        )
+    return revision
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -89,9 +111,11 @@ def write_jsonl(
     Returns number of rows written (or 0 if skipped).
     """
     if output_path.exists():
-        existing = sum(1 for _ in output_path.open(encoding="utf-8"))
-        if existing == cap:
-            log.info("Skipping — %s already has %d lines", output_path.name, cap)
+        with output_path.open(encoding="utf-8") as fh:
+            existing = sum(1 for _ in fh)
+        # Skip if file has cap lines OR fewer lines than cap (short stream stabilized)
+        if existing == cap or (0 < existing < cap):
+            log.info("Skipping — %s already has %d lines", output_path.name, existing)
             return 0
 
     if cap == 0:
