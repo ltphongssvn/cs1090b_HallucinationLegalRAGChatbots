@@ -11,13 +11,15 @@ LePaRD (Legal Passage Retrieval Dataset — ACL 2024)
             passage_id, quote, destination_context
 
 Features:
-  - Config-driven via config/data/lepard.yaml (OmegaConf)
-  - Pinned revision SHA for reproducibility
-  - Idempotent: skips re-download if output exists with correct line count
-  - SHA256 sidecar written alongside output JSONL
-  - Structured logging via module-level logger
-  - Error handling with retry on network failures
+  - Config-driven via config/lepard.yaml (OmegaConf)
+  - Pinned revision SHA for reproducibility (validated as 40-char hex)
+  - Idempotent: O(1) SHA256 sidecar check before O(N) line scan
+  - Atomic write via tmp→rename — no partial artifacts on failure
+  - SHA256 computed while writing — avoids second full file pass
+  - tqdm progress bar for live monitoring
+  - log.exception preserves full traceback in CI logs
   - Smoke mode (--smoke) for CI: downloads only smoke_cap rows
+  - cap validated > 0 at entry
 
 Usage
 -----
@@ -30,10 +32,10 @@ Usage
 from __future__ import annotations
 
 import argparse
-import re
 import hashlib
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -108,7 +110,7 @@ def write_jsonl(
     """
     Write rows from stream to JSONL, respecting cap. Atomic write via tmp→rename.
     Computes SHA256 while writing — avoids second full file pass.
-    Idempotent: skips if output exists with cap or fewer lines (short-stream stable).
+    Idempotent: O(1) sidecar check first, then O(N) line scan as fallback.
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
 
     Raises:
@@ -118,8 +120,14 @@ def write_jsonl(
         raise ValueError(f"cap must be positive, got {cap}")
 
     if output_path.exists():
+        sidecar = output_path.with_suffix(".jsonl.sha256")
+        if sidecar.exists():
+            # Fast O(1) sidecar check — avoids O(N) line scan on large files
+            log.info("Skipping — sidecar found for %s", output_path.name)
+            return 0, ""
         with output_path.open(encoding="utf-8") as fh:
             existing = sum(1 for _ in fh)
+        # Skip if file has cap lines OR fewer lines than cap (short stream stabilized)
         if existing == cap or (0 < existing < cap):
             log.info("Skipping — %s already has %d lines", output_path.name, existing)
             return 0, ""
@@ -158,7 +166,7 @@ def compute_sha256(path: Path, write_sidecar: bool = False) -> str:
     digest = h.hexdigest()
     if write_sidecar:
         sidecar = path.with_suffix(path.suffix + ".sha256")
-        sidecar.write_text(digest + "\n")
+        sidecar.write_text(digest + "\n", encoding="utf-8")
         log.info("SHA256 written -> %s", sidecar.name)
     return digest
 
@@ -184,13 +192,14 @@ def main() -> None:
 
     cfg = load_lepard_config(args.config)
 
-    cap = cfg["smoke_cap"] if args.smoke else (args.cap or cfg["cap"])
+    cap = cfg["smoke_cap"] if args.smoke else (args.cap if args.cap is not None else cfg["cap"])
     output_dir = args.output_dir or Path(cfg["output_dir"])
     output_file = output_dir / cfg["output_file"].format(cap=cap)
 
     log.info("LePaRD ingestion — dataset=%s revision=%s cap=%d", cfg["dataset"], cfg["revision"], cap)
 
     try:
+        validate_revision(cfg["revision"])
         stream = fetch_stream(cfg["dataset"], cfg["split"], cfg["revision"])
         written, sha256 = write_jsonl(stream, output_file, cap=cap)
         if written > 0:
@@ -198,8 +207,8 @@ def main() -> None:
             sidecar.write_text(sha256 + "\n", encoding="utf-8")
             log.info("SHA256 sidecar written -> %s", sidecar.name)
         log.info("Done — %s", output_file)
-    except Exception as exc:
-        log.error("Ingestion failed: %s", exc)
+    except Exception:
+        log.exception("Ingestion failed")
         sys.exit(1)
 
 
