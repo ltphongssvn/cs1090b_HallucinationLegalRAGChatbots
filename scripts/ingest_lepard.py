@@ -21,6 +21,7 @@ Features:
   - Self-heal: restores both sidecar AND manifest on valid existing file
   - Self-heal preserves original provenance; marks reconstructed manifest
   - Sidecar-present fast path repairs missing manifest without re-downloading
+  - Repair recomputes sha256 from disk bytes — never trusts stale sidecar
   - Single-pass self-heal: line count + SHA256 computed in one disk read
   - Crash-safe: sidecar written inside write_jsonl — no crash window
   - Atomic write via unique tmp→rename — safe for concurrent runs
@@ -30,6 +31,7 @@ Features:
   - NaN rows passed through — audit_jsonl_nan.py is the downstream gate
   - tqdm(miniters=1) for network-shaped iteration progress
   - Provenance manifest: split, rows_written, timezone-aware UTC, exact python version
+  - --verify-only fails closed: missing sidecar raises ValueError
   - --verify-only checks digest, sidecar, AND manifest fields (revision, dataset,
     split, cap, sha256) — raises ValueError on any mismatch
   - _git_sha() checks GIT_COMMIT_SHA env var first — container-safe
@@ -39,17 +41,21 @@ Features:
   - --smoke and --cap are mutually exclusive
   - --force flag: purges stale sidecar+manifest then re-ingests
   - --dry-run flag to count rows without writing output file
-  - --verify-only flag: recomputes SHA256, compares against sidecar and manifest
+  - --verify-only flag: strict audit — fails closed on missing/mismatched metadata
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
   integrity check. It is framed honestly: sidecar present = skip. For verified
-  integrity, use --verify-only which recomputes SHA256 from disk bytes,
-  compares against the stored sidecar, and checks manifest fields:
-  revision, dataset, split, cap, AND stored sha256.
-  If manifest is missing when sidecar is present, manifest is repaired.
+  integrity, use --verify-only which is a strict audit that fails closed:
+  missing sidecar raises ValueError; missing manifest raises ValueError if
+  provenance params are provided; digest and all manifest fields are checked.
+
+Repair design:
+  _repair_manifest_from_sidecar() recomputes sha256 from disk bytes — never
+  trusts the sidecar digest directly. This prevents stale or corrupt sidecar
+  from seeding a fresh-looking manifest with wrong provenance.
 
 Self-heal design:
   When a valid file exists without sidecar/manifest (e.g. after a crash),
@@ -291,16 +297,17 @@ def _repair_manifest_from_sidecar(
 ) -> None:
     """
     Repair missing manifest when sidecar is present.
-    Reads digest from sidecar, counts lines for rows_written,
-    and writes manifest marked provenance_reconstructed=True.
+    Recomputes sha256 from disk bytes — never trusts sidecar digest directly.
+    This prevents stale or corrupt sidecar from seeding wrong provenance.
+    Counts lines for rows_written and writes manifest marked provenance_reconstructed=True.
     Accepts ProvenanceContext — single object instead of 3 loose params.
     cap from ctx preserves requested cap semantics (not conflated with rows_written).
     """
-    sidecar = _sidecar_path(output_path)
-    digest = sidecar.read_text(encoding="utf-8").strip()
-    with output_path.open(encoding="utf-8") as fh:
-        rows_written = sum(1 for _ in fh)
-    log.info("Repairing missing manifest for %s", output_path.name)
+    # Recompute hash from disk bytes — do NOT trust sidecar content
+    rows_written, digest = _count_lines_and_hash(output_path)
+    # Update sidecar with verified digest
+    _write_sidecar(output_path, digest)
+    log.info("Repairing missing manifest for %s (recomputed digest)", output_path.name)
     _write_provenance_manifest(
         output_path,
         ctx=ctx,
@@ -453,14 +460,17 @@ def write_jsonl(
     Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
     tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
-      If manifest missing when sidecar present, manifest is repaired.
+      If manifest missing when sidecar present, manifest is repaired by
+      recomputing sha256 from disk bytes (never trusts sidecar directly).
     Self-heals: restores BOTH sidecar and manifest on valid existing file.
       Preserves original provenance; marks manifest provenance_reconstructed=True.
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
-    verify_only=True: recomputes SHA256, compares against sidecar AND manifest
-      fields (revision, dataset, split, cap, sha256) — raises ValueError on any
-      mismatch. This is a full provenance audit, not just a checksum check.
+    verify_only=True: strict audit — fails closed:
+      missing sidecar raises ValueError,
+      missing manifest raises ValueError if provenance params provided,
+      digest and all manifest fields (revision, dataset, split, cap, sha256)
+      must all match — raises ValueError on any mismatch.
     Sidecar and manifest written together inside write_jsonl — no crash window.
     dry_run=True: counts rows without writing output file (CI preflight).
     Returns (rows_written, sha256_hex). Returns (0, "") if skipped.
@@ -471,7 +481,7 @@ def write_jsonl(
         cap: Maximum rows to write. Must be > 0.
         force: If True, purge stale artifacts and always rewrite.
         dry_run: If True, count rows only — no file written.
-        verify_only: If True, full provenance audit: digest + all manifest fields.
+        verify_only: If True, strict provenance audit — fails closed.
         revision: HF dataset revision SHA for provenance manifest.
         dataset: HF dataset name for provenance manifest.
         split: HF dataset split for provenance manifest.
@@ -498,10 +508,17 @@ def write_jsonl(
                 )
             log.info("Verified %s — digest matches sidecar", output_path.name)
         else:
-            log.warning("Verified %s — no sidecar to compare against", output_path.name)
+            # Fail closed — missing sidecar is a hard failure in strict audit mode
+            raise ValueError(
+                f"sidecar missing for {output_path.name}: cannot verify artifact integrity without sidecar"
+            )
         # Full manifest provenance audit: revision, dataset, split, cap, sha256
         manifest_file = _manifest_path(output_path)
-        if manifest_file.exists() and revision and dataset:
+        if revision and dataset:
+            if not manifest_file.exists():
+                raise ValueError(
+                    f"manifest missing for {output_path.name}: cannot verify full provenance without manifest"
+                )
             try:
                 stored_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
                 mismatches = []
@@ -513,7 +530,6 @@ def write_jsonl(
                     mismatches.append(f"split: stored={stored_manifest.get('split')} requested={split}")
                 if cap and stored_manifest.get("cap") != cap:
                     mismatches.append(f"cap: stored={stored_manifest.get('cap')} requested={cap}")
-                # Verify manifest sha256 matches computed digest
                 if stored_manifest.get("sha256") and stored_manifest.get("sha256") != digest:
                     mismatches.append(
                         f"sha256: manifest={stored_manifest.get('sha256')[:8]}... computed={digest[:8]}..."
@@ -522,7 +538,7 @@ def write_jsonl(
                     raise ValueError(f"manifest mismatch for {output_path.name}: " + "; ".join(mismatches))
                 log.info("Verified %s — manifest fields match", output_path.name)
             except (json.JSONDecodeError, OSError) as e:
-                log.warning("Could not read manifest for verification: %s", e)
+                raise ValueError(f"manifest unreadable for {output_path.name}: {e}") from e
         log.info("sha256=%s...", digest[:8])
         return 0, digest
 
@@ -632,7 +648,7 @@ def main() -> None:
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="Full provenance audit: SHA256 + sidecar + all manifest fields.",
+        help="Strict provenance audit: SHA256 + sidecar + all manifest fields. Fails closed.",
     )
 
     cap_group = parser.add_mutually_exclusive_group()
