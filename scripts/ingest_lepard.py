@@ -16,8 +16,8 @@ Features:
   - fetch_stream validates revision before any network call
   - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
-  - Self-heal: valid file without sidecar gets sidecar written on next run
-  - Crash-safe: missing sidecar after crash triggers self-heal on next run
+  - Self-heal: restores both sidecar AND manifest on valid existing file
+  - Crash-safe: missing sidecar/manifest after crash triggers full self-heal
   - Atomic write via unique tmp→rename — safe for concurrent runs
   - FD-safe: os.close(tmp_fd) before open() prevents file descriptor leaks
   - SHA256 computed while writing — avoids second full file pass
@@ -43,6 +43,11 @@ Idempotency design:
   integrity check. It is framed honestly: sidecar present = skip. For verified
   integrity, use --verify-only which recomputes SHA256 from disk bytes and
   compares against the stored sidecar content.
+
+Self-heal design:
+  When a valid file exists without sidecar/manifest (e.g. after a crash),
+  the next run restores BOTH the sidecar and the manifest if revision+dataset
+  are provided. This ensures the full artifact bundle is always consistent.
 
 Concurrency design:
   Unique temp names via mkstemp are collision-safe for temp file creation.
@@ -100,10 +105,6 @@ def _git_sha() -> str:
     Return current git commit SHA or 'unknown'.
     Checks GIT_COMMIT_SHA environment variable first — container-safe.
     Falls back to subprocess for local development.
-    Narrows to specific subprocess exceptions:
-      FileNotFoundError  — git not installed
-      CalledProcessError — not a git repo or git error
-      OSError            — OS-level failure
     """
     env_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
     if env_sha:
@@ -167,6 +168,41 @@ def _purge_stale_artifacts(output_path: Path) -> None:
             log.info("Purged stale artifact -> %s", stale.name)
 
 
+def _self_heal_artifact(
+    output_path: Path,
+    existing: int,
+    cap: int,
+    revision: str,
+    dataset: str,
+    split: str,
+) -> tuple[int, str]:
+    """
+    Self-heal: restore sidecar AND manifest for a valid existing file.
+    Called when file exists but sidecar/manifest are missing (e.g. after crash).
+    Restores full artifact bundle — not just sidecar.
+    Returns (0, digest).
+    """
+    log.info(
+        "Skipping — %s already has %d lines; self-healing full artifact bundle",
+        output_path.name,
+        existing,
+    )
+    digest = compute_sha256(output_path, write_sidecar=True)
+    # Restore manifest if provenance params provided
+    if revision and dataset:
+        _write_provenance_manifest(
+            output_path,
+            sha256=digest,
+            cap=cap,
+            rows_written=existing,
+            hf_revision=revision,
+            dataset=dataset,
+            split=split,
+            force_used=False,
+        )
+    return 0, digest
+
+
 # ---------------------------------------------------------------------------
 # Revision validation
 # ---------------------------------------------------------------------------
@@ -177,8 +213,7 @@ _HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 def validate_revision(revision: str) -> str:
     """
     Validate that revision is a 40-char lowercase hex commit SHA — not a
-    branch/tag. Branch names like 'main' are mutable; only commit SHAs are
-    immutable research artifacts. Uppercase hex is also rejected.
+    branch/tag. Uppercase hex also rejected — git always outputs lowercase.
     """
     if not _HEX_SHA_RE.match(revision):
         raise ValueError(
@@ -242,7 +277,7 @@ def write_jsonl(
     Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
     tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
-    Self-heals: valid file without sidecar gets sidecar written on skip path.
+    Self-heals: restores BOTH sidecar and manifest on valid existing file.
     force=True: purges stale sidecar+manifest before re-ingesting.
     verify_only=True: recomputes SHA256 and compares against stored sidecar.
     Writes provenance manifest (split, rows_written, sha256, etc.) alongside artifact.
@@ -304,13 +339,7 @@ def write_jsonl(
         with output_path.open(encoding="utf-8") as fh:
             existing = sum(1 for _ in fh)
         if existing == cap or (0 < existing < cap):
-            log.info(
-                "Skipping — %s already has %d lines; self-healing sidecar",
-                output_path.name,
-                existing,
-            )
-            digest = compute_sha256(output_path, write_sidecar=True)
-            return 0, digest
+            return _self_heal_artifact(output_path, existing, cap, revision, dataset, split)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".jsonl.tmp")
@@ -379,20 +408,17 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=None, help="Override output_dir from config.")
-    parser.add_argument("--config", type=Path, default=_CONFIG_PATH, help="Path to lepard.yaml config.")
-    parser.add_argument("--force", action="store_true", help="Purge stale artifacts and force re-ingestion.")
-    parser.add_argument("--dry-run", action="store_true", help="Count rows without writing output file.")
-    parser.add_argument(
-        "--verify-only", action="store_true", help="Recompute SHA256 from disk and compare against sidecar."
-    )
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=_CONFIG_PATH)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verify-only", action="store_true")
 
     cap_group = parser.add_mutually_exclusive_group()
-    cap_group.add_argument("--smoke", action="store_true", help="Download smoke_cap rows only (for CI).")
-    cap_group.add_argument("--cap", type=int, default=None, help="Override cap from config.")
+    cap_group.add_argument("--smoke", action="store_true")
+    cap_group.add_argument("--cap", type=int, default=None)
 
     args = parser.parse_args()
-
     cfg = load_lepard_config(args.config)
 
     cap = cfg["smoke_cap"] if args.smoke else (args.cap if args.cap is not None else cfg["cap"])

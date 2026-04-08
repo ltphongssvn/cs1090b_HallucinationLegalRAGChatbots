@@ -722,3 +722,38 @@ class TestManifestCompleteness:
         manifest = _json.loads((tmp_path / "out.jsonl.manifest.json").read_text())
         assert "rows_written" in manifest, "manifest must record actual rows written"
         assert manifest["rows_written"] == 5, "rows_written must reflect actual rows not cap"
+
+
+class TestSelfHealManifest:
+    def test_self_heal_restores_both_sidecar_and_manifest(self, tmp_path):
+        from scripts.ingest_lepard import (
+            _manifest_path,
+            _sidecar_path,
+            write_jsonl,
+        )
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        _sidecar_path(out).write_text(digest + "\n")
+        # delete both
+        _sidecar_path(out).unlink()
+        _manifest_path(out).unlink()
+        # self-heal run
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        assert _sidecar_path(out).exists(), "self-heal must restore sidecar"
+        assert _manifest_path(out).exists(), "self-heal must restore manifest"
