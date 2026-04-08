@@ -174,3 +174,52 @@ class TestAtomicWrite:
         out = tmp_path / "out.jsonl"
         write_jsonl(iter(rows), out, cap=5)
         assert not out.with_suffix(".jsonl.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# RED: short-stream bug, revision SHA validation, atomic write, context manager
+# ---------------------------------------------------------------------------
+
+
+class TestShortStreamIdempotency:
+    def test_short_stream_stabilizes_on_second_run(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=1000)
+        r2 = write_jsonl(iter(rows), out, cap=1000)
+        assert r2 == 0, "short stream must not be rewritten on second run"
+
+
+class TestRevisionValidation:
+    def test_non_sha_revision_rejected(self):
+        import pytest
+
+        from scripts.ingest_lepard import validate_revision
+
+        with pytest.raises(ValueError):
+            validate_revision("main")
+
+    def test_valid_sha_revision_accepted(self):
+        from scripts.ingest_lepard import validate_revision
+
+        validate_revision("0194f95c3091acceab3b887c9b09ef432cf84052")
+
+
+class TestAtomicWriteSafety:
+    def test_tmp_file_not_present_after_successful_write(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        assert not (tmp_path / "out.jsonl.tmp").exists()
+
+    def test_output_file_present_after_write(self, tmp_path):
+        from scripts.ingest_lepard import write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        write_jsonl(iter(rows), out, cap=5)
+        assert out.exists()
