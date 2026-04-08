@@ -822,3 +822,67 @@ class TestFetchStreamRetry:
             )
             assert len(rows) == 1, "fetch_stream must retry on connection error"
             assert attempt == 3, "must retry exactly 3 times"
+
+
+class TestManifestRepairWhenSidecarPresent:
+    def test_missing_manifest_repaired_when_sidecar_present(self, tmp_path):
+        from scripts.ingest_lepard import _manifest_path, _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        _sidecar_path(out).write_text(digest + "\n")
+        _manifest_path(out).unlink()
+        assert not _manifest_path(out).exists()
+        # next run — must repair manifest even when sidecar present
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        assert _manifest_path(out).exists(), "manifest must be repaired when sidecar present"
+
+
+class TestSelfHealPreservesOriginalProvenance:
+    def test_self_heal_preserves_original_manifest_timestamp(self, tmp_path):
+        import json as _json
+        import time
+
+        from scripts.ingest_lepard import _manifest_path, _sidecar_path, write_jsonl
+
+        rows = [{"id": str(i)} for i in range(5)]
+        out = tmp_path / "out.jsonl"
+        _, digest = write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        _sidecar_path(out).write_text(digest + "\n")
+        original_ts = _json.loads(_manifest_path(out).read_text())["ingestion_ts_utc"]
+        # delete sidecar only — manifest survives
+        _sidecar_path(out).unlink()
+        time.sleep(0.05)
+        write_jsonl(
+            iter(rows),
+            out,
+            cap=5,
+            revision="0194f95c3091acceab3b887c9b09ef432cf84052",
+            dataset="rmahari/LePaRD",
+            split="train",
+        )
+        repaired = _json.loads(_manifest_path(out).read_text())
+        assert repaired["ingestion_ts_utc"] == original_ts, "self-heal must preserve original provenance timestamp"
+        assert repaired.get("provenance_reconstructed") is True, "self-heal must mark manifest as reconstructed"

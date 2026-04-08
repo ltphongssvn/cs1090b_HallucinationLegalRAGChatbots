@@ -18,6 +18,8 @@ Features:
   - Output filename includes revision prefix — prevents same-cap collision
   - Idempotent: O(1) sidecar-presence fast path before O(N) line scan
   - Self-heal: restores both sidecar AND manifest on valid existing file
+  - Self-heal preserves original provenance; marks reconstructed manifest
+  - Sidecar-present fast path repairs missing manifest without re-downloading
   - Single-pass self-heal: line count + SHA256 computed in one disk read
   - Crash-safe: missing sidecar/manifest after crash triggers full self-heal
   - Atomic write via unique tmp→rename — safe for concurrent runs
@@ -38,19 +40,21 @@ Features:
   - --verify-only flag: recomputes SHA256 and compares against sidecar
   - cap validated > 0 at entry
   - _SIDECAR_SUFFIX constant — single source of truth for sidecar path
-  - _git_sha() narrows to specific subprocess exceptions
 
 Idempotency design:
   The sidecar-presence fast path is a trust-based shortcut, not a verified
   integrity check. It is framed honestly: sidecar present = skip. For verified
   integrity, use --verify-only which recomputes SHA256 from disk bytes and
   compares against the stored sidecar content.
+  If manifest is missing when sidecar is present, manifest is repaired.
 
 Self-heal design:
   When a valid file exists without sidecar/manifest (e.g. after a crash),
   the next run restores BOTH the sidecar and the manifest if revision+dataset
   are provided. Single-pass: line count and SHA256 computed in one disk read
   (2.3x faster than double-pass on 500K-row files).
+  If original manifest exists, its timestamp is preserved and
+  provenance_reconstructed=True is added — never silently overwrites provenance.
 
 Concurrency design:
   Unique temp names via mkstemp are collision-safe for temp file creation.
@@ -98,7 +102,7 @@ CHUNK_SIZE = 64 * 1024  # bytes per SHA256 read chunk
 _SIDECAR_SUFFIX = ".sha256"  # appended to full filename: out.jsonl -> out.jsonl.sha256
 _MANIFEST_SUFFIX = ".manifest.json"  # provenance manifest suffix
 
-# Network retry config: 3 attempts, exponential backoff 1s→2s
+# Network retry config: 3 attempts, exponential backoff 1s→2s→4s
 _FETCH_RETRY = retry(
     retry=retry_if_exception_type((ConnectionResetError, OSError, TimeoutError)),
     stop=stop_after_attempt(3),
@@ -170,16 +174,19 @@ def _write_provenance_manifest(
     dataset: str,
     split: str = "",
     force_used: bool = False,
+    provenance_reconstructed: bool = False,
+    original_ingestion_ts: str = "",
 ) -> None:
     """
     Write provenance manifest JSON alongside JSONL artifact.
     Includes split and rows_written for complete artifact provenance.
-    rows_written may be less than cap if stream ended early (short stream).
+    If provenance_reconstructed=True, preserves original_ingestion_ts and
+    marks manifest so callers know provenance was repaired, not original.
     """
     import datasets as _ds
 
     manifest = {
-        "ingestion_ts_utc": _utc_now(),
+        "ingestion_ts_utc": original_ingestion_ts if original_ingestion_ts else _utc_now(),
         "script_git_commit": _git_sha(),
         "hf_revision": hf_revision,
         "dataset": dataset,
@@ -191,8 +198,43 @@ def _write_provenance_manifest(
         "force_used": force_used,
         "sha256": sha256,
     }
+    if provenance_reconstructed:
+        manifest["provenance_reconstructed"] = True
+        manifest["reconstruction_ts_utc"] = _utc_now()
+
     _manifest_path(output_path).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     log.info("Provenance manifest written -> %s", _manifest_path(output_path).name)
+
+
+def _repair_manifest_from_sidecar(
+    output_path: Path,
+    revision: str,
+    dataset: str,
+    split: str,
+) -> None:
+    """
+    Repair missing manifest when sidecar is present.
+    Reads digest from sidecar, counts lines for rows_written,
+    and writes manifest marked provenance_reconstructed=True.
+    Called from fast path when sidecar present but manifest missing.
+    """
+    sidecar = _sidecar_path(output_path)
+    digest = sidecar.read_text(encoding="utf-8").strip()
+    # count lines for rows_written — single pass not needed here (manifest only)
+    with output_path.open(encoding="utf-8") as fh:
+        rows_written = sum(1 for _ in fh)
+    log.info("Repairing missing manifest for %s", output_path.name)
+    _write_provenance_manifest(
+        output_path,
+        sha256=digest,
+        cap=rows_written,
+        rows_written=rows_written,
+        hf_revision=revision,
+        dataset=dataset,
+        split=split,
+        force_used=False,
+        provenance_reconstructed=True,
+    )
 
 
 def _purge_stale_artifacts(output_path: Path) -> None:
@@ -214,9 +256,11 @@ def _self_heal_artifact(
 ) -> tuple[int, str]:
     """
     Self-heal: restore sidecar AND manifest for a valid existing file.
-    Called when file exists but sidecar/manifest are missing (e.g. after crash).
+    Called when file exists but sidecar is missing (e.g. after crash).
     Restores full artifact bundle — not just sidecar.
     digest already computed by _count_lines_and_hash — no second disk read.
+    Preserves original manifest timestamp if manifest exists;
+    marks manifest provenance_reconstructed=True to signal repair.
     Returns (0, digest).
     """
     log.info(
@@ -227,7 +271,18 @@ def _self_heal_artifact(
     sidecar = _sidecar_path(output_path)
     sidecar.write_text(digest + "\n", encoding="utf-8")
     log.info("SHA256 written -> %s", sidecar.name)
+
     if revision and dataset:
+        # Preserve original timestamp if manifest exists — never overwrite provenance
+        original_ts = ""
+        manifest = _manifest_path(output_path)
+        if manifest.exists():
+            try:
+                existing_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+                original_ts = existing_manifest.get("ingestion_ts_utc", "")
+            except (json.JSONDecodeError, OSError):
+                original_ts = ""
+
         _write_provenance_manifest(
             output_path,
             sha256=digest,
@@ -237,6 +292,8 @@ def _self_heal_artifact(
             dataset=dataset,
             split=split,
             force_used=False,
+            provenance_reconstructed=True,
+            original_ingestion_ts=original_ts,
         )
     return 0, digest
 
@@ -327,7 +384,9 @@ def write_jsonl(
     Uses ensure_ascii=False to preserve legal unicode (café, em-dash, etc.).
     tqdm(miniters=1) for network-shaped iteration progress visibility.
     Idempotent: O(1) sidecar-presence fast path before O(N) line scan.
+      If manifest missing when sidecar present, manifest is repaired.
     Self-heals: restores BOTH sidecar and manifest on valid existing file.
+      Preserves original provenance; marks manifest provenance_reconstructed=True.
     Single-pass self-heal: line count + SHA256 in one disk read (2.3x faster).
     force=True: purges stale sidecar+manifest before re-ingesting.
     verify_only=True: recomputes SHA256 and compares against stored sidecar.
@@ -385,6 +444,10 @@ def write_jsonl(
     if not force and output_path.exists():
         sidecar = _sidecar_path(output_path)
         if sidecar.exists():
+            # Fast path: sidecar present = skip
+            # Repair missing manifest if provenance params provided
+            if revision and dataset and not _manifest_path(output_path).exists():
+                _repair_manifest_from_sidecar(output_path, revision, dataset, split)
             log.info("Skipping — sidecar found for %s", output_path.name)
             return 0, ""
         # Single-pass: count lines and compute SHA256 in one disk read
