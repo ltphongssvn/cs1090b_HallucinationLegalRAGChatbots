@@ -1,7 +1,8 @@
-"""Tests for src/lepard_cl_compat.py -- TDD Red-first contract.
+"""Tests for src/lepard_cl_compat.py.
 
-Test file written BEFORE source module. Expected to fail with
-ModuleNotFoundError until src/lepard_cl_compat.py is created.
+Written TDD-first (test file committed before source).
+Covers loaders, pure analysis functions, integration, error paths,
+and property-based invariants (hypothesis).
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import json
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from src.lepard_cl_compat import (
     CompatReport,
@@ -156,6 +159,48 @@ class TestPairOverlap:
         assert r.unique_dests == 2
 
 
+class TestPairOverlapProperty:
+    """Property-based invariants for compute_pair_overlap (hypothesis)."""
+
+    @given(
+        pairs=st.lists(
+            st.tuples(st.integers(min_value=0, max_value=1000), st.integers(min_value=0, max_value=1000)),
+            min_size=0,
+            max_size=200,
+        ),
+        cl_ids=st.sets(st.integers(min_value=0, max_value=1000), max_size=500),
+    )
+    def test_buckets_sum_to_unique_pairs(self, pairs, cl_ids):
+        """The four mutually exclusive buckets must partition unique pairs exactly."""
+        r = compute_pair_overlap(pairs, cl_ids)
+        assert r.both_in_cl + r.source_only_in_cl + r.dest_only_in_cl + r.neither_in_cl == r.unique_pairs
+
+    @given(
+        pairs=st.lists(
+            st.tuples(st.integers(min_value=0, max_value=1000), st.integers(min_value=0, max_value=1000)),
+            min_size=0,
+            max_size=200,
+        ),
+        cl_ids=st.sets(st.integers(min_value=0, max_value=1000), max_size=500),
+    )
+    def test_usable_pct_within_bounds(self, pairs, cl_ids):
+        """usable_pct must always be in [0, 100]."""
+        r = compute_pair_overlap(pairs, cl_ids)
+        assert 0.0 <= r.usable_pct <= 100.0
+
+    @given(
+        pairs=st.lists(
+            st.tuples(st.integers(min_value=0, max_value=1000), st.integers(min_value=0, max_value=1000)),
+            min_size=1,
+            max_size=200,
+        ),
+    )
+    def test_total_rows_never_less_than_unique(self, pairs):
+        """Deduplication invariant: total_rows >= unique_pairs."""
+        r = compute_pair_overlap(pairs, set())
+        assert r.total_rows >= r.unique_pairs
+
+
 class TestCourtDistribution:
     def test_counts_matched_only(self):
         pairs = [(100, 200), (100, 999)]
@@ -197,7 +242,7 @@ class TestRunFullAnalysis:
         assert "LePaRD" in text and "USABLE GOLD" in text
 
 
-# ---------- real fixtures (skipped until fixtures committed) ----------
+# ---------- real fixtures (skipped until committed) ----------
 
 
 @pytest.mark.skipif(
