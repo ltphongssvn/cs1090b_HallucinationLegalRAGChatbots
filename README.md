@@ -55,7 +55,7 @@
 **Infrastructure is complete. Corpus preprocessing is underway. The core experiment is the remaining work.**
 - ✅ Environment bootstrapped, verified, reproducible (`setup.sh`, tests passing, coverage verified)
 - ✅ 1,465,484 federal appellate opinions downloaded, filtered, sharded (7.6GB)
-- ✅ DVC + S3 artifact versioning operational for LePaRD; CourtListener uses manifest-based provenance (see note below)
+- ✅ DVC + S3 artifact versioning operational
 - ✅ All `src/` modules implemented and tested
 - ✅ CourtListener RAG-readiness refinement completed (Cell 2)
 - ⏳ LePaRD acquisition, model training, evaluation remaining
@@ -1552,9 +1552,9 @@ HuggingFace Hub (rmahari/LePaRD, ACL 2024)
         ▼
 scripts/ingest_lepard.py              ← Stage 1: Raw Acquisition
         │  produces:
-        │    lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows, repo root)
-        │    lepard_train_4000000_rev0194f95.jsonl.sha256
-        │    lepard_train_4000000_rev0194f95.jsonl.manifest.json
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows)
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.sha256
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.manifest.json
         │
         │  versioned via DVC → S3:
         │    s3://cs1090b-hallucinationlegalragchatbots/dvc
@@ -1585,9 +1585,7 @@ The cap was revised from 500K → 4M rows for three reasons:
 | `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
 
 DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
-
-**Provenance model dichotomy:** This project uses two different reproducibility strategies depending on the dataset. **LePaRD** (5.4 GB, single JSONL) is versioned via DVC and stored in the project S3 bucket — reproduce with `dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc`. **CourtListener federal appellate bulk** (43 GB, 159 shards) is NOT DVC-tracked. Instead, its provenance is captured by `data/raw/cl_federal_appellate_bulk/manifest.json` (schema v2: git SHA, Python version, shard config, federal appellate court IDs) plus `checkpoint.json` (ingestion stats: 10,682,555 scanned → 1,465,484 extracted), and the corpus is reproducible by re-running `scripts/bulk_download.py` at the pinned git SHA against CourtListener's public S3. This avoids duplicating 43 GB in the project S3 bucket and sidesteps the gitignore-negation complexity of nested `.dvc` pointer files. Do not expect a `cl_federal_appellate_bulk.dvc` file.
-DVC tracking file: `lepard_train_4000000_rev0194f95.jsonl.dvc` at repo root (committed to `feature/data-acquisition`). Note: the 5.4 GB artifact lives at the repo root rather than `data/raw/lepard/` because `data/` is gitignored and nested `.dvc` pointer files require verbose gitignore negation. Root-level placement keeps the DVC pointer file tracked cleanly.
+DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
 
 ### Key Capabilities
 
@@ -1653,17 +1651,17 @@ uv run python scripts/ingest_lepard.py --verify-only
 uv run python scripts/ingest_lepard.py --force
 
 # 6. Version and push artifact to S3 via DVC
-uv run dvc push lepard_train_4000000_rev0194f95.jsonl.dvc
+uv run dvc push lepard_4M.dvc
 
 # 7. Pull artifact on a new machine (reproduces exact 5.4GB artifact)
-uv run dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc
+uv run dvc pull lepard_4M.dvc
 
 # 8. Run the full test suite (79 tests, ~3s)
 uv run pytest tests/test_ingest_lepard.py -q
 
 # 9. Verify local artifact integrity after DVC pull
-ls -lh lepard_train_4000000_rev0194f95.jsonl*
-wc -l lepard_train_4000000_rev0194f95.jsonl
+ls -lh data/raw/lepard/
+wc -l data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl
 ```
 
 ### Test Coverage (79 tests, 3.27s on A100)
@@ -1869,3 +1867,73 @@ print(f"Usable gold pairs: {report.pair_overlap.both_in_cl} "
 | `tests/fixtures/cl_matched_courts.json` | 70 matched id → court_id entries (1.4 KB) — committed |
 
 ---
+
+## Data Storage & Provenance Summary
+
+This project uses two distinct reproducibility strategies for its two core datasets. Understanding this dichotomy is essential before attempting to reproduce the pipeline on a new machine.
+
+### LePaRD (Legal Passage Retrieval Dataset)
+
+| Aspect | Status | Detail |
+|---|---|---|
+| **Source** | HuggingFace Hub | `rmahari/LePaRD` (ACL 2024) |
+| **Local path** | `./lepard_train_4000000_rev0194f95.jsonl` (repo root) | 5.4 GB, 4,000,000 rows |
+| **Rows** | 4,000,000 | Full HF dataset, not sampled |
+| **DVC tracked** |  Yes | `lepard_train_4000000_rev0194f95.jsonl.dvc` (123 B pointer, committed to git) |
+| **S3 remote** |  `s3://cs1090b-hallucinationlegalragchatbots/dvc` (us-east-2) | DVC-managed content-addressed storage |
+| **Reproduce on new machine** | `uv run dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc` | Single command pulls 5.4 GB from S3 |
+| **Provenance sidecars** | `.sha256` + `.manifest.json` (also at repo root) | SHA256 checksum + ingestion metadata |
+| **Location rationale** | Artifact lives at repo root (not `data/raw/lepard/`) because `data/` is gitignored and nested `.dvc` pointer files require fragile multi-line gitignore negation. Root-level placement keeps the tiny pointer file trackable without gitignore surgery. |
+
+### CourtListener Federal Appellate Bulk
+
+| Aspect | Status | Detail |
+|---|---|---|
+| **Source** | CourtListener public S3 | Free Law Project bulk opinion data |
+| **Local path** | `data/raw/cl_federal_appellate_bulk/` | 43 GB, 159 shards |
+| **Shards** | 159 × `shard_NNNN.jsonl` | 10,000 records/shard (last shard partial) |
+| **Opinions** | 1,465,484 extracted | From 10,682,555 raw records scanned |
+| **Filter** | Federal appellate only | ca1–ca11, cadc, cafc |
+| **DVC tracked** |  **No** | Intentional — do not expect a `cl_federal_appellate_bulk.dvc` file |
+| **S3 remote** |  Not in project S3 bucket | Stays in CourtListener's public S3 |
+| **Provenance** | `manifest.json` (schema v2) + `checkpoint.json` | Git SHA `780ff292`, Python 3.11.9, shard config, court IDs, ingestion stats |
+| **Reproduce on new machine** | `uv run python scripts/bulk_download.py` at pinned git SHA | Re-runs deterministic ingestion against CourtListener public S3 |
+| **Why no DVC** | (1) Reproducible from upstream public source — no need to duplicate bytes in project S3. (2) Avoids 43 GB storage cost in project bucket. (3) Avoids gitignore-negation complexity for 159 nested `.dvc` pointers. (4) Manifest-based provenance is sufficient: git SHA + config + checkpoint stats lock the ingestion exactly. |
+
+### Quick Reference: Reproduction Commands
+
+```bash
+# LePaRD (DVC pull from project S3)
+uv run dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc
+
+# CourtListener (re-ingest from upstream public S3)
+git checkout 780ff292  # or whatever SHA manifest.json pins
+uv run python scripts/bulk_download.py \
+    --output-dir data/raw/cl_federal_appellate_bulk \
+    --shard-size 10000 \
+    --min-text-length 50
+
+# Verify LePaRD integrity
+ls -lh lepard_train_4000000_rev0194f95.jsonl*
+wc -l lepard_train_4000000_rev0194f95.jsonl  # expect 4000000
+
+# Verify CourtListener integrity
+cat data/raw/cl_federal_appellate_bulk/manifest.json | head -20
+cat data/raw/cl_federal_appellate_bulk/checkpoint.json  # expect extracted: 1465484
+ls data/raw/cl_federal_appellate_bulk/shard_*.jsonl | wc -l  # expect 159
+```
+
+### DVC Remote Configuration
+
+```bash
+$ uv run dvc remote list
+s3-dvc  s3://cs1090b-hallucinationlegalragchatbots/dvc  (default)
+
+$ uv run dvc status -c
+Cache and remote 's3-dvc' are in sync.
+```
+
+Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored here by design.
+
+---
+
