@@ -1552,9 +1552,9 @@ HuggingFace Hub (rmahari/LePaRD, ACL 2024)
         ▼
 scripts/ingest_lepard.py              ← Stage 1: Raw Acquisition
         │  produces:
-        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows)
-        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.sha256
-        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.manifest.json
+        │    lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows, repo root)
+        │    lepard_train_4000000_rev0194f95.jsonl.sha256
+        │    lepard_train_4000000_rev0194f95.jsonl.manifest.json
         │
         │  versioned via DVC → S3:
         │    s3://cs1090b-hallucinationlegalragchatbots/dvc
@@ -1585,7 +1585,7 @@ The cap was revised from 500K → 4M rows for three reasons:
 | `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
 
 DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
-DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
+DVC tracking file: `lepard_train_4000000_rev0194f95.jsonl.dvc` at repo root (committed to `feature/data-acquisition`). Note: the 5.4 GB artifact lives at the repo root rather than `data/raw/lepard/` because `data/` is gitignored and nested `.dvc` pointer files require verbose gitignore negation. Root-level placement keeps the DVC pointer file tracked cleanly.
 
 ### Key Capabilities
 
@@ -1651,17 +1651,17 @@ uv run python scripts/ingest_lepard.py --verify-only
 uv run python scripts/ingest_lepard.py --force
 
 # 6. Version and push artifact to S3 via DVC
-uv run dvc push lepard_4M.dvc
+uv run dvc push lepard_train_4000000_rev0194f95.jsonl.dvc
 
 # 7. Pull artifact on a new machine (reproduces exact 5.4GB artifact)
-uv run dvc pull lepard_4M.dvc
+uv run dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc
 
 # 8. Run the full test suite (79 tests, ~3s)
 uv run pytest tests/test_ingest_lepard.py -q
 
 # 9. Verify local artifact integrity after DVC pull
-ls -lh data/raw/lepard/
-wc -l data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl
+ls -lh lepard_train_4000000_rev0194f95.jsonl*
+wc -l lepard_train_4000000_rev0194f95.jsonl
 ```
 
 ### Test Coverage (79 tests, 3.27s on A100)
