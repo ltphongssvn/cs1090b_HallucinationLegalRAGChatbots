@@ -92,32 +92,32 @@ class TestLoaders:
     def test_load_lepard_missing_required_key_raises_valueerror(self, tmp_path):
         path = tmp_path / "missing_key.jsonl"
         path.write_text('{"dest_id": 1}\n')
-        with pytest.raises(ValueError, match=r"missing required key.*source_id.*line 0"):
+        with pytest.raises(ValueError, match=r"missing required key.*source_id.*line 1"):
             load_lepard_pairs(path)
 
     def test_load_lepard_rejects_float_id(self, tmp_path):
         path = tmp_path / "float.jsonl"
         path.write_text('{"source_id": 1.5, "dest_id": 2}\n')
-        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 1"):
             load_lepard_pairs(path)
 
     def test_load_lepard_rejects_bool_id(self, tmp_path):
         path = tmp_path / "bool.jsonl"
         path.write_text('{"source_id": true, "dest_id": 2}\n')
-        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 1"):
             load_lepard_pairs(path)
 
     def test_load_lepard_rejects_string_id(self, tmp_path):
         path = tmp_path / "str.jsonl"
         path.write_text('{"source_id": "123", "dest_id": 2}\n')
-        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 1"):
             load_lepard_pairs(path)
 
     def test_load_lepard_non_integer_id_raises_with_line_context(self, tmp_path):
         """Non-integer id coercion must wrap ValueError with line number."""
         path = tmp_path / "bad_int.jsonl"
         path.write_text('{"source_id": "not-a-number", "dest_id": 1}\n')
-        with pytest.raises(ValueError, match=r"'source_id' must be int.*line 0"):
+        with pytest.raises(ValueError, match=r"'source_id' must be int.*line 1"):
             load_lepard_pairs(path)
 
     def test_load_cl_ids_gzipped(self, tmp_cl_ids_gz):
@@ -133,7 +133,7 @@ class TestLoaders:
         """Non-integer line must raise ValueError with line number context."""
         path = tmp_path / "bad.txt"
         path.write_text("100\n200\nnot-a-number\n400\n")
-        with pytest.raises(ValueError, match=r"invalid integer.*line 2"):
+        with pytest.raises(ValueError, match=r"invalid integer.*line 3"):
             load_cl_ids(path)
 
     def test_load_court_map_missing_returns_empty(self, tmp_path):
