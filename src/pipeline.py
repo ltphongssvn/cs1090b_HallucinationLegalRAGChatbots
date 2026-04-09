@@ -1,7 +1,33 @@
 # src/pipeline.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/src/pipeline.py
-# SRP: Orchestrate bulk data acquisition. Supports pinned snapshots.
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/pipeline.py
+"""Top-level orchestration for the CourtListener bulk ingest pipeline.
+
+This module wires together every stage of the ingestion pipeline into
+two public entry points:
+
+* :func:`run_pipeline` — discover (or use pinned) S3 bulk files,
+  download them, build the federal appellate filter chain, stream
+  opinions through the extractor, and write the run manifest.
+* :func:`validate_pipeline` — run the TDD contract tests against a
+  completed run, raising on any failure.
+
+Idempotency
+-----------
+:func:`run_pipeline` is idempotent: it reads the existing manifest
+first and, if every listed shard is present with a matching checksum,
+returns the existing manifest without re-running any stage. This
+makes reruns after a crash or partial completion safe and cheap.
+
+Reproducibility
+---------------
+When :attr:`PipelineConfig.has_pinned_snapshot` is ``True``, the
+pipeline skips S3 discovery entirely and uses the four pinned object
+keys instead. This guarantees a later rerun re-fetches the same bytes
+even after the "latest" dump on the bucket has moved on.
+"""
+
+from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
@@ -19,10 +45,40 @@ def run_pipeline(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> Dict[str, Any]:
-    """Run full bulk data acquisition. Returns manifest dict."""
+    """Run the full four-stage ingest pipeline and return its manifest.
+
+    Stages, in order:
+
+    1. **Discover** — either read the pinned snapshot from
+       ``config.pinned_files`` or call :func:`discover_latest_bulk_files`.
+    2. **Download** — :func:`download_bulk_csvs` fetches every CSV to
+       ``config.bulk_dir`` with idempotent skipping.
+    3. **Filter chain** — :func:`build_federal_appellate_filter` builds
+       the court/docket/cluster allow-list.
+    4. **Extract** — :func:`extract_opinions_to_shards` streams the
+       opinions CSV into sharded JSONL output.
+
+    Finally, :func:`write_manifest` records checksums, stats, and run
+    metadata.
+
+    Fast path: if an existing manifest is present and every shard it
+    lists validates byte-for-byte, the function returns the existing
+    manifest immediately — no network, no extraction.
+
+    Args:
+        config: Pipeline configuration. Defaults to :class:`PipelineConfig`.
+        logger: Optional logger for per-stage progress output.
+
+    Returns:
+        The manifest dict for the completed (or already-complete) run.
+
+    Raises:
+        PipelineError: Discovery returned no files and no snapshot was
+            pinned. Downstream stage failures propagate their own
+            :class:`PipelineError` subclasses.
+    """
     if config is None:
         config = PipelineConfig()
-
     existing = read_manifest(config.manifest_path)
     if existing and validate_manifest_shards(existing, config.shard_dir):
         if logger:
@@ -30,7 +86,6 @@ def run_pipeline(
                 f"✓ Already complete: {existing['num_cases']:,} cases, {existing['num_shards']} shards verified"
             )
         return existing
-
     if config.has_pinned_snapshot:
         if logger:
             logger.info("STEP 1: Using pinned snapshot (reproducible)...")
@@ -39,22 +94,17 @@ def run_pipeline(
         if logger:
             logger.info("STEP 1: Discovering bulk files on S3...")
         latest_files = discover_latest_bulk_files(config=config)
-
     if latest_files is None:
         raise PipelineError("No pinned files and discovery returned None")
-
     if logger:
         for label, info in latest_files.items():
             logger.info(f"  {label:<12} {info['key']}")
-
     if logger:
         logger.info("\nSTEP 2: Downloading bulk CSVs...")
     local_paths = download_bulk_csvs(latest_files, config=config, logger=logger)
-
     if logger:
         logger.info("\nSTEP 3: Building filter chain...")
     filter_result = build_federal_appellate_filter(local_paths, config=config, logger=logger)
-
     if logger:
         logger.info(f"\nSTEP 4: Extracting → shards (size={config.shard_size:,})...")
     stats = extract_opinions_to_shards(
@@ -65,7 +115,6 @@ def run_pipeline(
         config=config,
         logger=logger,
     )
-
     manifest_data = write_manifest(
         manifest_path=config.manifest_path,
         shard_dir=config.shard_dir,
@@ -79,7 +128,6 @@ def run_pipeline(
     )
     if logger:
         logger.info(f"Manifest: {config.manifest_path}")
-
     return manifest_data
 
 
@@ -89,7 +137,28 @@ def validate_pipeline(
     logger: Any = None,
     shard_strategy: str = "sample",
 ) -> bool:
-    """Run TDD contract tests."""
+    """Run the TDD contract tests against a completed pipeline run.
+
+    Delegates to :func:`src.validation.run_contract_tests`, which
+    checks row-count floors, per-shard schema conformance, and any
+    other invariants declared for the corpus. Any contract failure is
+    promoted to a :class:`PipelineError` so callers can treat pipeline
+    and validation failures uniformly.
+
+    Args:
+        config: Pipeline configuration.
+        manifest_data: Optional pre-loaded manifest; when omitted,
+            :func:`run_contract_tests` reads it from disk.
+        logger: Optional logger for per-test output.
+        shard_strategy: ``"sample"`` (default) validates a subset of
+            each shard for speed; ``"full"`` validates every row.
+
+    Returns:
+        ``True`` on full pass.
+
+    Raises:
+        PipelineError: At least one contract test failed.
+    """
     if config is None:
         config = PipelineConfig()
     passed = run_contract_tests(
