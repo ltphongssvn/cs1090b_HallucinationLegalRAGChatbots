@@ -21,6 +21,8 @@ Semantic notes:
     runs, consider a streaming/DuckDB-backed variant.
   - CLI policy: --min-usable-pct gate is evaluated BEFORE --write-valid-pairs
     export. If the gate fails, no export file is written.
+  - Strict int validation: source_id / dest_id must be native JSON integers.
+    Floats (1.5), bools (true), and strings ("123") are rejected with line context.
 
 CLI:
     uv run python -m src.lepard_cl_compat
@@ -111,7 +113,8 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
     """Return (source_id, dest_id) tuples -- duplicates preserved.
 
     Raises ValueError with line context on malformed JSON, missing
-    required keys, or non-integer id values.
+    required keys, or values that are not native JSON integers
+    (rejects floats, bools, and strings).
     """
     path = Path(path)
     if not path.exists():
@@ -126,18 +129,14 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
             for required_key in ("source_id", "dest_id"):
                 if required_key not in record:
                     raise ValueError(f"missing required key {required_key!r} at line {line_number} of {path}")
-            try:
-                source_id = int(record["source_id"])
-                dest_id = int(record["dest_id"])
-            except (TypeError, ValueError) as exc:
-                bad_key = "source_id"
-                try:
-                    int(record["source_id"])
-                    bad_key = "dest_id"
-                except (TypeError, ValueError):
-                    pass
-                raise ValueError(f"invalid integer for {bad_key!r} at line {line_number} of {path}: {exc}") from exc
-            pairs.append((source_id, dest_id))
+                value = record[required_key]
+                # Strict: reject bool (subclass of int), float, str, None
+                if type(value) is not int:
+                    raise ValueError(
+                        f"{required_key!r} must be int, got {type(value).__name__} "
+                        f"{value!r} at line {line_number} of {path}"
+                    )
+            pairs.append((record["source_id"], record["dest_id"]))
     return pairs
 
 
