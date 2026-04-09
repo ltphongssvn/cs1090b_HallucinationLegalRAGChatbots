@@ -235,16 +235,14 @@ def analyze_court_distribution(
 
 
 def extract_valid_pairs(pairs: list[tuple[int, int]], cl_ids: set[int]) -> list[tuple[int, int]]:
-    """Return deduplicated pairs where BOTH endpoints exist in CL (usable gold)."""
-    seen: set[tuple[int, int]] = set()
-    valid: list[tuple[int, int]] = []
-    for source_id, dest_id in pairs:
-        if (source_id, dest_id) in seen:
-            continue
-        seen.add((source_id, dest_id))
-        if source_id in cl_ids and dest_id in cl_ids:
-            valid.append((source_id, dest_id))
-    return valid
+    """Return deduplicated pairs where BOTH endpoints exist in CL (usable gold).
+
+    Deduplication uses ``dict.fromkeys`` to preserve first-occurrence order
+    deterministically (``set(pairs)`` would break determinism across runs).
+    """
+    return [
+        (source_id, dest_id) for source_id, dest_id in dict.fromkeys(pairs) if source_id in cl_ids and dest_id in cl_ids
+    ]
 
 
 def write_valid_pairs_jsonl(pairs: list[tuple[int, int]], cl_ids: set[int], out_path: Path | str) -> int:
