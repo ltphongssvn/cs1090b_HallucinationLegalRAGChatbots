@@ -117,7 +117,7 @@ class TestLoaders:
         """Non-integer id coercion must wrap ValueError with line number."""
         path = tmp_path / "bad_int.jsonl"
         path.write_text('{"source_id": "not-a-number", "dest_id": 1}\n')
-        with pytest.raises(ValueError, match=r"invalid integer.*source_id.*line 0"):
+        with pytest.raises(ValueError, match=r"'source_id' must be int.*line 0"):
             load_lepard_pairs(path)
 
     def test_load_cl_ids_gzipped(self, tmp_cl_ids_gz):
