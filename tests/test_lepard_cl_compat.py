@@ -136,6 +136,19 @@ class TestLoaders:
         with pytest.raises(ValueError, match=r"invalid integer.*line 3"):
             load_cl_ids(path)
 
+    def test_load_cl_ids_rejects_signed_or_padded(self, tmp_path):
+        """CL ids must be canonical positive decimals: reject +001, -5, 0."""
+        path = tmp_path / "padded.txt"
+        path.write_text("100\n+001\n200\n")
+        with pytest.raises(ValueError, match=r"non-canonical.*line 2"):
+            load_cl_ids(path)
+
+    def test_load_cl_ids_rejects_negative(self, tmp_path):
+        path = tmp_path / "neg.txt"
+        path.write_text("100\n-5\n200\n")
+        with pytest.raises(ValueError, match=r"non-canonical.*line 2"):
+            load_cl_ids(path)
+
     def test_load_court_map_missing_returns_empty(self, tmp_path):
         assert load_court_map(tmp_path / "nope.json") == {}
 
