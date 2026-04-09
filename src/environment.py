@@ -1,7 +1,46 @@
 # src/environment.py
 # Project: HallucinationLegalRAGChatbots
 # Path: cs1090b_HallucinationLegalRAGChatbots/src/environment.py
-# SRP: Verify GPU environment and dependency contracts.
+"""GPU environment verification and dependency contract enforcement.
+
+This module is the runtime gate that training and evaluation code calls
+before doing anything expensive. It answers three questions, each with
+its own public entry point:
+
+1. **Are my dependencies sane?** — :func:`run_environment_checks` imports
+   every package in :data:`REQUIRED_DEPS` and verifies each one meets its
+   declared version constraint. Soft cross-package compatibility warnings
+   are emitted via :func:`_check_compat`.
+
+2. **Is the hardware + reproducibility state correct?** —
+   :func:`run_preflight_checks` is a hard gate that verifies GPU count,
+   compute capability, VRAM, torch CUDA runtime, disk space, the presence
+   of the generated ``src/repro.py``, the integrity of the injected
+   ``repro_cfg`` dict, live torch determinism flags, OS env vars, and the
+   presence of ``uv.lock``. Any failure raises :class:`PreflightError`
+   with a numbered list of issues — no training run ever proceeds past
+   a partial failure.
+
+3. **What is my environment fingerprint?** —
+   :func:`get_environment_summary` returns a dict suitable for logging
+   to W&B or embedding in a run manifest.
+
+Design notes
+------------
+* **Hardware-agnostic preflight**: GPU family names are informational
+  (:data:`SUPPORTED_GPU_FAMILIES`); the hard check is on compute
+  capability (Ampere minimum, ``(8, 0)``) and VRAM. This lets the same
+  code work on A10G/L4 Harvard nodes and on A100 Colab runtimes.
+* **Env-overridable thresholds**: ``TARGET_GPU_COUNT`` and
+  ``TARGET_VRAM_GB_MIN`` are read from the environment so the Harvard
+  setup scripts and ad-hoc Colab sessions can both drive the same code.
+* **Two error types**: :class:`AssertionError` for dependency / basic
+  environment failures (recoverable — user fixes and retries),
+  :class:`PreflightError` for the pre-training hard gate.
+"""
+
+from __future__ import annotations
+
 import importlib
 import os
 import shutil
@@ -12,6 +51,11 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from packaging.version import Version
 
+#: Mapping of importable package name → PEP 440 version constraint
+#: (``None`` means "importable only, version not checked"). ``sentence_transformers``
+#: is ``None`` because its ``__version__`` attribute is unreliable under
+#: :mod:`importlib`; ``faiss`` is ``None`` because the wheel publishes no
+#: version attribute on the module object.
 REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "torch": ">=2.0",
     "transformers": ">=4.35,<4.42",
@@ -29,15 +73,24 @@ REQUIRED_DEPS: Dict[str, Optional[str]] = {
     "wandb": ">=0.16",
 }
 
-# Known supported GPU families — informational only, not used for hard failure
+#: Informational allow-list of GPU families known to work with the
+#: cu117 torch wheel. Preflight does **not** fail on an unlisted name —
+#: it only emits a warning — because new datacenter cards (B200, etc.)
+#: should not be blocked by a stale string list.
 SUPPORTED_GPU_FAMILIES = ("A10G", "A10", "L4", "L40", "A100", "H100", "V100")
 
 
 @dataclass
 class CompatRule:
-    """
-    severity="error"  — hard blocker: raises AssertionError
-    severity="warn"   — known-risk: logs warning, does not block
+    """Declarative cross-package compatibility rule.
+
+    Attributes:
+        name: Stable short identifier used in log lines and test assertions.
+        check: Zero-arg callable that returns ``True`` when the rule
+            **fires** (i.e. the risky condition is present).
+        message: Human-readable explanation shown when the rule fires.
+        severity: ``"error"`` → raise :class:`AssertionError` and block
+            the run; ``"warn"`` → log only, do not block.
     """
 
     name: str
@@ -47,6 +100,13 @@ class CompatRule:
 
 
 def _build_compat_rules() -> List[CompatRule]:
+    """Construct the live list of compatibility rules after importing torch + transformers.
+
+    Rules are built lazily (rather than at module import) because they
+    need the actual installed versions, and importing torch at module
+    load time would make :mod:`src.environment` itself non-importable
+    on a broken environment — defeating the purpose of the checker.
+    """
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
 
@@ -66,25 +126,48 @@ def _build_compat_rules() -> List[CompatRule]:
     ]
 
 
+#: Minimum VRAM (GB) required by :func:`run_environment_checks`. The
+#: stricter preflight path uses :data:`PREFLIGHT_VRAM_GB_MIN` instead.
 MIN_GPU_MEMORY_GB: int = 10
 
-# Preflight thresholds — hardware-agnostic, env-overridable
+#: Preflight VRAM minimum, overridable via ``TARGET_VRAM_GB_MIN`` env var.
 PREFLIGHT_VRAM_GB_MIN = float(os.environ.get("TARGET_VRAM_GB_MIN", "20.0"))
-PREFLIGHT_COMPUTE_CAP_MIN = (8, 0)  # Ampere minimum — covers A10G (8,6) and L4 (8,9)
+
+#: Minimum CUDA compute capability. ``(8, 0)`` = Ampere — covers A100
+#: (8.0), A10G (8.6), L4 (8.9), H100 (9.0), etc.
+PREFLIGHT_COMPUTE_CAP_MIN = (8, 0)
+
+#: Expected torch CUDA runtime prefix. Must match the wheel locked in
+#: ``uv.lock``; drift here indicates a silent wheel substitution.
 PREFLIGHT_TORCH_CUDA = "11.7"
+
+#: Free disk space required under the project root (GB).
 PREFLIGHT_MIN_DISK_GB = 50.0
 
-# Reproducibility expectations
+#: Reproducibility env-var expectations. Must match the values written
+#: by ``scripts/setup_notebook.sh`` into ``.env``.
 EXPECTED_PYTHONHASHSEED = "0"
 EXPECTED_CUBLAS_CFG = ":4096:8"
 EXPECTED_TOKENIZERS_PARALLELISM = "false"
 
 
 class PreflightError(RuntimeError):
-    """Raised when a preflight check fails — hard stop before expensive training."""
+    """Raised when :func:`run_preflight_checks` finds any failure.
+
+    Distinct from :class:`AssertionError` so callers (notebooks,
+    training scripts) can catch preflight failures specifically and
+    print an actionable remediation banner without catching unrelated
+    assertions.
+    """
 
 
 def _get_version(module: Any) -> Optional[str]:
+    """Return a cleaned version string for an imported module, or ``None``.
+
+    Tries ``__version__`` then ``VERSION``, strips any ``+local``
+    segment (e.g. ``2.0.1+cu117`` → ``2.0.1``) so PEP 440 comparisons
+    work.
+    """
     for attr in ("__version__", "VERSION"):
         if hasattr(module, attr):
             return str(getattr(module, attr)).split("+")[0]
@@ -92,6 +175,19 @@ def _get_version(module: Any) -> Optional[str]:
 
 
 def _check_constraint(actual_str: str, constraint: str) -> Tuple[bool, str]:
+    """Evaluate a comma-separated PEP 440 constraint against an installed version.
+
+    Args:
+        actual_str: The installed version as a string (already stripped
+            of any local segment).
+        constraint: Comma-separated clause, e.g. ``">=4.35,<4.42"``.
+            Only ``>=`` and ``<`` operators are recognised — sufficient
+            for every entry in :data:`REQUIRED_DEPS`.
+
+    Returns:
+        ``(ok, reason)`` where ``reason`` is empty on success and a
+        human-readable diagnostic on failure.
+    """
     actual = Version(actual_str)
     for part in constraint.split(","):
         part = part.strip()
@@ -105,6 +201,19 @@ def _check_constraint(actual_str: str, constraint: str) -> Tuple[bool, str]:
 
 
 def run_environment_checks(logger: Any = None) -> bool:
+    """Run the five basic environment checks, logging per-check pass/fail.
+
+    Unlike :func:`run_preflight_checks`, this function never raises —
+    it returns a boolean so callers (e.g. ``make check-env``) can
+    aggregate results without try/except.
+
+    Args:
+        logger: Optional standard-library logger. When supplied,
+            each check emits a ``PASS``/``FAIL`` line at INFO/ERROR.
+
+    Returns:
+        ``True`` iff all five checks passed.
+    """
     checks: List[Tuple[str, Callable[[], None]]] = [
         ("Every required dependency must be importable and meet version constraints", _check_deps),
         ("CUDA GPU must be detected for training", _check_gpu_available),
@@ -129,7 +238,41 @@ def run_preflight_checks(
     logger: Any = None,
     repro_cfg: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Hard gate before expensive GPU training. Raises PreflightError on failure."""
+    """Hard-gate the environment before any expensive GPU training.
+
+    Runs nine grouped checks and raises :class:`PreflightError` with a
+    numbered failure list if *any* of them fail. Partial success is not
+    a partial pass — the function either completes silently (with
+    optional INFO logging) or aborts the run.
+
+    The nine checks:
+
+    1. **GPU count** — satisfies ``TARGET_GPU_COUNT`` env var if set.
+    2. **GPU properties** — each device meets compute-cap and VRAM
+       minima; unknown family name is a warning, not a failure.
+    3. **torch CUDA runtime** — matches :data:`PREFLIGHT_TORCH_CUDA`
+       prefix (catches silent wheel substitution).
+    4. **Disk space** — at least :data:`PREFLIGHT_MIN_DISK_GB` GB free.
+    5. **src/repro.py** — file exists and imports cleanly.
+    6. **repro_cfg integrity** — every required key present with the
+       expected value (caller must pass the dict).
+    7. **torch runtime determinism** — ``use_deterministic_algorithms``
+       on, ``cudnn.benchmark`` off, ``cudnn.deterministic`` on.
+    8. **OS env vars** — ``PYTHONHASHSEED``, ``CUBLAS_WORKSPACE_CONFIG``,
+       ``TOKENIZERS_PARALLELISM`` match expected values.
+    9. **uv.lock** — present at the project root.
+
+    Args:
+        logger: Optional logger for per-check PASS lines.
+        repro_cfg: The dict returned by ``src.repro.configure()``.
+            ``None`` is treated as a failure (check 6) because
+            preflight without a reproducibility config is meaningless.
+
+    Raises:
+        PreflightError: One or more checks failed. The exception
+            message is a fully-formatted multi-line report suitable
+            for direct display to the user.
+    """
     import torch
 
     expected_gpu_count = int(os.environ.get("TARGET_GPU_COUNT", "0"))
@@ -262,6 +405,13 @@ def run_preflight_checks(
 
 
 def _check_deps() -> None:
+    """Import every entry in :data:`REQUIRED_DEPS` and enforce its constraint.
+
+    Raises:
+        AssertionError: One or more packages are missing, have
+            undetectable versions, or fail their constraint. The
+            message lists every failure, not just the first.
+    """
     failures: List[str] = []
     for pkg, constraint in REQUIRED_DEPS.items():
         try:
@@ -282,6 +432,7 @@ def _check_deps() -> None:
 
 
 def _check_gpu_available() -> None:
+    """Raise :class:`AssertionError` if no CUDA device is visible to torch."""
     import torch
 
     if not torch.cuda.is_available():
@@ -289,6 +440,7 @@ def _check_gpu_available() -> None:
 
 
 def _check_gpu_memory() -> None:
+    """Raise :class:`AssertionError` if device 0 has <:data:`MIN_GPU_MEMORY_GB` GB VRAM."""
     import torch
 
     props: Any = torch.cuda.get_device_properties(0)
@@ -298,6 +450,12 @@ def _check_gpu_memory() -> None:
 
 
 def _check_pytorch_cuda() -> None:
+    """Raise :class:`AssertionError` if the installed torch wheel lacks CUDA.
+
+    A CPU-only wheel has ``torch.version.cuda is None``; this catches
+    the common failure where a fallback install silently replaced the
+    cu117 wheel with the CPU build.
+    """
     import torch
 
     if torch.version.cuda is None:
@@ -305,6 +463,14 @@ def _check_pytorch_cuda() -> None:
 
 
 def _check_compat(logger: Any = None) -> None:
+    """Evaluate all :class:`CompatRule` instances, surfacing warnings and errors.
+
+    Non-firing and exception-raising rules are skipped silently
+    (exceptions are a sign the rule's precondition is not met, not a
+    bug). Firing rules are partitioned by severity: warnings go to the
+    logger (or stderr as a fallback), errors are aggregated and raised
+    as a single :class:`AssertionError` at the end.
+    """
     rules = _build_compat_rules()
     errors: List[str] = []
     warnings: List[str] = []
@@ -328,7 +494,16 @@ def _check_compat(logger: Any = None) -> None:
 
 
 def get_environment_summary() -> Dict[str, Any]:
-    """Return dict of verified environment details including reproducibility state."""
+    """Return a dict snapshot of the verified environment for logging.
+
+    Captures Python version, every :data:`REQUIRED_DEPS` package version,
+    GPU name/count/memory, torch CUDA runtime, determinism flags, and
+    the three reproducibility env vars. Safe to serialise to JSON.
+
+    Returns:
+        A flat dict ready for ``wandb.config.update`` or inclusion in
+        an experiment manifest.
+    """
     import torch
 
     summary: Dict[str, Any] = {"python": sys.version.split()[0]}
