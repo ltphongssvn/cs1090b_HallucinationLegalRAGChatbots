@@ -53,6 +53,7 @@ __all__ = [
     "analyze_court_distribution",
     "extract_valid_pairs",
     "write_valid_pairs_jsonl",
+    "build_report",
     "run_full_analysis",
     "format_report",
     "main",
@@ -127,7 +128,6 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
                 source_id = int(record["source_id"])
                 dest_id = int(record["dest_id"])
             except (TypeError, ValueError) as exc:
-                # Identify which key was the offender
                 bad_key = "source_id"
                 try:
                     int(record["source_id"])
@@ -258,19 +258,29 @@ def write_valid_pairs_jsonl(pairs: list[tuple[int, int]], cl_ids: set[int], out_
     return len(valid)
 
 
-def run_full_analysis(
-    lepard_path: Path | str = DEFAULT_LEPARD,
-    cl_ids_path: Path | str = DEFAULT_CL_IDS,
-    court_map_path: Path | str = DEFAULT_COURT_MAP,
+def build_report(
+    pairs: list[tuple[int, int]],
+    cl_ids: set[int],
+    court_map: dict[int, str],
 ) -> CompatReport:
-    pairs = load_lepard_pairs(lepard_path)
-    cl_ids = load_cl_ids(cl_ids_path)
-    court_map = load_court_map(court_map_path)
+    """Build CompatReport from already-loaded data. Pure, no I/O."""
     return CompatReport(
         id_overlap=compute_id_overlap(pairs, cl_ids),
         pair_overlap=compute_pair_overlap(pairs, cl_ids),
         court_distribution=analyze_court_distribution(pairs, cl_ids, court_map),
     )
+
+
+def run_full_analysis(
+    lepard_path: Path | str = DEFAULT_LEPARD,
+    cl_ids_path: Path | str = DEFAULT_CL_IDS,
+    court_map_path: Path | str = DEFAULT_COURT_MAP,
+) -> CompatReport:
+    """Load inputs and build report. Convenience wrapper around build_report."""
+    pairs = load_lepard_pairs(lepard_path)
+    cl_ids = load_cl_ids(cl_ids_path)
+    court_map = load_court_map(court_map_path)
+    return build_report(pairs, cl_ids, court_map)
 
 
 # ---------- presentation ----------
@@ -338,15 +348,18 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    report = run_full_analysis(args.lepard, args.cl_ids, args.court_map)
+    # Load once, reuse for report and gold-pair export
+    pairs = load_lepard_pairs(args.lepard)
+    cl_ids = load_cl_ids(args.cl_ids)
+    court_map = load_court_map(args.court_map)
+    report = build_report(pairs, cl_ids, court_map)
+
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, ensure_ascii=False))
     else:
         print(format_report(report))
 
     if args.write_valid_pairs is not None:
-        pairs = load_lepard_pairs(args.lepard)
-        cl_ids = load_cl_ids(args.cl_ids)
         n = write_valid_pairs_jsonl(pairs, cl_ids, args.write_valid_pairs)
         print(f"[write-valid-pairs] wrote {n} pairs to {args.write_valid_pairs}", file=sys.stderr)
 
