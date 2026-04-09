@@ -16,7 +16,8 @@ court distribution -- identical numbers to the live cross-machine run.
 CLI:
     uv run python -m src.lepard_cl_compat
     uv run python -m src.lepard_cl_compat --lepard path/to.jsonl --cl-ids path/to.txt.gz
-    uv run python -m src.lepard_cl_compat --min-usable-pct 70.0   # CI gate
+    uv run python -m src.lepard_cl_compat --min-usable-pct 70.0            # CI gate
+    uv run python -m src.lepard_cl_compat --write-valid-pairs gold.jsonl   # emit usable pairs
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ __all__ = [
     "compute_id_overlap",
     "compute_pair_overlap",
     "analyze_court_distribution",
+    "extract_valid_pairs",
+    "write_valid_pairs_jsonl",
     "run_full_analysis",
     "format_report",
     "main",
@@ -105,15 +108,15 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
         raise FileNotFoundError(f"LePaRD sample not found: {path}")
     pairs: list[tuple[int, int]] = []
     with path.open(encoding="utf-8") as f:
-        for i, line in enumerate(f):
+        for line_number, line in enumerate(f):
             try:
-                r = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"malformed JSON at line {i} of {path}: {e}") from e
-            for key in ("source_id", "dest_id"):
-                if key not in r:
-                    raise ValueError(f"missing required key {key!r} at line {i} of {path}")
-            pairs.append((int(r["source_id"]), int(r["dest_id"])))
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"malformed JSON at line {line_number} of {path}: {exc}") from exc
+            for required_key in ("source_id", "dest_id"):
+                if required_key not in record:
+                    raise ValueError(f"missing required key {required_key!r} at line {line_number} of {path}")
+            pairs.append((int(record["source_id"]), int(record["dest_id"])))
     return pairs
 
 
@@ -142,9 +145,9 @@ def load_court_map(path: Path | str) -> dict[int, str]:
 
 def compute_id_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> IdOverlap:
     lepard_ids: set[int] = set()
-    for s, d in pairs:
-        lepard_ids.add(s)
-        lepard_ids.add(d)
+    for source_id, dest_id in pairs:
+        lepard_ids.add(source_id)
+        lepard_ids.add(dest_id)
     overlap = lepard_ids & cl_ids
     cl_max = max(cl_ids) if cl_ids else 0
     return IdOverlap(
@@ -159,30 +162,30 @@ def compute_id_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> IdOver
 
 
 def compute_pair_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> PairOverlap:
-    unique = set(pairs)
-    both = src_only = dst_only = neither = 0
-    for s, d in unique:
-        s_in = s in cl_ids
-        d_in = d in cl_ids
-        if s_in and d_in:
-            both += 1
-        elif s_in:
-            src_only += 1
-        elif d_in:
-            dst_only += 1
+    unique_pairs = set(pairs)
+    both_in_cl = source_only_in_cl = dest_only_in_cl = neither_in_cl = 0
+    for source_id, dest_id in unique_pairs:
+        is_source_present = source_id in cl_ids
+        is_dest_present = dest_id in cl_ids
+        if is_source_present and is_dest_present:
+            both_in_cl += 1
+        elif is_source_present:
+            source_only_in_cl += 1
+        elif is_dest_present:
+            dest_only_in_cl += 1
         else:
-            neither += 1
-    n = len(unique)
+            neither_in_cl += 1
+    unique_count = len(unique_pairs)
     return PairOverlap(
         total_rows=len(pairs),
-        unique_pairs=n,
-        unique_sources=len({s for s, _ in unique}),
-        unique_dests=len({d for _, d in unique}),
-        both_in_cl=both,
-        source_only_in_cl=src_only,
-        dest_only_in_cl=dst_only,
-        neither_in_cl=neither,
-        usable_pct=100.0 * both / n if n else 0.0,
+        unique_pairs=unique_count,
+        unique_sources=len({src for src, _ in unique_pairs}),
+        unique_dests=len({dst for _, dst in unique_pairs}),
+        both_in_cl=both_in_cl,
+        source_only_in_cl=source_only_in_cl,
+        dest_only_in_cl=dest_only_in_cl,
+        neither_in_cl=neither_in_cl,
+        usable_pct=100.0 * both_in_cl / unique_count if unique_count else 0.0,
     )
 
 
@@ -194,14 +197,40 @@ def analyze_court_distribution(
     """Return court_id -> count for LePaRD ids that are present in CL."""
     if not court_map:
         return {}
-    matched: set[int] = set()
-    for s, d in pairs:
-        if s in cl_ids:
-            matched.add(s)
-        if d in cl_ids:
-            matched.add(d)
-    counts = Counter(court_map[mid] for mid in matched if mid in court_map)
+    matched_ids: set[int] = set()
+    for source_id, dest_id in pairs:
+        if source_id in cl_ids:
+            matched_ids.add(source_id)
+        if dest_id in cl_ids:
+            matched_ids.add(dest_id)
+    counts = Counter(court_map[matched_id] for matched_id in matched_ids if matched_id in court_map)
     return dict(counts.most_common())
+
+
+def extract_valid_pairs(pairs: list[tuple[int, int]], cl_ids: set[int]) -> list[tuple[int, int]]:
+    """Return deduplicated pairs where BOTH endpoints exist in CL (usable gold)."""
+    seen: set[tuple[int, int]] = set()
+    valid: list[tuple[int, int]] = []
+    for source_id, dest_id in pairs:
+        if (source_id, dest_id) in seen:
+            continue
+        if source_id in cl_ids and dest_id in cl_ids:
+            valid.append((source_id, dest_id))
+            seen.add((source_id, dest_id))
+        else:
+            seen.add((source_id, dest_id))
+    return valid
+
+
+def write_valid_pairs_jsonl(pairs: list[tuple[int, int]], cl_ids: set[int], out_path: Path | str) -> int:
+    """Write usable gold pairs to JSONL. Returns count written."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    valid = extract_valid_pairs(pairs, cl_ids)
+    with out_path.open("w", encoding="utf-8") as f:
+        for source_id, dest_id in valid:
+            f.write(json.dumps({"source_id": source_id, "dest_id": dest_id}) + "\n")
+    return len(valid)
 
 
 def run_full_analysis(
@@ -223,36 +252,36 @@ def run_full_analysis(
 
 
 def format_report(report: CompatReport) -> str:
-    io_ = report.id_overlap
-    po = report.pair_overlap
+    id_ov = report.id_overlap
+    pair_ov = report.pair_overlap
     lines = [
         "=" * 60,
         "LePaRD <-> CourtListener compatibility analysis",
         "=" * 60,
         "",
         "[1] ID-level overlap",
-        f"  LePaRD unique ids:       {io_.lepard_unique_ids:,}",
-        f"  CL total ids:            {io_.cl_total_ids:,}",
-        f"  Overlap:                 {io_.overlap:,} ({io_.overlap_pct_of_lepard:.1f}% of LePaRD)",
-        f"  LePaRD id range max:     {io_.lepard_max:,}",
-        f"  CL id range max:         {io_.cl_max:,}",
-        f"  LePaRD ids > CL max:     {io_.lepard_ids_above_cl_max:,} (newer CL snapshot)",
+        f"  LePaRD unique ids:       {id_ov.lepard_unique_ids:,}",
+        f"  CL total ids:            {id_ov.cl_total_ids:,}",
+        f"  Overlap:                 {id_ov.overlap:,} ({id_ov.overlap_pct_of_lepard:.1f}% of LePaRD)",
+        f"  LePaRD id range max:     {id_ov.lepard_max:,}",
+        f"  CL id range max:         {id_ov.cl_max:,}",
+        f"  LePaRD ids > CL max:     {id_ov.lepard_ids_above_cl_max:,} (newer CL snapshot)",
         "",
         "[2] Pair-level overlap (both endpoints required for gold label)",
-        f"  Total rows:              {po.total_rows:,}",
-        f"  Unique pairs:            {po.unique_pairs:,}",
-        f"  Unique sources / dests:  {po.unique_sources:,} / {po.unique_dests:,}",
-        f"  Both endpoints in CL:    {po.both_in_cl:,} ({po.usable_pct:.1f}%)  <- USABLE GOLD",
-        f"  Source only in CL:       {po.source_only_in_cl:,}",
-        f"  Dest only in CL:         {po.dest_only_in_cl:,}",
-        f"  Neither in CL:           {po.neither_in_cl:,}",
+        f"  Total rows:              {pair_ov.total_rows:,}",
+        f"  Unique pairs:            {pair_ov.unique_pairs:,}",
+        f"  Unique sources / dests:  {pair_ov.unique_sources:,} / {pair_ov.unique_dests:,}",
+        f"  Both endpoints in CL:    {pair_ov.both_in_cl:,} ({pair_ov.usable_pct:.1f}%)  <- USABLE GOLD",
+        f"  Source only in CL:       {pair_ov.source_only_in_cl:,}",
+        f"  Dest only in CL:         {pair_ov.dest_only_in_cl:,}",
+        f"  Neither in CL:           {pair_ov.neither_in_cl:,}",
     ]
     if report.court_distribution:
         lines += ["", "[3] Court distribution of matched CL ids"]
         total = sum(report.court_distribution.values())
         lines.append(f"  Total matched: {total}")
-        for court, n in report.court_distribution.items():
-            lines.append(f"    {court}: {n}")
+        for court, count in report.court_distribution.items():
+            lines.append(f"    {court}: {count}")
     lines.append("=" * 60)
     return "\n".join(lines)
 
@@ -275,6 +304,12 @@ def main() -> None:
         default=None,
         help="CI gate: exit non-zero if usable_pct falls below this threshold",
     )
+    ap.add_argument(
+        "--write-valid-pairs",
+        type=Path,
+        default=None,
+        help="Write deduplicated usable gold pairs (both endpoints in CL) to this JSONL path",
+    )
     args = ap.parse_args()
 
     report = run_full_analysis(args.lepard, args.cl_ids, args.court_map)
@@ -282,6 +317,12 @@ def main() -> None:
         print(json.dumps(report.to_dict(), indent=2))
     else:
         print(format_report(report))
+
+    if args.write_valid_pairs is not None:
+        pairs = load_lepard_pairs(args.lepard)
+        cl_ids = load_cl_ids(args.cl_ids)
+        n = write_valid_pairs_jsonl(pairs, cl_ids, args.write_valid_pairs)
+        print(f"[write-valid-pairs] wrote {n} pairs to {args.write_valid_pairs}", file=sys.stderr)
 
     if args.min_usable_pct is not None:
         actual = report.pair_overlap.usable_pct
