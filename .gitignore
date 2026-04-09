@@ -30,5 +30,7 @@ src/repro.py
 .hypothesis/
 tests/shell/bats-core/
 data/
+!data/**/*.dvc
+!data/**/.gitignore
 wandb/
-/lepard_4M
+/lepard_train_4000000_rev0194f95.jsonl

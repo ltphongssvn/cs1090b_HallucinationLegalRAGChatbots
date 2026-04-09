@@ -2,4 +2,4 @@ outs:
 - md5: d9c3c499f124a00d0c4649ce7cc72ed3
   size: 5778401221
   hash: md5
-  path: lepard_4M
+  path: lepard_train_4000000_rev0194f95.jsonl
