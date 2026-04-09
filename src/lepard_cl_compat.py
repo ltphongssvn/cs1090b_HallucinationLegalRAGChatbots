@@ -23,6 +23,8 @@ Semantic notes:
     export. If the gate fails, no export file is written.
   - Strict int validation: source_id / dest_id must be native JSON integers.
     Floats (1.5), bools (true), and strings ("123") are rejected with line context.
+  - Strict CL id validation: must be canonical positive decimal integers
+    (no leading zeros, no sign characters, not zero).
 
 CLI:
     uv run python -m src.lepard_cl_compat
@@ -113,8 +115,7 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
     """Return (source_id, dest_id) tuples -- duplicates preserved.
 
     Raises ValueError with line context on malformed JSON, missing
-    required keys, or values that are not native JSON integers
-    (rejects floats, bools, and strings).
+    required keys, or values that are not native JSON integers.
     """
     path = Path(path)
     if not path.exists():
@@ -130,7 +131,6 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
                 if required_key not in record:
                     raise ValueError(f"missing required key {required_key!r} at line {line_number} of {path}")
                 value = record[required_key]
-                # Strict: reject bool (subclass of int), float, str, None
                 if type(value) is not int:
                     raise ValueError(
                         f"{required_key!r} must be int, got {type(value).__name__} "
@@ -143,7 +143,8 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
 def load_cl_ids(path: Path | str) -> set[int]:
     """Load CourtListener opinion ids. Supports .gz and plain text.
 
-    Raises ValueError with line context on non-integer lines.
+    Strict canonical-positive-decimal validation: rejects sign characters
+    (+1, -5), leading zeros (001), and zero itself.
     """
     path = Path(path)
     if not path.exists():
@@ -155,10 +156,18 @@ def load_cl_ids(path: Path | str) -> set[int]:
             stripped = line.strip()
             if not stripped:
                 continue
-            try:
-                ids.add(int(stripped))
-            except ValueError as exc:
-                raise ValueError(f"invalid integer at line {line_number} of {path}: {exc}") from exc
+            if not stripped.isdigit() or (len(stripped) > 1 and stripped[0] == "0"):
+                raise ValueError(
+                    f"non-canonical CL id {stripped!r} at line {line_number} of {path} "
+                    f"(expected positive decimal, no sign, no leading zeros)"
+                )
+            value = int(stripped)
+            if value == 0:
+                raise ValueError(
+                    f"non-canonical CL id {stripped!r} at line {line_number} of {path} "
+                    f"(zero is not a valid CourtListener opinion id)"
+                )
+            ids.add(value)
     return ids
 
 
@@ -359,7 +368,6 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    # Load once, reuse for report, export, and gate
     pairs = load_lepard_pairs(args.lepard)
     cl_ids = load_cl_ids(args.cl_ids)
     court_map = load_court_map(args.court_map)
@@ -370,7 +378,6 @@ def main() -> None:
     else:
         print(format_report(report))
 
-    # Gate BEFORE export: failed runs must not produce artifacts
     if args.min_usable_pct is not None:
         actual = report.pair_overlap.usable_pct
         if actual < args.min_usable_pct:
