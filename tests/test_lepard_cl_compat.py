@@ -95,6 +95,13 @@ class TestLoaders:
         with pytest.raises(ValueError, match=r"missing required key.*source_id.*line 0"):
             load_lepard_pairs(path)
 
+    def test_load_lepard_non_integer_id_raises_with_line_context(self, tmp_path):
+        """Non-integer id coercion must wrap ValueError with line number."""
+        path = tmp_path / "bad_int.jsonl"
+        path.write_text('{"source_id": "not-a-number", "dest_id": 1}\n')
+        with pytest.raises(ValueError, match=r"invalid integer.*source_id.*line 0"):
+            load_lepard_pairs(path)
+
     def test_load_cl_ids_gzipped(self, tmp_cl_ids_gz):
         ids = load_cl_ids(tmp_cl_ids_gz)
         assert ids == {100, 200, 300, 400}
