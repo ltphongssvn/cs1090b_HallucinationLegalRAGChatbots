@@ -55,7 +55,7 @@
 **Infrastructure is complete. Corpus preprocessing is underway. The core experiment is the remaining work.**
 - ✅ Environment bootstrapped, verified, reproducible (`setup.sh`, tests passing, coverage verified)
 - ✅ 1,465,484 federal appellate opinions downloaded, filtered, sharded (7.6GB)
-- ✅ DVC + S3 artifact versioning operational
+- ✅ DVC + S3 artifact versioning operational for LePaRD; CourtListener uses manifest-based provenance (see note below)
 - ✅ All `src/` modules implemented and tested
 - ✅ CourtListener RAG-readiness refinement completed (Cell 2)
 - ⏳ LePaRD acquisition, model training, evaluation remaining
@@ -1585,6 +1585,8 @@ The cap was revised from 500K → 4M rows for three reasons:
 | `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
 
 DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
+
+**Provenance model dichotomy:** This project uses two different reproducibility strategies depending on the dataset. **LePaRD** (5.4 GB, single JSONL) is versioned via DVC and stored in the project S3 bucket — reproduce with `dvc pull lepard_train_4000000_rev0194f95.jsonl.dvc`. **CourtListener federal appellate bulk** (43 GB, 159 shards) is NOT DVC-tracked. Instead, its provenance is captured by `data/raw/cl_federal_appellate_bulk/manifest.json` (schema v2: git SHA, Python version, shard config, federal appellate court IDs) plus `checkpoint.json` (ingestion stats: 10,682,555 scanned → 1,465,484 extracted), and the corpus is reproducible by re-running `scripts/bulk_download.py` at the pinned git SHA against CourtListener's public S3. This avoids duplicating 43 GB in the project S3 bucket and sidesteps the gitignore-negation complexity of nested `.dvc` pointer files. Do not expect a `cl_federal_appellate_bulk.dvc` file.
 DVC tracking file: `lepard_train_4000000_rev0194f95.jsonl.dvc` at repo root (committed to `feature/data-acquisition`). Note: the 5.4 GB artifact lives at the repo root rather than `data/raw/lepard/` because `data/` is gitignored and nested `.dvc` pointer files require verbose gitignore negation. Root-level placement keeps the DVC pointer file tracked cleanly.
 
 ### Key Capabilities
