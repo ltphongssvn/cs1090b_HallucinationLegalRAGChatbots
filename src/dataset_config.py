@@ -26,6 +26,7 @@ Design notes
 * **Pure data**: no I/O, no validation against the filesystem. Those
   concerns live in :mod:`src.dataset_loader`.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -123,6 +124,7 @@ class DatasetConfig:
         else:
             try:
                 from omegaconf import OmegaConf  # type: ignore[import]
+
                 d = dict(OmegaConf.to_container(cfg, resolve=True))  # type: ignore[arg-type]
             except ImportError:
                 d = dict(cfg)  # type: ignore[call-overload]

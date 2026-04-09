@@ -25,6 +25,7 @@ SRP
 This module only *describes* configuration. It performs no I/O, no
 validation of remote resources, and no file-system mutation. Pure data.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -119,8 +120,19 @@ class PipelineConfig:
     # Courts
     federal_appellate_court_ids: FrozenSet[str] = frozenset(
         {
-            "ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7",
-            "ca8", "ca9", "ca10", "ca11", "cadc", "cafc",
+            "ca1",
+            "ca2",
+            "ca3",
+            "ca4",
+            "ca5",
+            "ca6",
+            "ca7",
+            "ca8",
+            "ca9",
+            "ca10",
+            "ca11",
+            "cadc",
+            "cafc",
         }
     )
 
