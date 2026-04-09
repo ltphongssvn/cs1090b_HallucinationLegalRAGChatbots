@@ -26,6 +26,7 @@ All row-level logic (validation, normalization, filtering) is delegated
 to :mod:`src.row_validator` and :mod:`src.row_normalizer`; this module
 orchestrates only.
 """
+
 from __future__ import annotations
 
 import collections
