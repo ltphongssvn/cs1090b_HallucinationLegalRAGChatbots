@@ -25,6 +25,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from src.dataset_probe import ModelQualitySignals
+
 if TYPE_CHECKING:
     from src.dataset_loader import DatasetLoader
 
@@ -205,7 +207,6 @@ def log_quality_signals(
         Mapping of signal name → fire count across the sample.
     """
     import wandb
-    from src.dataset_probe import ModelQualitySignals
 
     signal_counts: dict[str, int] = {}
     for row in rows[:sample_size]:
