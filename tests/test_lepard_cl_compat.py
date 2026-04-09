@@ -133,7 +133,7 @@ class TestLoaders:
         """Non-integer line must raise ValueError with line number context."""
         path = tmp_path / "bad.txt"
         path.write_text("100\n200\nnot-a-number\n400\n")
-        with pytest.raises(ValueError, match=r"invalid integer.*line 3"):
+        with pytest.raises(ValueError, match=r"non-canonical.*line 3"):
             load_cl_ids(path)
 
     def test_load_cl_ids_rejects_signed_or_padded(self, tmp_path):
