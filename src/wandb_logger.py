@@ -112,7 +112,6 @@ def log_quality_signals(
 ) -> dict[str, Any]:
     """Log ModelQualitySignals summary to the active W&B run."""
     import wandb
-
     from src.dataset_probe import ModelQualitySignals
 
     signal_counts: dict[str, int] = {}

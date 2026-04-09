@@ -13,6 +13,7 @@ Usage
     python scripts/update_version_pins.py --dry-run
     python scripts/update_version_pins.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,13 +40,15 @@ def patch_file(path: Path, dry_run: bool) -> int:
         content = content.replace(old, new)
     if content == original:
         return 0
-    diff = list(difflib.unified_diff(
-        original.splitlines(keepends=True),
-        content.splitlines(keepends=True),
-        fromfile=str(path) + " (before)",
-        tofile=str(path) + " (after)",
-        n=2,
-    ))
+    diff = list(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            fromfile=str(path) + " (before)",
+            tofile=str(path) + " (after)",
+            n=2,
+        )
+    )
     print("".join(diff[:40]))
     if not dry_run:
         shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))

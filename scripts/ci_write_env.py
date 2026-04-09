@@ -1,6 +1,5 @@
 # scripts/ci_write_env.py
 # Write .env and ensure src/ exists for CI runs (no cluster setup.sh needed).
-import os
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent

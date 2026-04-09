@@ -18,6 +18,7 @@ Usage
     python scripts/repair_text_length.py --dry-run
     python scripts/repair_text_length.py
 """
+
 from __future__ import annotations
 
 import argparse
