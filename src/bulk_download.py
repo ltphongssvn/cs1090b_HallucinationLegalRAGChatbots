@@ -32,6 +32,7 @@ Typical use
     >>> paths["opinions"]
     PosixPath('data/bulk/opinions-2024-10-01.csv.bz2')
 """
+
 from __future__ import annotations
 
 import logging
@@ -82,7 +83,9 @@ def _download_via_aws_cli(
     try:
         result = subprocess.run(
             [
-                "aws", "s3", "cp",
+                "aws",
+                "s3",
+                "cp",
                 f"s3://{s3_bucket_name}/{s3_key}",
                 str(local_path),
                 "--no-sign-request",
@@ -126,9 +129,10 @@ def _download_via_requests(
         resp = requests.get(url, stream=True, timeout=_HTTP_CONNECT_READ_TIMEOUT)
         resp.raise_for_status()
         total_size = int(resp.headers.get("content-length", 0))
-        with open(part_path, "wb") as f, tqdm(
-            total=total_size, unit="B", unit_scale=True, desc=local_path.name
-        ) as pbar:
+        with (
+            open(part_path, "wb") as f,
+            tqdm(total=total_size, unit="B", unit_scale=True, desc=local_path.name) as pbar,
+        ):
             for chunk in resp.iter_content(chunk_size=_HTTP_CHUNK_BYTES):
                 if not chunk:
                     continue
