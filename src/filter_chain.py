@@ -1,17 +1,59 @@
 # src/filter_chain.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/src/filter_chain.py
-# SRP: Build federal appellate filter chain: courts → dockets → clusters.
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/filter_chain.py
+"""Federal appellate filter chain: courts → dockets → clusters.
 
-from pathlib import Path  # used: file paths
+Builds the cluster-ID allow-list that :mod:`src.extract` uses to decide
+which opinion rows to keep. The chain runs in three stages, each narrowing
+the next:
+
+1. **Courts** — load the courts CSV and retain only the 13 federal
+   appellate courts listed in
+   :attr:`PipelineConfig.federal_appellate_court_ids`.
+2. **Dockets** — stream the dockets CSV in chunks and keep dockets whose
+   ``court_id`` is in the federal set, indexing them by docket ID.
+3. **Clusters** — stream the opinion-clusters CSV in chunks and keep
+   clusters whose ``docket_id`` is in the federal docket set, indexing
+   them by cluster ID.
+
+The result is returned as a :class:`~src.schemas.FilterResult` holding
+all four maps (court IDs, court names, docket meta, cluster meta) so the
+downstream extractor can perform the final cluster→docket→court join
+without re-reading any CSV.
+
+Design notes
+------------
+* **Chunked reads**: dockets and clusters are too large to fit in RAM at
+  once. :func:`pandas.read_csv` is called with ``chunksize`` so memory
+  stays bounded regardless of dump size.
+* **PostgreSQL COPY format**: the CourtListener dump uses ``\\`` as an
+  escape character; every read passes ``escapechar="\\\\"`` via
+  :data:`CSV_READ_KWARGS`.
+* **Soft error tolerance**: ``on_bad_lines="skip"`` and
+  ``encoding_errors="replace"`` keep a malformed row from aborting the
+  whole chain — bad rows are simply excluded from the filter set.
+* **Smoke test**: each large CSV is probed with a 10-row read before the
+  chunked scan, surfacing format/column issues in milliseconds rather
+  than after 20 minutes of streaming.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import pandas as pd  # used: CSV loading and filtering
-from tqdm import tqdm  # used: progress on large chunks
+import pandas as pd
+from tqdm import tqdm
 
 from src.config import PipelineConfig
 from src.schemas import FilterResult
 
+#: Shared :func:`pandas.read_csv` kwargs for all large CourtListener CSVs.
+#:
+#: * ``on_bad_lines="skip"`` — tolerate malformed rows rather than abort.
+#: * ``escapechar="\\\\"`` — match PostgreSQL ``COPY`` escaping.
+#: * ``encoding_errors="replace"`` — survive occasional invalid UTF-8.
+#: * ``low_memory=False`` — suppress dtype-guessing warnings on wide chunks.
 CSV_READ_KWARGS: Dict[str, Any] = {
     "on_bad_lines": "skip",
     "escapechar": "\\",
@@ -25,7 +67,22 @@ def _smoke_test_csv(
     usecols: List[str],
     logger: Any = None,
 ) -> bool:
-    """Read first 10 rows to catch format issues early."""
+    """Read the first 10 rows of ``filepath`` to validate format early.
+
+    Used by the loaders below as a fail-fast probe before launching the
+    full chunked scan — catches missing columns, wrong separators, and
+    truncated files in milliseconds.
+
+    Args:
+        filepath: Path to the CSV to probe.
+        usecols: Columns that must be present; surfaces missing-column
+            errors at probe time.
+        logger: Optional logger. When supplied, emits one OK or FAIL
+            line per probe.
+
+    Returns:
+        ``True`` on successful read, ``False`` on any exception.
+    """
     try:
         sample = pd.read_csv(filepath, usecols=usecols, nrows=10, escapechar="\\", encoding_errors="replace")
         if logger:
@@ -42,7 +99,22 @@ def load_federal_courts(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> Tuple[Set[str], Dict[str, str]]:
-    """Load courts CSV, return federal appellate metadata."""
+    """Load the courts CSV and return the federal appellate subset.
+
+    The courts file is small enough to load whole — no chunking needed.
+    Filters rows whose ``id`` is in
+    :attr:`PipelineConfig.federal_appellate_court_ids` and builds a
+    court_id → ``full_name`` map for downstream display.
+
+    Args:
+        courts_path: Path to the courts CSV.
+        config: Pipeline configuration (defaults to :class:`PipelineConfig`).
+        logger: Optional logger for per-court listing.
+
+    Returns:
+        ``(federal_court_ids, court_name_map)`` where the set holds the
+        matched court slugs and the map goes from slug to display name.
+    """
     if config is None:
         config = PipelineConfig()
 
@@ -68,7 +140,22 @@ def load_federal_dockets(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> Dict[int, Dict[str, Any]]:
-    """Load dockets CSV in chunks, filter by federal appellate courts."""
+    """Stream the dockets CSV and index federal-appellate rows by docket ID.
+
+    Reads in ``csv_chunksize`` chunks so RAM usage is bounded regardless
+    of dump size. Each surviving row is stored as a minimal metadata
+    dict (court, case name, filing date) for the later cluster-level join.
+
+    Args:
+        dockets_path: Path to the dockets CSV (plain or ``.bz2``).
+        federal_court_ids: Allow-list produced by
+            :func:`load_federal_courts`.
+        config: Pipeline configuration.
+        logger: Optional logger for total/matched counts.
+
+    Returns:
+        Mapping of docket ID → ``{"court_id", "case_name", "date_filed"}``.
+    """
     if config is None:
         config = PipelineConfig()
     columns = ["id", "court_id", "case_name", "date_filed"]
@@ -100,7 +187,24 @@ def load_federal_clusters(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> Dict[int, Dict[str, Any]]:
-    """Load opinion clusters CSV in chunks, filter by federal appellate dockets."""
+    """Stream the opinion-clusters CSV and keep clusters in federal dockets.
+
+    Same chunked-read pattern as :func:`load_federal_dockets`. Rows whose
+    ``docket_id`` cannot be parsed as an int are silently dropped — a
+    cluster without a valid docket reference cannot be joined downstream
+    anyway.
+
+    Args:
+        clusters_path: Path to the opinion-clusters CSV (plain or ``.bz2``).
+        federal_docket_ids: Allow-list of docket IDs from
+            :func:`load_federal_dockets`.
+        config: Pipeline configuration.
+        logger: Optional logger for total/matched counts.
+
+    Returns:
+        Mapping of cluster ID → ``{"docket_id", "case_name",
+        "date_filed", "precedential_status"}``.
+    """
     if config is None:
         config = PipelineConfig()
     columns = ["id", "docket_id", "case_name", "date_filed", "precedential_status"]
@@ -135,7 +239,25 @@ def build_federal_appellate_filter(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> FilterResult:
-    """Run full filter chain: courts → dockets → clusters."""
+    """Run the full three-stage filter chain and return its combined result.
+
+    Orchestrates :func:`load_federal_courts` →
+    :func:`load_federal_dockets` → :func:`load_federal_clusters` with
+    the IDs from each stage feeding the next. The returned
+    :class:`FilterResult` contains everything :mod:`src.extract` needs
+    for the final opinion-level join.
+
+    Args:
+        local_paths: Mapping with keys ``"courts"``, ``"dockets"``,
+            ``"clusters"`` (produced by
+            :func:`src.bulk_download.download_bulk_csvs`).
+        config: Pipeline configuration.
+        logger: Optional logger for stage progress.
+
+    Returns:
+        A :class:`FilterResult` bundling the court ID set, court name
+        map, docket metadata map, and cluster metadata map.
+    """
     if config is None:
         config = PipelineConfig()
 
