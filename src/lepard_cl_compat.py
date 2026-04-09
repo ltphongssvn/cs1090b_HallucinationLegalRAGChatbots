@@ -16,6 +16,7 @@ court distribution -- identical numbers to the live cross-machine run.
 CLI:
     uv run python -m src.lepard_cl_compat
     uv run python -m src.lepard_cl_compat --lepard path/to.jsonl --cl-ids path/to.txt.gz
+    uv run python -m src.lepard_cl_compat --min-usable-pct 70.0   # CI gate
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import sys
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -95,12 +98,12 @@ class CompatReport:
 # ---------- loaders ----------
 
 
-def load_lepard_pairs(path):
+def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
     """Return (source_id, dest_id) tuples -- duplicates preserved."""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"LePaRD sample not found: {path}")
-    pairs = []
+    pairs: list[tuple[int, int]] = []
     with path.open(encoding="utf-8") as f:
         for i, line in enumerate(f):
             try:
@@ -114,7 +117,7 @@ def load_lepard_pairs(path):
     return pairs
 
 
-def load_cl_ids(path):
+def load_cl_ids(path: Path | str) -> set[int]:
     """Load CourtListener opinion ids. Supports .gz and plain text."""
     path = Path(path)
     if not path.exists():
@@ -124,7 +127,7 @@ def load_cl_ids(path):
         return {int(line) for line in f if line.strip()}
 
 
-def load_court_map(path):
+def load_court_map(path: Path | str) -> dict[int, str]:
     """Load matched-id -> court_id map. Returns empty dict if missing."""
     path = Path(path)
     if not path.exists():
@@ -137,8 +140,8 @@ def load_court_map(path):
 # ---------- analysis ----------
 
 
-def compute_id_overlap(pairs, cl_ids):
-    lepard_ids = set()
+def compute_id_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> IdOverlap:
+    lepard_ids: set[int] = set()
     for s, d in pairs:
         lepard_ids.add(s)
         lepard_ids.add(d)
@@ -155,7 +158,7 @@ def compute_id_overlap(pairs, cl_ids):
     )
 
 
-def compute_pair_overlap(pairs, cl_ids):
+def compute_pair_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> PairOverlap:
     unique = set(pairs)
     both = src_only = dst_only = neither = 0
     for s, d in unique:
@@ -183,29 +186,29 @@ def compute_pair_overlap(pairs, cl_ids):
     )
 
 
-def analyze_court_distribution(pairs, cl_ids, court_map):
+def analyze_court_distribution(
+    pairs: list[tuple[int, int]],
+    cl_ids: set[int],
+    court_map: dict[int, str],
+) -> dict[str, int]:
     """Return court_id -> count for LePaRD ids that are present in CL."""
     if not court_map:
         return {}
-    matched = set()
+    matched: set[int] = set()
     for s, d in pairs:
         if s in cl_ids:
             matched.add(s)
         if d in cl_ids:
             matched.add(d)
-    dist: dict[str, int] = {}
-    for mid in matched:
-        court = court_map.get(mid)
-        if court is not None:
-            dist[court] = dist.get(court, 0) + 1
-    return dict(sorted(dist.items(), key=lambda kv: -kv[1]))
+    counts = Counter(court_map[mid] for mid in matched if mid in court_map)
+    return dict(counts.most_common())
 
 
 def run_full_analysis(
-    lepard_path=DEFAULT_LEPARD,
-    cl_ids_path=DEFAULT_CL_IDS,
-    court_map_path=DEFAULT_COURT_MAP,
-):
+    lepard_path: Path | str = DEFAULT_LEPARD,
+    cl_ids_path: Path | str = DEFAULT_CL_IDS,
+    court_map_path: Path | str = DEFAULT_COURT_MAP,
+) -> CompatReport:
     pairs = load_lepard_pairs(lepard_path)
     cl_ids = load_cl_ids(cl_ids_path)
     court_map = load_court_map(court_map_path)
@@ -219,7 +222,7 @@ def run_full_analysis(
 # ---------- presentation ----------
 
 
-def format_report(report):
+def format_report(report: CompatReport) -> str:
     io_ = report.id_overlap
     po = report.pair_overlap
     lines = [
@@ -257,7 +260,7 @@ def format_report(report):
 # ---------- CLI ----------
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -266,6 +269,12 @@ def main():
     ap.add_argument("--cl-ids", type=Path, default=DEFAULT_CL_IDS, help="CL id set (.txt or .txt.gz)")
     ap.add_argument("--court-map", type=Path, default=DEFAULT_COURT_MAP, help="Matched id -> court_id JSON")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable report")
+    ap.add_argument(
+        "--min-usable-pct",
+        type=float,
+        default=None,
+        help="CI gate: exit non-zero if usable_pct falls below this threshold",
+    )
     args = ap.parse_args()
 
     report = run_full_analysis(args.lepard, args.cl_ids, args.court_map)
@@ -273,6 +282,15 @@ def main():
         print(json.dumps(report.to_dict(), indent=2))
     else:
         print(format_report(report))
+
+    if args.min_usable_pct is not None:
+        actual = report.pair_overlap.usable_pct
+        if actual < args.min_usable_pct:
+            print(
+                f"ERROR: usable_pct {actual:.2f}% below threshold {args.min_usable_pct:.2f}%",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 if __name__ == "__main__":
