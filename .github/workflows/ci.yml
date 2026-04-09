@@ -85,8 +85,11 @@ jobs:
       - name: Write CI reproducibility env
         run: python scripts/ci_write_env.py
       - name: CPU inference forward pass
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "0"
         run: |
-          uv run python -c "
+          for attempt in 1 2 3 4 5; do
+            uv run python -c "
           import torch, torch.nn as nn
           from transformers import AutoTokenizer
           tok = AutoTokenizer.from_pretrained('bert-base-uncased')
@@ -103,7 +106,12 @@ jobs:
               p = torch.softmax(m(ids['input_ids']), -1)
           assert p.shape == (1, 2) and abs(p.sum().item() - 1.0) < 1e-5
           print('CPU forward pass ok')
-          "
+          " && exit 0
+            echo "attempt $attempt failed, sleeping $((attempt * 15))s before retry"
+            sleep $((attempt * 15))
+          done
+          echo "all 5 attempts failed"
+          exit 1
       - name: FAISS vector store integrity
         run: |
           uv run python -c "

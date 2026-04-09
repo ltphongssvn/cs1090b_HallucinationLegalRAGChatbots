@@ -30,7 +30,7 @@ skip_no_kernelspec = pytest.mark.skipif(
 )
 
 
-@pytest.mark.unit
+@pytest.mark.artifact
 class TestVenv:
     @skip_no_venv
     def test_python_executable_exists(self) -> None:
@@ -268,7 +268,7 @@ class TestKernelspec:
         assert self._load().get("language") == "python"
 
 
-@pytest.mark.unit
+@pytest.mark.artifact
 class TestFailurePaths:
     """Python-level failure path tests migrated from test_failure_paths.bats."""
 
