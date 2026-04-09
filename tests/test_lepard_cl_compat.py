@@ -1,14 +1,16 @@
 """Tests for src/lepard_cl_compat.py.
 
-Written TDD-first (test file committed before source).
+Written TDD-first: test file committed before source changes.
 Covers loaders, pure analysis functions, integration, error paths,
-and property-based invariants (hypothesis).
+property-based invariants, CLI flags, and determinism guarantees.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,7 @@ from src.lepard_cl_compat import (
     analyze_court_distribution,
     compute_id_overlap,
     compute_pair_overlap,
+    extract_valid_pairs,
     format_report,
     load_cl_ids,
     load_court_map,
@@ -28,6 +31,7 @@ from src.lepard_cl_compat import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ---------- synthetic fixtures ----------
@@ -112,12 +116,14 @@ class TestLoaders:
 
 
 class TestIdOverlap:
-    def test_basic(self):
+    def test_basic_uses_cl_unique_ids_field(self):
+        """Field renamed from cl_total_ids to cl_unique_ids for accuracy."""
         pairs = [(100, 200), (300, 400), (999, 888)]
         cl = {100, 200, 300, 400, 500}
         r = compute_id_overlap(pairs, cl)
         assert r.lepard_unique_ids == 6
-        assert r.cl_total_ids == 5
+        assert r.cl_unique_ids == 5
+        assert not hasattr(r, "cl_total_ids"), "old misleading field name must be removed"
         assert r.overlap == 4
         assert r.overlap_pct_of_lepard == pytest.approx(100 * 4 / 6)
         assert r.lepard_max == 999
@@ -171,7 +177,6 @@ class TestPairOverlapProperty:
         cl_ids=st.sets(st.integers(min_value=0, max_value=1000), max_size=500),
     )
     def test_buckets_sum_to_unique_pairs(self, pairs, cl_ids):
-        """The four mutually exclusive buckets must partition unique pairs exactly."""
         r = compute_pair_overlap(pairs, cl_ids)
         assert r.both_in_cl + r.source_only_in_cl + r.dest_only_in_cl + r.neither_in_cl == r.unique_pairs
 
@@ -184,7 +189,6 @@ class TestPairOverlapProperty:
         cl_ids=st.sets(st.integers(min_value=0, max_value=1000), max_size=500),
     )
     def test_usable_pct_within_bounds(self, pairs, cl_ids):
-        """usable_pct must always be in [0, 100]."""
         r = compute_pair_overlap(pairs, cl_ids)
         assert 0.0 <= r.usable_pct <= 100.0
 
@@ -196,7 +200,6 @@ class TestPairOverlapProperty:
         ),
     )
     def test_total_rows_never_less_than_unique(self, pairs):
-        """Deduplication invariant: total_rows >= unique_pairs."""
         r = compute_pair_overlap(pairs, set())
         assert r.total_rows >= r.unique_pairs
 
@@ -219,6 +222,31 @@ class TestCourtDistribution:
         dist = analyze_court_distribution(pairs, cl, court_map)
         assert list(dist.keys()) == ["ca9", "ca5", "ca1"]
 
+    def test_deterministic_tie_ordering(self):
+        """Equal counts must break ties alphabetically (not set iteration order)."""
+        pairs = [(1, 2), (3, 4), (5, 6), (7, 8)]
+        cl = {1, 2, 3, 4, 5, 6, 7, 8}
+        # Two 2-2 ties: ca9/ca5 and ca1/cazz
+        court_map = {1: "ca9", 2: "ca9", 3: "ca5", 4: "ca5", 5: "ca1", 6: "ca1", 7: "cazz", 8: "cazz"}
+        dist = analyze_court_distribution(pairs, cl, court_map)
+        keys = list(dist.keys())
+        # All have count 2 -> alphabetical tie break
+        assert keys == sorted(keys), f"tie ordering not alphabetical: {keys}"
+
+    def test_deterministic_across_input_permutations(self):
+        """Same inputs in different orders must produce identical output."""
+        import random
+
+        cl = {1, 2, 3, 4}
+        court_map = {1: "ca5", 2: "ca9", 3: "ca5", 4: "ca9"}
+        base = [(1, 2), (3, 4)]
+        results = set()
+        for _ in range(20):
+            shuffled = list(base)
+            random.shuffle(shuffled)
+            results.add(tuple(analyze_court_distribution(shuffled, cl, court_map).items()))
+        assert len(results) == 1, f"nondeterministic outputs: {results}"
+
 
 # ---------- integration contracts ----------
 
@@ -236,43 +264,67 @@ class TestRunFullAnalysis:
         s = json.dumps(report.to_dict())
         assert "id_overlap" in json.loads(s)
 
+    def test_to_dict_equals_asdict(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        """to_dict() should simply delegate to dataclasses.asdict."""
+        from dataclasses import asdict
+
+        report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
+        assert report.to_dict() == asdict(report)
+
     def test_format_report_human_readable(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
         report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
         text = format_report(report)
         assert "LePaRD" in text and "USABLE GOLD" in text
 
+    def test_format_report_uses_cl_unique_ids_label(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        """Report label must match renamed field for accuracy."""
+        report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
+        text = format_report(report)
+        assert "CL unique ids" in text
+        assert "CL total ids" not in text
 
-# ---------- real fixtures (skipped until committed) ----------
-
-
-@pytest.mark.skipif(
-    not (FIXTURES / "lepard_sample_1k.jsonl").exists() or not (FIXTURES / "cl_ids.txt.gz").exists(),
-    reason="committed fixtures not present",
-)
-class TestRealFixtures:
-    """Regression test against the numbers observed in the live investigation."""
-
-    def test_matches_live_investigation(self):
-        report = run_full_analysis()
-        assert report.id_overlap.lepard_unique_ids == 512
-        assert report.id_overlap.overlap == 70
-        assert report.pair_overlap.unique_pairs == 454
-        assert report.pair_overlap.both_in_cl == 13
-        if report.court_distribution:
-            top_court = next(iter(report.court_distribution))
-            assert top_court.startswith("ca")
+    def test_format_report_uses_cautious_snapshot_wording(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        """Heuristic about ID range must not make causal temporal claims."""
+        report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
+        text = format_report(report)
+        assert "newer CL snapshot" not in text, "overconfident wording must be softened"
 
 
-# ---------- CLI threshold gate ----------
+# ---------- CLI contracts ----------
+
+
+class TestJsonOutputSortKeys:
+    """JSON CLI output must have sorted keys for deterministic regression diffs."""
+
+    def test_json_keys_are_sorted(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        assert r.returncode == 0
+        # Top-level keys should be alphabetical
+        top_keys = list(json.loads(r.stdout).keys())
+        assert top_keys == sorted(top_keys), f"top-level keys not sorted: {top_keys}"
+        # Check nested id_overlap keys too
+        id_overlap_keys = list(json.loads(r.stdout)["id_overlap"].keys())
+        assert id_overlap_keys == sorted(id_overlap_keys), f"id_overlap keys not sorted: {id_overlap_keys}"
 
 
 class TestMinUsablePctCliGate:
-    """--min-usable-pct exits non-zero when usable_pct falls below threshold."""
-
     def test_cli_exits_zero_when_above_threshold(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
-        import subprocess
-        import sys
-
         r = subprocess.run(
             [
                 sys.executable,
@@ -289,14 +341,11 @@ class TestMinUsablePctCliGate:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).resolve().parent.parent),
+            cwd=str(REPO_ROOT),
         )
         assert r.returncode == 0, f"stderr: {r.stderr}"
 
     def test_cli_exits_nonzero_when_below_threshold(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
-        import subprocess
-        import sys
-
         r = subprocess.run(
             [
                 sys.executable,
@@ -313,22 +362,14 @@ class TestMinUsablePctCliGate:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).resolve().parent.parent),
+            cwd=str(REPO_ROOT),
         )
         assert r.returncode != 0
         assert "below threshold" in r.stderr.lower() or "below threshold" in r.stdout.lower()
 
 
-# ---------- --write-valid-pairs flag ----------
-
-
 class TestWriteValidPairsFlag:
-    """--write-valid-pairs emits usable gold pairs (both endpoints in CL) as JSONL."""
-
     def test_writes_only_both_in_cl_pairs(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path):
-        import subprocess
-        import sys
-
         out = tmp_path / "valid_pairs.jsonl"
         r = subprocess.run(
             [
@@ -346,23 +387,17 @@ class TestWriteValidPairsFlag:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).resolve().parent.parent),
+            cwd=str(REPO_ROOT),
         )
         assert r.returncode == 0, f"stderr: {r.stderr}"
         assert out.exists()
         lines = out.read_text().strip().split("\n")
         pairs = [json.loads(line) for line in lines]
-        # Synthetic fixture has exactly 2 unique pairs with both endpoints in cl={100,200,300,400}:
-        # (100, 200) and (100, 300). (100, 777), (999, 888) excluded.
         assert len(pairs) == 2
         pair_tuples = {(p["source_id"], p["dest_id"]) for p in pairs}
         assert pair_tuples == {(100, 200), (100, 300)}
 
     def test_deduplicates_rows(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path):
-        """tmp_lepard contains (100,200) twice; output must dedupe."""
-        import subprocess
-        import sys
-
         out = tmp_path / "valid_pairs.jsonl"
         subprocess.run(
             [
@@ -380,8 +415,44 @@ class TestWriteValidPairsFlag:
             ],
             capture_output=True,
             text=True,
-            cwd=str(Path(__file__).resolve().parent.parent),
+            cwd=str(REPO_ROOT),
             check=True,
         )
         lines = [line for line in out.read_text().strip().split("\n") if line]
-        assert len(lines) == 2  # deduped, not 3
+        assert len(lines) == 2
+
+
+# ---------- extract_valid_pairs pure function ----------
+
+
+class TestExtractValidPairs:
+    def test_both_endpoints_required(self):
+        pairs = [(1, 2), (1, 99), (99, 2), (3, 4)]
+        valid = extract_valid_pairs(pairs, {1, 2, 3, 4})
+        assert set(valid) == {(1, 2), (3, 4)}
+
+    def test_dedupes(self):
+        pairs = [(1, 2), (1, 2), (1, 2)]
+        assert extract_valid_pairs(pairs, {1, 2}) == [(1, 2)]
+
+
+# ---------- real fixtures (skipped until committed) ----------
+
+
+@pytest.mark.skipif(
+    not (FIXTURES / "lepard_sample_1k.jsonl").exists() or not (FIXTURES / "cl_ids.txt.gz").exists(),
+    reason="committed fixtures not present",
+)
+class TestRealFixtures:
+    """Regression test against the numbers observed in the live investigation."""
+
+    def test_matches_live_investigation(self):
+        report = run_full_analysis()
+        assert report.id_overlap.lepard_unique_ids == 512
+        assert report.id_overlap.cl_unique_ids == 1_465_484
+        assert report.id_overlap.overlap == 70
+        assert report.pair_overlap.unique_pairs == 454
+        assert report.pair_overlap.both_in_cl == 13
+        if report.court_distribution:
+            top_court = next(iter(report.court_distribution))
+            assert top_court.startswith("ca")
