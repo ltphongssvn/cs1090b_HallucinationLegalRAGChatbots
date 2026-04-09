@@ -63,7 +63,7 @@ DEFAULT_COURT_MAP = DEFAULT_FIXTURES / "cl_matched_courts.json"
 @dataclass(frozen=True)
 class IdOverlap:
     lepard_unique_ids: int
-    cl_total_ids: int
+    cl_unique_ids: int
     overlap: int
     overlap_pct_of_lepard: float
     lepard_max: int
@@ -91,11 +91,7 @@ class CompatReport:
     court_distribution: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
-            "id_overlap": asdict(self.id_overlap),
-            "pair_overlap": asdict(self.pair_overlap),
-            "court_distribution": dict(self.court_distribution),
-        }
+        return asdict(self)
 
 
 # ---------- loaders ----------
@@ -152,7 +148,7 @@ def compute_id_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> IdOver
     cl_max = max(cl_ids) if cl_ids else 0
     return IdOverlap(
         lepard_unique_ids=len(lepard_ids),
-        cl_total_ids=len(cl_ids),
+        cl_unique_ids=len(cl_ids),
         overlap=len(overlap),
         overlap_pct_of_lepard=100.0 * len(overlap) / len(lepard_ids) if lepard_ids else 0.0,
         lepard_max=max(lepard_ids) if lepard_ids else 0,
@@ -194,7 +190,10 @@ def analyze_court_distribution(
     cl_ids: set[int],
     court_map: dict[int, str],
 ) -> dict[str, int]:
-    """Return court_id -> count for LePaRD ids that are present in CL."""
+    """Return court_id -> count for LePaRD ids present in CL.
+
+    Sorted by count descending, then court_id ascending (deterministic tie-break).
+    """
     if not court_map:
         return {}
     matched_ids: set[int] = set()
@@ -203,8 +202,9 @@ def analyze_court_distribution(
             matched_ids.add(source_id)
         if dest_id in cl_ids:
             matched_ids.add(dest_id)
-    counts = Counter(court_map[matched_id] for matched_id in matched_ids if matched_id in court_map)
-    return dict(counts.most_common())
+    counts: Counter[str] = Counter(court_map[matched_id] for matched_id in matched_ids if matched_id in court_map)
+    # Deterministic sort: count desc, court_id asc
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def extract_valid_pairs(pairs: list[tuple[int, int]], cl_ids: set[int]) -> list[tuple[int, int]]:
@@ -214,11 +214,9 @@ def extract_valid_pairs(pairs: list[tuple[int, int]], cl_ids: set[int]) -> list[
     for source_id, dest_id in pairs:
         if (source_id, dest_id) in seen:
             continue
+        seen.add((source_id, dest_id))
         if source_id in cl_ids and dest_id in cl_ids:
             valid.append((source_id, dest_id))
-            seen.add((source_id, dest_id))
-        else:
-            seen.add((source_id, dest_id))
     return valid
 
 
@@ -261,11 +259,12 @@ def format_report(report: CompatReport) -> str:
         "",
         "[1] ID-level overlap",
         f"  LePaRD unique ids:       {id_ov.lepard_unique_ids:,}",
-        f"  CL total ids:            {id_ov.cl_total_ids:,}",
+        f"  CL unique ids:           {id_ov.cl_unique_ids:,}",
         f"  Overlap:                 {id_ov.overlap:,} ({id_ov.overlap_pct_of_lepard:.1f}% of LePaRD)",
         f"  LePaRD id range max:     {id_ov.lepard_max:,}",
         f"  CL id range max:         {id_ov.cl_max:,}",
-        f"  LePaRD ids > CL max:     {id_ov.lepard_ids_above_cl_max:,} (newer CL snapshot)",
+        f"  LePaRD ids > CL max:     {id_ov.lepard_ids_above_cl_max:,} "
+        f"(heuristic: may indicate misaligned or differently-sourced id spaces)",
         "",
         "[2] Pair-level overlap (both endpoints required for gold label)",
         f"  Total rows:              {pair_ov.total_rows:,}",
@@ -314,7 +313,7 @@ def main() -> None:
 
     report = run_full_analysis(args.lepard, args.cl_ids, args.court_map)
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2))
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         print(format_report(report))
 
