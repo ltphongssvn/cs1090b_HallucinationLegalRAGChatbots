@@ -19,6 +19,8 @@ Semantic notes:
   - court_distribution counts UNIQUE matched CL ids (not per-row occurrences).
   - Designed for fixture-scale analysis (1K-100K pairs). For full 4M+ corpus
     runs, consider a streaming/DuckDB-backed variant.
+  - CLI policy: --min-usable-pct gate is evaluated BEFORE --write-valid-pairs
+    export. If the gate fails, no export file is written.
 
 CLI:
     uv run python -m src.lepard_cl_compat
@@ -140,13 +142,25 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
 
 
 def load_cl_ids(path: Path | str) -> set[int]:
-    """Load CourtListener opinion ids. Supports .gz and plain text."""
+    """Load CourtListener opinion ids. Supports .gz and plain text.
+
+    Raises ValueError with line context on non-integer lines.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"CL id file not found: {path}")
     opener = gzip.open if path.suffix == ".gz" else open
+    ids: set[int] = set()
     with opener(path, "rt", encoding="utf-8") as f:
-        return {int(line) for line in f if line.strip()}
+        for line_number, line in enumerate(f):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                ids.add(int(stripped))
+            except ValueError as exc:
+                raise ValueError(f"invalid integer at line {line_number} of {path}: {exc}") from exc
+    return ids
 
 
 def load_court_map(path: Path | str) -> dict[int, str]:
@@ -313,7 +327,7 @@ def format_report(report: CompatReport) -> str:
     if report.court_distribution:
         lines += ["", "[3] Court distribution of matched CL ids"]
         total = sum(report.court_distribution.values())
-        lines.append(f"  Total matched: {total}")
+        lines.append(f"  Total matched with known court: {total}")
         for court, count in report.court_distribution.items():
             lines.append(f"    {court}: {count}")
     lines.append("=" * 60)
@@ -336,7 +350,7 @@ def main() -> None:
         "--min-usable-pct",
         type=float,
         default=None,
-        help="CI gate: exit non-zero if usable_pct falls below this threshold",
+        help="CI gate: exit non-zero if usable_pct falls below this threshold (evaluated BEFORE export)",
     )
     ap.add_argument(
         "--write-valid-pairs",
@@ -346,7 +360,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    # Load once, reuse for report and gold-pair export
+    # Load once, reuse for report, export, and gate
     pairs = load_lepard_pairs(args.lepard)
     cl_ids = load_cl_ids(args.cl_ids)
     court_map = load_court_map(args.court_map)
@@ -357,10 +371,7 @@ def main() -> None:
     else:
         print(format_report(report))
 
-    if args.write_valid_pairs is not None:
-        n = write_valid_pairs_jsonl(pairs, cl_ids, args.write_valid_pairs)
-        print(f"[write-valid-pairs] wrote {n} pairs to {args.write_valid_pairs}", file=sys.stderr)
-
+    # Gate BEFORE export: failed runs must not produce artifacts
     if args.min_usable_pct is not None:
         actual = report.pair_overlap.usable_pct
         if actual < args.min_usable_pct:
@@ -369,6 +380,10 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+
+    if args.write_valid_pairs is not None:
+        n = write_valid_pairs_jsonl(pairs, cl_ids, args.write_valid_pairs)
+        print(f"[write-valid-pairs] wrote {n} pairs to {args.write_valid_pairs}", file=sys.stderr)
 
 
 if __name__ == "__main__":
