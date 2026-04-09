@@ -463,3 +463,45 @@ class TestRealFixtures:
         if report.court_distribution:
             top_court = next(iter(report.court_distribution))
             assert top_court.startswith("ca")
+
+
+class TestNoDuplicateLoading:
+    """When --write-valid-pairs is used, loaders must not be called twice."""
+
+    def test_loaders_called_once_each_with_write_valid_pairs(
+        self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path, monkeypatch
+    ):
+        import src.lepard_cl_compat as m
+
+        call_counts = {"lepard": 0, "cl_ids": 0}
+        real_load_lepard = m.load_lepard_pairs
+        real_load_cl = m.load_cl_ids
+
+        def counting_lepard(path):
+            call_counts["lepard"] += 1
+            return real_load_lepard(path)
+
+        def counting_cl(path):
+            call_counts["cl_ids"] += 1
+            return real_load_cl(path)
+
+        monkeypatch.setattr(m, "load_lepard_pairs", counting_lepard)
+        monkeypatch.setattr(m, "load_cl_ids", counting_cl)
+
+        out = tmp_path / "valid.jsonl"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "prog",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--write-valid-pairs",
+                str(out),
+            ],
+        )
+        m.main()
+        assert call_counts == {"lepard": 1, "cl_ids": 1}, f"loaders called more than once: {call_counts}"
