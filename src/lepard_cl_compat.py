@@ -121,7 +121,7 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
         raise FileNotFoundError(f"LePaRD sample not found: {path}")
     pairs: list[tuple[int, int]] = []
     with path.open(encoding="utf-8") as f:
-        for line_number, line in enumerate(f):
+        for line_number, line in enumerate(f, start=1):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -151,7 +151,7 @@ def load_cl_ids(path: Path | str) -> set[int]:
     opener = gzip.open if path.suffix == ".gz" else open
     ids: set[int] = set()
     with opener(path, "rt", encoding="utf-8") as f:
-        for line_number, line in enumerate(f):
+        for line_number, line in enumerate(f, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
@@ -263,7 +263,7 @@ def write_valid_pairs_jsonl(pairs: list[tuple[int, int]], cl_ids: set[int], out_
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     valid = extract_valid_pairs(pairs, cl_ids)
-    with out_path.open("w", encoding="utf-8") as f:
+    with out_path.open("w", encoding="utf-8", newline="\n") as f:
         for source_id, dest_id in valid:
             f.write(json.dumps({"source_id": source_id, "dest_id": dest_id}) + "\n")
     return len(valid)
