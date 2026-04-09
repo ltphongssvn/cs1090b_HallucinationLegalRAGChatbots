@@ -111,6 +111,13 @@ class TestLoaders:
         path.write_text("1\n2\n3\n")
         assert load_cl_ids(path) == {1, 2, 3}
 
+    def test_load_cl_ids_malformed_line_raises_with_context(self, tmp_path):
+        """Non-integer line must raise ValueError with line number context."""
+        path = tmp_path / "bad.txt"
+        path.write_text("100\n200\nnot-a-number\n400\n")
+        with pytest.raises(ValueError, match=r"invalid integer.*line 2"):
+            load_cl_ids(path)
+
     def test_load_court_map_missing_returns_empty(self, tmp_path):
         assert load_court_map(tmp_path / "nope.json") == {}
 
@@ -290,6 +297,12 @@ class TestRunFullAnalysis:
         assert "CL unique ids" in text
         assert "CL total ids" not in text
 
+    def test_format_report_total_matched_clarifies_with_known_court(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        """Label must clarify these are ids with a known court entry."""
+        report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
+        text = format_report(report)
+        assert "Total matched with known court" in text
+
     def test_format_report_uses_cautious_snapshot_wording(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
         """Heuristic about ID range must not make causal temporal claims."""
         report = run_full_analysis(tmp_lepard, tmp_cl_ids_gz, tmp_court_map)
@@ -438,6 +451,12 @@ class TestExtractValidPairs:
         valid = extract_valid_pairs(pairs, {1, 2, 3, 4})
         assert set(valid) == {(1, 2), (3, 4)}
 
+    def test_preserves_first_seen_order(self):
+        """extract_valid_pairs must preserve first-seen order deterministically."""
+        pairs = [(5, 6), (1, 2), (3, 4), (1, 2)]
+        cl = {1, 2, 3, 4, 5, 6}
+        assert extract_valid_pairs(pairs, cl) == [(5, 6), (1, 2), (3, 4)]
+
     def test_dedupes(self):
         pairs = [(1, 2), (1, 2), (1, 2)]
         assert extract_valid_pairs(pairs, {1, 2}) == [(1, 2)]
@@ -505,3 +524,35 @@ class TestNoDuplicateLoading:
         )
         m.main()
         assert call_counts == {"lepard": 1, "cl_ids": 1}, f"loaders called more than once: {call_counts}"
+
+
+class TestGatePolicyBeforeExport:
+    """Policy: --min-usable-pct must fire BEFORE --write-valid-pairs export."""
+
+    def test_no_file_written_when_gate_fails(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path):
+        import subprocess
+        import sys
+
+        out = tmp_path / "valid.jsonl"
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--write-valid-pairs",
+                str(out),
+                "--min-usable-pct",
+                "99.0",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        assert r.returncode != 0, "gate should fail"
+        assert not out.exists(), "export file must NOT exist when gate fails"
