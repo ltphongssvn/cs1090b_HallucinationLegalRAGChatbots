@@ -261,3 +261,59 @@ class TestRealFixtures:
         if report.court_distribution:
             top_court = next(iter(report.court_distribution))
             assert top_court.startswith("ca")
+
+
+# ---------- CLI threshold gate ----------
+
+
+class TestMinUsablePctCliGate:
+    """--min-usable-pct exits non-zero when usable_pct falls below threshold."""
+
+    def test_cli_exits_zero_when_above_threshold(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        import subprocess
+        import sys
+
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--min-usable-pct",
+                "10.0",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        assert r.returncode == 0, f"stderr: {r.stderr}"
+
+    def test_cli_exits_nonzero_when_below_threshold(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map):
+        import subprocess
+        import sys
+
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--min-usable-pct",
+                "99.0",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        assert r.returncode != 0
+        assert "below threshold" in r.stderr.lower() or "below threshold" in r.stdout.lower()
