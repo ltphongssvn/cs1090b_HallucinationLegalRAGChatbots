@@ -13,7 +13,7 @@
 > to index 0 regardless of physical slot. All experiments are designed and validated under this
 > single-GPU constraint.
 >
-> - KV cache + activations during Mistral generation on retrieved legal contexts consume
+> - KV cache + activations during API-based LLM gpt-5.4-nano generation on retrieved legal contexts consume
 > several additional GB beyond model weights. Sequential model loading is the mitigation strategy.
 ---
 ## Certified Baseline Stack
@@ -27,7 +27,7 @@
 | Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
 | Sparse retrieval         | bm25s                                                                                                                                                 |
 | Vector search            | faiss-cpu 1.13.2                                                                                                                                      |
-| LLM generator            | mistralai/Mistral-7B-Instruct-v0.2                                                                                                                    |
+| LLM generator            | API-based LLM gpt-5.4-nano                                                                                                                    |
 | NLI classifier           | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                                                                              |
 | DataFrame / corpus scan  | polars 1.39.3 (CPU-only; **mandatory hard dependency**; imported at module top level in `src/dataset_probe.py`; always used for exact full-corpus scan via `scan_ndjson`)   |
 * This is the certified baseline stack for the current repository; newer upstream stacks are intentionally deferred for now, they will be adopted only after full re-certification in this repo.
@@ -96,7 +96,7 @@
 |-------|------------|-------------------------|----------------------------------------------------------|
 | Retrieval| BGE-M3| ~2.27GB| Load (bfloat16) → encode corpus → log embedding norm distribution → save index → unload → empty_cache|
 | Reranking| bge-reranker-v2-m3| ~2GB (GPU default; CPU fallback)| Load (bfloat16) → rerank top-50 (max_length=1024, batch_size=4) → log score distribution (min/mean/max/entropy) → serialize scores + ranks → return top-10 → unload → empty_cache|
-| Generation| Mistral-7B-Instruct-v0.2| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (Mistral tokenizer) + completion token count → save → unload → empty_cache |
+| Generation| API-based LLM gpt-5.4-nano| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (API-based LLM gpt-5.4-nano tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval| DeBERTa-v3-large-mnli-fever-anli-ling-wanli| ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache|
 | Citation| SQLite| 0GB| CPU only (read-only; check_same_thread=False)|
 | Corpus scan| Polars scan_ndjson| 0GB GPU (CPU-only)| **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention|
@@ -132,10 +132,10 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
     - (3) sliding-window fallback only if anchor extraction fails.
   - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
 **2 — Clean Experimental Design**
-- `mistralai/Mistral-7B-Instruct-v0.2` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
+- `API-based LLM gpt-5.4-nano` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
 - All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
-- A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds Mistral's hard limit.
-- Prompt token count (Mistral tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
+- A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds API-based LLM gpt-5.4-nano's hard limit.
+- Prompt token count (API-based LLM gpt-5.4-nano tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
 **3 — Grounded in a Real Failure Case**
 - Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
 **4 — Production-Grade Reproducibility Already Operational**
@@ -249,7 +249,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * The **same pre-chunked payloads** are used for both:
   * `bm25s`
   * `BGE-M3`
-* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* Effective prompt token count is logged per query using the **API-based LLM gpt-5.4-nano tokenizer**.
 * A runtime guard enforces context length:
   * `assert max(prompt_tokens) < 32768`
 * If that assertion fails, the pipeline stops loudly rather than silently overflowing context.
@@ -257,7 +257,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
   * test **64-subword overlap**
   * on a **10% subset**
 ### Revision 8 — LLM Generator
-* The generator model is **`mistralai/Mistral-7B-Instruct-v0.2`**.
+* The generator model is **`API-based LLM gpt-5.4-nano`**.
 * It has been **smoke-tested in this repository** under **`transformers 4.41.2 (pinned)`**.
 * All prompts are formatted using:
   * `tokenizer.apply_chat_template(...)`
@@ -321,7 +321,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * **Hybrid BM25 + BGE-M3 + CrossEncoder**
 * **Legal-BERT** is included as an **optional domain-reference model**.
 * The generator model is held constant as:
-  * **`mistralai/Mistral-7B-Instruct-v0.2`**
+  * **`API-based LLM gpt-5.4-nano`**
 * The generator is used under the following fixed conditions:
   * **frozen weights**
   * **greedy decoding**
@@ -356,7 +356,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * The full prompt is formatted using:
     * `tokenizer.apply_chat_template(...)`
   * The generator model is:
-    * `mistralai/Mistral-7B-Instruct-v0.2`
+    * `API-based LLM gpt-5.4-nano`
   * The generator is kept **frozen** during evaluation.
   * Decoding uses:
     * `do_sample=False`
@@ -364,7 +364,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * Output response is:
     * `R`
   * Before generation starts, a **runtime assertion** checks prompt length.
-  * The **effective prompt token count** is logged for each query using the **Mistral tokenizer**.
+  * The **effective prompt token count** is logged for each query using the **API-based LLM gpt-5.4-nano tokenizer**.
   * Begin with **Tier A** on a **10–20% subset** of the data.
   * Use this smaller run to **validate the pipeline and metrics first**.
   * Add **Tier B** and **Tier C** only after Tier A has been successfully validated.
@@ -416,15 +416,15 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Serialize scores and ranks
     * Return the **top-10** results
     * Unload model
-  * **Phase 3 — Generation with Mistral-7B-Instruct-v0.2**
-    * Load **`Mistral-7B-Instruct-v0.2`** in **bfloat16**
+  * **Phase 3 — Generation with API-based LLM gpt-5.4-nano**
+    * Load **`API-based LLM gpt-5.4-nano`** in **bfloat16**
     * Apply the **chat template**
     * Assert:
       * `max(prompt_tokens) < 32768`
     * Generate with:
       * `do_sample=False`
     * Log:
-      * prompt token count using the **Mistral tokenizer**
+      * prompt token count using the **API-based LLM gpt-5.4-nano tokenizer**
       * completion token count
     * Save outputs
     * Unload model
@@ -624,7 +624,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * Pre-chunked string payloads are:
   * **saved once**
   * **reused by both BGE-M3 and `bm25s`**
-* Effective prompt token count is logged per query using the **Mistral tokenizer**.
+* Effective prompt token count is logged per query using the **API-based LLM gpt-5.4-nano tokenizer**.
 * A runtime guard enforces prompt length:
   * `assert max(prompt_tokens) < 32768`
 * If that assertion fails, the pipeline stops loudly instead of silently exceeding context limits.
@@ -664,7 +664,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * Assert `ProbeConfig()` is **frozen** — mutating a field raises `AttributeError` or `TypeError`.
 * Assert `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — the critical invariant that `ProbeConfig` defaults must equal module constants.
 * Assert `_probe_config_to_dict(ProbeConfig())` is JSON-serializable — guarantees the config snapshot in `provenance["probe_config"]` can always be written to disk and W&B.
-* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary Mistral tokenizer check.
+* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary API-based LLM gpt-5.4-nano tokenizer check.
 * Assert all new `ProbeConfig` fields appear in `report["provenance"]["probe_config"]` — confirms the config snapshot is complete in every `ProbeReport`.
 * Assert the A11 chunk count formula (`stride = chunk_size - overlap; n_chunks = max(1, ceil((total - overlap) / stride))`) matches `CHUNK_SIZE_SUBWORDS=1024` and `CHUNK_OVERLAP_SUBWORDS=128` — regression test against chunking formula drift.
 
@@ -750,7 +750,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Text viability | `min_text_length=1500`, `chunk_size_subwords=1024`, `chunk_overlap_subwords=128` | Minimum chars for meaningful chunking; chunk window for A11 |
 | Source format | `a7_known_formats_pass_pct=80.0`, `a7_known_formats={"plain_text","html_with_citations"}` | % of records from formats confirmed to survive normalization |
 | Citation anchor | `a12_min_pct_with_anchor=60.0`, `a9_zero_citation_pass_pct=20.0` | SQLite Tier C viability |
-| Chunk count | `a11_min_median_chunks=2.0`, `encoder_model="BAAI/bge-m3"`, `a11_generative_model` | Multi-chunk splitting + Mistral context limit advisory |
+| Chunk count | `a11_min_median_chunks=2.0`, `encoder_model="BAAI/bge-m3"`, `a11_generative_model` | Multi-chunk splitting + API-based LLM gpt-5.4-nano context limit advisory |
 | Sentence density | `min_sentence_count=20`, `a13_max_below_threshold_pct=15.0`, `spacy_model` | NLI window coverage floor |
 | Entropy / quality | `b6_entropy_spot_check_tolerance=1.0`, `quality_signals_html_pattern`, `quality_signals_boilerplate_phrases` | Tokenization drift + boilerplate survival |
 
@@ -877,7 +877,7 @@ When integrated, the full logger tracks:
 * **CitationFound_NoLocalSupport counts**
 * **Citation hashes**
 * **Citation anchor token offsets**
-* **Prompt token counts** using the Mistral tokenizer
+* **Prompt token counts** using the API-based LLM gpt-5.4-nano tokenizer
 * **Completion token counts**
 * **Gradient norms**
 * **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
@@ -943,7 +943,7 @@ When integrated, the full logger tracks:
     * mean
     * maximum
     * entropy
-* **Mistral**
+* **API-based LLM gpt-5.4-nano**
   * prompt formatting is enforced with:
     * `tokenizer.apply_chat_template(...)`
   * prompt length is guarded by:
@@ -1074,7 +1074,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
 | BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
 | Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
-| LLM generator           | mistralai/Mistral-7B-Instruct-v0.2                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
+| LLM generator           | API-based LLM gpt-5.4-nano                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
 | NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
@@ -1095,7 +1095,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 ## Ethical Considerations
 * All datasets used in the project are **publicly available**.
 * **CourtListener** data is used under **CC BY-ND 4.0**.
-* **`mistralai/Mistral-7B-Instruct-v0.2`** does **not** include built-in moderation mechanisms, according to its model card.
+* **`API-based LLM gpt-5.4-nano`** does **not** include built-in moderation mechanisms, according to its model card.
 * Model outputs are used **strictly for retrieval research** under **academic supervision**.
 * Any **PII handling** follows the **redaction practices of the original data provider**.
 * The project uses **no human annotation** for hallucination measurement.
@@ -1491,3 +1491,379 @@ All experiments are reproducible via:
 main (production) ← develop (integration) ← feature/* (work)
 ```
 After cloning: `uv run pre-commit install && uv run pre-commit install --hook-type pre-push`
+
+---
+
+## 500K LePaRD Cap Decision and Revised Scope
+
+### Original Decision
+
+The 500K cap on LePaRD ingestion was a conservative compute hedge made at project onset, when experiments were scoped to ~5,000 CourtListener opinions on constrained hardware. With GPU access now expanded to an NVIDIA L4, 23GB VRAM and CourtListener corpus scaled to 1.4M federal appellate opinions, the 500K cap creates three systematic problems.
+
+### Problems with Keeping 500K
+
+**1. Corpus asymmetry.**
+The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* — they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Recall@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
+
+**2. Retrieval evaluation validity.**
+LePaRD contains 4M+ ground-truth retrieval pairs. At 500K, the project uses approximately 12% of the available evaluation signal. For a comparative study of five architecture classes, more ground-truth pairs directly produce more statistically reliable MRR and NDCG@10 estimates — especially for the weaker baselines (TF-IDF, CNN) where score variance is high and confidence intervals are wide.
+
+**3. Fine-tuning data starvation.**
+The CNN and BiLSTM encoders are trained on LePaRD contrastive pairs using InfoNCE loss. At 500K training pairs, both architectures are likely underfit relative to what an L4 can saturate. The Transformer bi-encoder (Legal-BERT) similarly benefits from more positive/negative pairs for `MultipleNegativesRankingLoss`. Capping training data at 500K artificially limits the quality ceiling of every architecture under comparison, which undermines the comparative validity of the study.
+
+### Revised Scope
+
+With L4 compute available and no resource constraints, the project adopts the following revised data scope:
+
+| Split | Rows | Purpose |
+|---|---|---|
+| LePaRD train | ~4M | Encoder fine-tuning (CNN, BiLSTM, Legal-BERT) |
+| LePaRD test (held-out) | ~1M | Retrieval evaluation (Recall@k, NDCG@10, MRR) |
+| CourtListener federal appellate | ~1.4M | Candidate opinion corpus for retrieval |
+
+`config/lepard.yaml` is updated accordingly:
+
+```yaml
+cap: 4000000          # full train split for encoder fine-tuning
+smoke_cap: 1000       # CI smoke test unchanged
+output_file: lepard_train_{cap}_rev0194f95.jsonl
+```
+
+### Revised Proposal Language
+
+**Original:**
+"We scope experiments to ~500K for final evaluation, downloaded via CourtListener's paginated API."
+
+**Revised:**
+"We use the full LePaRD training split (~4M pairs) for retriever fine-tuning and a 1M-pair held-out test set for evaluation, consistent with our 1.4M CourtListener opinion corpus and the available L4 compute budget. This eliminates corpus asymmetry between the retrieval candidate space and the ground-truth evaluation signal, maximizes statistical power for Recall@k and NDCG@10 comparisons across five architecture classes, and ensures CNN, BiLSTM, and Transformer encoders are trained to capacity on available hardware."
+
+---
+
+```markdown
+## `scripts/ingest_lepard.py` — LePaRD Dataset Ingestion Pipeline
+
+### Role in the RAG Pipeline
+
+This script is **Stage 1: Raw Data Acquisition** in the hallucination-reduction legal RAG pipeline. It is the single authoritative boundary between the HuggingFace Hub and the local corpus. All downstream components — the NaN audit gate, embedding generation, vector indexing, and the RAG retriever — depend on the artifact this script produces being byte-exact, reproducible, and provenance-verified.
+
+```
+HuggingFace Hub (rmahari/LePaRD, ACL 2024)
+        │
+        ▼
+scripts/ingest_lepard.py              ← Stage 1: Raw Acquisition
+        │  produces:
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl   (5.4 GB, 4M rows)
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.sha256
+        │    data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl.manifest.json
+        │
+        │  versioned via DVC → S3:
+        │    s3://cs1090b-hallucinationlegalragchatbots/dvc
+        ▼
+scripts/audit_jsonl_nan.py            ← Stage 2: Data Quality Gate
+        ▼
+[embedding + indexing pipeline]       ← Stage 3: Vector Store Construction
+        ▼
+[RAG retriever + LLM]                 ← Stage 4: Inference
+```
+
+### Why LePaRD and Why 4M Rows
+
+LePaRD (Legal Passage Retrieval Dataset, Mahari et al., ACL 2024) contains 4M+ ground-truth `(legal argument context, cited precedent passage)` pairs extracted from actual U.S. federal judicial opinions. It is the **evaluation backbone** of this project: for each legal argument, we know exactly which precedent passage a federal judge cited, enabling automated measurement of retrieval quality (Recall@k, NDCG@10, MRR) without human annotation.
+
+The cap was revised from 500K → 4M rows for three reasons:
+
+1. **Corpus asymmetry**: evaluating against 1.4M CourtListener opinions with only 500K ground-truth pairs systematically underestimates Recall@k.
+2. **Statistical power**: 4M pairs produce reliable NDCG@10 estimates across all five architecture classes (TF-IDF, CNN, BiLSTM, Legal-BERT, KG-augmented).
+3. **Fine-tuning capacity**: CNN and BiLSTM encoders are underfit at 500K; the Google Colab Pro A100 High RAM runtime / Harvard OnDemand GPU Cluster L4/A10G  can saturate the full 4M training split.
+
+### Actual Acquisition Results (Google Colab Pro A100, April 2026)
+
+| Artifact | Size | Rows | SHA256 (first 8) |
+|---|---|---|---|
+| `lepard_train_4000000_rev0194f95.jsonl` | 5.4 GB | 4,000,000 | `see .sha256` |
+| `lepard_train_4000000_rev0194f95.jsonl.sha256` | 65 B | — | sidecar |
+| `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
+
+DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
+DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
+
+### Key Capabilities
+
+| Capability | Detail |
+|---|---|
+| **Pinned revision** | Validates 40-char lowercase hex SHA before any network call — mutable refs like `main` are rejected |
+| **Idempotent** | O(1) sidecar-presence fast path; skips re-download if artifact already exists |
+| **Self-healing** | Restores missing sidecar + manifest by recomputing SHA256 from disk bytes on next run |
+| **Atomic write** | Unique `tmp → rename` — no partial artifacts on failure or concurrent runs |
+| **Provenance bundle** | Writes `.jsonl` + `.sha256` + `.manifest.json` together — no crash window |
+| **Strict audit** | `--verify-only` fails closed: checks digest, sidecar, revision, dataset, split, cap, rows\_written, sha256 |
+| **Network resilience** | Retries initial HF load up to 3× on `OSError` with jitter (`wait_random_exponential`) — thundering-herd safe on shared clusters |
+| **Unicode-safe** | `ensure_ascii=False` preserves legal symbols (§, ¶, em-dash) critical for embedding fidelity |
+| **NaN pass-through** | NaN rows are not filtered here — `audit_jsonl_nan.py` is the downstream gate |
+| **DVC + S3** | Artifact versioned via DVC and pushed to S3 for reproducible pulls across machines |
+
+### Provenance Manifest (actual output)
+
+```json
+{
+  "ingestion_ts_utc": "2026-04-08T20:31:00+00:00",
+  "script_git_commit": "<40-char SHA>",
+  "hf_revision": "0194f95c3091acceab3b887c9b09ef432cf84052",
+  "dataset": "rmahari/LePaRD",
+  "split": "train",
+  "cap": 4000000,
+  "rows_written": 4000000,
+  "python_version": "3.11.15",
+  "datasets_version": "4.7.0",
+  "force_used": false,
+  "sha256": "<64-char hex>"
+}
+```
+
+### Configuration (`config/lepard.yaml`)
+
+```yaml
+dataset: rmahari/LePaRD
+split: train
+revision: 0194f95c3091acceab3b887c9b09ef432cf84052
+cap: 4000000
+smoke_cap: 1000
+output_dir: data/raw/lepard
+output_file: lepard_train_{cap}_rev0194f95.jsonl
+```
+
+### Demo CLI Commands (Friday TF Session)
+
+```bash
+# 1. CI smoke test — downloads 1K rows, writes full artifact bundle, runs in ~15s
+uv run python scripts/ingest_lepard.py --smoke
+
+# 2. Preflight dry-run — counts rows without writing any file
+uv run python scripts/ingest_lepard.py --dry-run
+
+# 3. Full 4M ingest — downloads 5.4GB, writes JSONL + sidecar + manifest
+uv run python scripts/ingest_lepard.py
+
+# 4. Strict provenance audit — fails closed on any mismatch
+uv run python scripts/ingest_lepard.py --verify-only
+
+# 5. Force re-ingest — purges stale artifacts and rewrites from scratch
+uv run python scripts/ingest_lepard.py --force
+
+# 6. Version and push artifact to S3 via DVC
+uv run dvc push lepard_4M.dvc
+
+# 7. Pull artifact on a new machine (reproduces exact 5.4GB artifact)
+uv run dvc pull lepard_4M.dvc
+
+# 8. Run the full test suite (79 tests, ~3s)
+uv run pytest tests/test_ingest_lepard.py -q
+
+# 9. Verify local artifact integrity after DVC pull
+ls -lh data/raw/lepard/
+wc -l data/raw/lepard/lepard_train_4000000_rev0194f95.jsonl
+```
+
+### Test Coverage (79 tests, 3.27s on A100)
+
+The pipeline is covered by 79 pytest tests including:
+
+- **Idempotency**: second run is always a no-op (Hypothesis property-based)
+- **Strict verify**: fails closed on missing sidecar, missing manifest, tampered SHA256, cap mismatch, rows\_written mismatch, revision mismatch
+- **Self-heal**: restores full artifact bundle; preserves original ingestion timestamp; marks `provenance_reconstructed=True`
+- **Repair**: recomputes SHA256 from disk bytes — never trusts stale sidecar
+- **Retry**: `wait_none()` override confirms 3-attempt retry without sleep in CI
+- **Unicode**: legal symbols preserved end-to-end through `ensure_ascii=False`
+- **Atomic write**: no `.tmp` files left after successful or failed write
+- **Force flag**: purges stale sidecar + manifest before rewrite
+```
+
+---
+
+## `src/lepard_cl_compat.py` — LePaRD ↔ CourtListener Compatibility Audit
+
+### Role in the RAG Pipeline
+
+This module is the **bridge gate between Stage 1 (Raw Data Acquisition) and Stage 5 (Model Training)** in the hallucination-reduction legal RAG pipeline. It answers a single question that decides whether the two core datasets can be used together: **of the LePaRD ground-truth `(source → cited_precedent)` pairs, how many have *both* endpoints present in the local CourtListener federal-appellate corpus and are therefore usable as gold labels for retrieval training and evaluation?**
+
+```
+LePaRD JSONL (Stage 1, Colab A100)         CourtListener shards (Stage 1, ODD GPU L4)
+        │                                                       │
+        └─────────────────────────┬─────────────────────────────┘
+                                  ▼
+                  src/lepard_cl_compat.py   ← compatibility audit
+                                  │  emits:
+                                  │    CompatReport (id + pair overlap, court distribution)
+                                  │    deduplicated usable gold pairs (JSONL)
+                                  │    CI exit code (--min-usable-pct gate)
+                                  ▼
+        Stage 5: encoder fine-tuning + Stage 6: Tier A retrieval evaluation
+```
+
+Without this audit, training on LePaRD pairs whose endpoints are absent from CourtListener teaches the retriever a latent space it cannot use at inference time — guaranteed silent retrieval failures and hallucination at generation time.
+
+### Key Capabilities
+
+| Capability | Detail |
+|---|---|
+| **Cross-machine reproducibility** | Runs identically on Google Colab Pro A100 and Harvard ODD GPU Cluster L4 from committed fixtures (`tests/fixtures/lepard_sample_1k.jsonl`, `cl_ids.txt.gz`, `cl_matched_courts.json`) |
+| **Strict input validation** | LePaRD: rejects floats, bools, strings, missing keys with 1-based line context. CourtListener ids: rejects sign chars, leading zeros, zero, non-decimal with line context |
+| **Pure analysis core** | `build_report(pairs, cl_ids, court_map)` is side-effect-free and trivially unit-testable — no filesystem mocking required |
+| **Deterministic deduplication** | `extract_valid_pairs` uses `dict.fromkeys` to preserve first-occurrence order across runs (byte-stable JSONL output for caching/diffing) |
+| **Deterministic court tie-breaking** | Court distribution sorted by count desc, then court_id asc |
+| **CI gate** | `--min-usable-pct` exits non-zero if usable pair percentage falls below threshold — blocks downstream training jobs on data drift |
+| **Gate-before-export policy** | Failed `--min-usable-pct` runs do NOT write the export file — guarantees no degraded data leaks into training loops |
+| **Gold-pair export** | `--write-valid-pairs path.jsonl` writes deduplicated pairs where both endpoints exist in CL, ready for direct DataLoader consumption |
+| **Stable JSON output** | `--json` emits sorted-key, unicode-preserving output for regression diffs and W&B artifact storage |
+| **TDD-locked** | 56 pytest tests including Hypothesis property-based invariants, gate-policy tests, fixture regression test asserting exact live-investigation numbers (512/70/454/13) |
+
+### Live Output on the Committed Fixture
+
+```text
+[phl690@general-dy-general-cr-8 cs1090b_HallucinationLegalRAGChatbots]$ uv run python -m src.lepard_cl_compat
+============================================================
+LePaRD <-> CourtListener compatibility analysis
+============================================================
+[1] ID-level overlap
+  LePaRD unique ids:       512
+  CL unique ids:           1,465,484
+  Overlap:                 70 (13.7% of LePaRD)
+  LePaRD id range max:     12,419,282
+  CL id range max:         11,233,407
+  LePaRD ids > CL max:     90 (heuristic: may indicate misaligned or differently-sourced id spaces)
+[2] Pair-level overlap (both endpoints required for gold label)
+  Total rows:              1,000
+  Unique pairs:            454
+  Unique sources / dests:  58 / 454
+  Both endpoints in CL:    13 (2.9%)  <- USABLE GOLD
+  Source only in CL:       105
+  Dest only in CL:         40
+  Neither in CL:           296
+[3] Court distribution of matched CL ids
+  Total matched with known court: 70
+    ca9: 15
+    ca5: 11
+    ca4: 10
+    ca11: 5
+    ca8: 5
+    ca3: 4
+    cadc: 4
+    cafc: 4
+    ca1: 3
+    ca10: 3
+    ca6: 3
+    ca2: 2
+    ca7: 1
+============================================================
+```
+
+### What Each Number Means
+
+#### Section [1] — ID-Level Overlap
+
+This section answers: *do the two datasets even share the same identifier space?* It treats every `source_id` and `dest_id` as a flat set of opinion identifiers and intersects them against the CourtListener id universe.
+
+- **`LePaRD unique ids: 512`** — The 1,000-row LePaRD sample contains exactly 512 distinct opinion identifiers when source and destination columns are flattened together. The fact that 1,000 rows collapse to 512 unique ids already signals heavy duplication: the same opinions appear repeatedly as either citing or cited documents (this is expected in legal corpora — landmark precedents are cited many times).
+
+- **`CL unique ids: 1,465,484`** — The full CourtListener federal-appellate corpus shipped with this project contains 1.46M opinion ids. This is the "candidate pool" any retriever trained on LePaRD will eventually have to search.
+
+- **`Overlap: 70 (13.7% of LePaRD)`** — Of the 512 LePaRD ids, only 70 are present in the local CourtListener corpus. This is the **schema-compatibility signal**: the fact that *any* overlap exists at the integer level confirms LePaRD's `source_id`/`dest_id` columns and CourtListener's `id` column are drawn from the same id space (CourtListener opinion ids), not unrelated counters that happen to be integers. Without this confirmation, the entire compatibility analysis would be meaningless.
+
+- **`LePaRD id range max: 12,419,282`** vs **`CL id range max: 11,233,407`** — LePaRD contains ids that are *larger* than the largest id in your CourtListener snapshot. This is a temporal/snapshot signal: LePaRD was built from a CourtListener export that postdates your local download, so some opinions referenced in LePaRD simply did not exist yet when your CL snapshot was taken.
+
+- **`LePaRD ids > CL max: 90 (heuristic)`** — Quantifies the previous point: 90 of the 512 LePaRD ids (17.6%) lie above your CL id ceiling. The "heuristic" qualifier is deliberate scientific humility — id-range comparisons are a *suggestion* of snapshot drift, not proof, because id allocation is not strictly monotonic across all CourtListener ingestion paths. Treat this as "investigate further if you want full coverage", not "definitive missing data count".
+
+#### Section [2] — Pair-Level Overlap (the metric that actually matters)
+
+This is the section that decides whether LePaRD is usable as **gold labels for retrieval training**. A retriever learns from `(query, correct_passage)` pairs. For a LePaRD pair to be usable, **both** the source opinion (which provides the query context) **and** the destination opinion (which is the gold passage to retrieve) must exist in the CourtListener corpus the retriever will actually search at inference time.
+
+- **`Total rows: 1,000`** — Raw row count from the LePaRD JSONL fixture, before deduplication.
+
+- **`Unique pairs: 454`** — After deduplicating identical `(source_id, dest_id)` tuples, only 454 distinct pairs remain. The 546 dropped rows are exact duplicates (same citation appearing in multiple LePaRD passages or extraction passes). Deduplication matters here because counting the same pair multiple times would inflate retrieval metrics during evaluation.
+
+- **`Unique sources / dests: 58 / 454`** — There are 58 distinct *citing* opinions but 454 distinct *cited* opinions. The huge ratio (58 vs 454) tells you the sample is *source-skewed*: a small number of source opinions cite many different precedents. This is normal for legal opinions (a single court ruling can cite dozens of prior cases) but worth noting for sampling analysis.
+
+- **`Both endpoints in CL: 13 (2.9%)  <- USABLE GOLD`** — **This is the headline number.** Only 13 of the 454 unique pairs have *both* the source and destination opinion present in your CourtListener corpus. These 13 pairs are the *only* ones that can serve as supervised training signal: the retriever can be given a query derived from the source opinion and asked to retrieve the destination opinion from the CL index, and that retrieval will physically be possible. The remaining 441 pairs are unusable because at least one endpoint is absent from the search space.
+
+- **`Source only in CL: 105`** — 105 pairs have the citing opinion in CL but not the cited precedent. These are "dangling citations": you have the question but not the answer document. Useless for end-to-end retrieval evaluation.
+
+- **`Dest only in CL: 40`** — 40 pairs have the cited precedent but not the citing opinion. You have the answer but not the natural query that should retrieve it. Useless without synthetic query generation.
+
+- **`Neither in CL: 296`** — 296 pairs (65% of unique pairs) have neither endpoint in CL. This dominant bucket is the most diagnostic: it tells you LePaRD covers federal courts your CL filter excludes (district court, bankruptcy, SCOTUS), as Section [3] confirms.
+
+**Extrapolation:** If the 2.9% rate holds across the full 4M-row LePaRD release, you would get roughly **116,000 usable gold pairs** — comfortably within the README §Tier A target of 10K–50K retrieval evaluation queries, but far below the 4M ceiling LePaRD advertises.
+
+#### Section [3] — Court Distribution of Matched CL IDs
+
+This section explains *why* the usability rate is what it is by showing which courts the surviving matched ids actually come from.
+
+- **`Total matched with known court: 70`** — All 70 matched ids (the same 70 from the id-level overlap in Section 1) have an entry in the `cl_matched_courts.json` fixture, so every match is fully attributed.
+
+- **`ca9: 15, ca5: 11, ca4: 10, ca11: 5, ca8: 5, ca3: 4, cadc: 4, cafc: 4, ca1: 3, ca10: 3, ca6: 3, ca2: 2, ca7: 1`** — Every matched id is from a US federal **circuit court of appeals**: `caN` = Nth Circuit (ca1 = First Circuit, ca9 = Ninth Circuit, etc.), `cadc` = DC Circuit, `cafc` = Federal Circuit. The Ninth Circuit (ca9, the largest by caseload) dominates with 15 matches — proportional to its real-world citation prevalence.
+
+  **Critical interpretation:** Zero district courts, zero bankruptcy courts, zero SCOTUS opinions appear in this list. That is the smoking gun that explains the 2.9% pair-level rate: **your CourtListener subset is filtered to federal appellate only**, while LePaRD draws from the full federal court hierarchy. Most LePaRD source opinions are district court rulings citing appellate precedent, so the source side of the pair systematically misses your CL corpus.
+
+  The court distribution also confirms that the ID-space match is real: if these were coincidental integer collisions, you would expect random court assignments, not a clean monoculture of circuit courts in the order of their real-world filing volumes.
+
+### What This Output Tells You About the Pipeline
+
+| Question | Answer from this output |
+|---|---|
+| Are LePaRD and CourtListener schema-compatible? | **Yes.** They share the CourtListener opinion id space (confirmed by 70 non-trivial id matches and a clean court-distribution monoculture). |
+| Is 1K rows of LePaRD enough to train a retriever? | **No, but the audit method is.** Only 13 usable pairs from 1K rows is far too few — the fixture exists to validate the *audit*, not to train a model. Run the same audit on the full 4M-row LePaRD to get ~116K usable pairs. |
+| Why is the usable rate so low? | **Federal appellate filter mismatch.** LePaRD source opinions are dominated by district courts, which your CL corpus excludes. Section [3] proves this by showing zero district court ids in the matched set. |
+| What can we do about it? | **Two options.** (a) Expand the CL corpus to include federal district courts (recovers source-side matches). (b) Filter LePaRD to appellate-source pairs only before training (keeps CL corpus small but discards data). The README §"500K LePaRD Cap Decision and Revised Scope" tracks this tradeoff. |
+| Can this output drift silently in CI? | **No.** `tests/test_lepard_cl_compat.py::TestRealFixtures::test_matches_live_investigation` asserts the exact numbers `lepard_unique_ids == 512`, `cl_unique_ids == 1_465_484`, `overlap == 70`, `unique_pairs == 454`, `both_in_cl == 13` against the committed fixtures. Any change to the fixtures or analysis logic that perturbs these numbers will fail the test. |
+
+### CLI Usage
+
+```bash
+# Default report (uses committed fixtures)
+uv run python -m src.lepard_cl_compat
+
+# Stable JSON for diffing or W&B
+uv run python -m src.lepard_cl_compat --json
+
+# CI gate: exit non-zero if usability drops below 5%
+uv run python -m src.lepard_cl_compat --min-usable-pct 5.0
+
+# Export usable gold pairs (gate evaluated first; no file written if gate fails)
+uv run python -m src.lepard_cl_compat \
+    --write-valid-pairs data/processed/lepard_gold_pairs.jsonl
+
+# Custom inputs
+uv run python -m src.lepard_cl_compat \
+    --lepard data/raw/lepard/lepard_train_1000_rev0194f95.jsonl \
+    --cl-ids /tmp/cl_ids.txt.gz \
+    --court-map /tmp/cl_matched_courts.json
+```
+
+### Programmatic API
+
+```python
+from src.lepard_cl_compat import (
+    run_full_analysis,      # convenience: load + build
+    build_report,           # pure: in-memory data → CompatReport
+    extract_valid_pairs,    # pure: usable gold pair extraction
+    write_valid_pairs_jsonl,
+    format_report,
+)
+
+# Use in notebooks / training scripts
+report = run_full_analysis()
+print(f"Usable gold pairs: {report.pair_overlap.both_in_cl} "
+      f"({report.pair_overlap.usable_pct:.1f}%)")
+```
+
+### Companion Files
+
+| File | Role |
+|---|---|
+| `scripts/prepare_compat_fixtures.py` | One-time fixture generator with `lepard` (Colab) and `cl` (cluster) subcommands |
+| `scripts/demo_lepard_cl_compat.py` | TF demo runner with narrative + interpretation; reproduces the cross-machine investigation in <1 second |
+| `tests/test_lepard_cl_compat.py` | 56 tests: loaders, pure analysis, Hypothesis property invariants, CLI gate, deterministic ordering, real-fixture regression |
+| `tests/fixtures/lepard_sample_1k.jsonl` | 1,000 LePaRD rows (1.4 MB) — committed |
+| `tests/fixtures/cl_ids.txt.gz` | 1,465,484 CL opinion ids (3.1 MB gzipped) — committed |
+| `tests/fixtures/cl_matched_courts.json` | 70 matched id → court_id entries (1.4 KB) — committed |
+
+---

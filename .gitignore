@@ -18,7 +18,7 @@ logs/
 *.log
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# *.ipynb  -- tracked notebooks allowed
 # NLP model cache
 .cache/
 # OS
@@ -31,7 +31,4 @@ src/repro.py
 tests/shell/bats-core/
 data/
 wandb/
-
-# Local safety backups
-src.bak.*/
-scripts.bak.*/
+/lepard_4M
