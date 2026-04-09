@@ -317,3 +317,71 @@ class TestMinUsablePctCliGate:
         )
         assert r.returncode != 0
         assert "below threshold" in r.stderr.lower() or "below threshold" in r.stdout.lower()
+
+
+# ---------- --write-valid-pairs flag ----------
+
+
+class TestWriteValidPairsFlag:
+    """--write-valid-pairs emits usable gold pairs (both endpoints in CL) as JSONL."""
+
+    def test_writes_only_both_in_cl_pairs(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path):
+        import subprocess
+        import sys
+
+        out = tmp_path / "valid_pairs.jsonl"
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--write-valid-pairs",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        assert r.returncode == 0, f"stderr: {r.stderr}"
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        pairs = [json.loads(line) for line in lines]
+        # Synthetic fixture has exactly 2 unique pairs with both endpoints in cl={100,200,300,400}:
+        # (100, 200) and (100, 300). (100, 777), (999, 888) excluded.
+        assert len(pairs) == 2
+        pair_tuples = {(p["source_id"], p["dest_id"]) for p in pairs}
+        assert pair_tuples == {(100, 200), (100, 300)}
+
+    def test_deduplicates_rows(self, tmp_lepard, tmp_cl_ids_gz, tmp_court_map, tmp_path):
+        """tmp_lepard contains (100,200) twice; output must dedupe."""
+        import subprocess
+        import sys
+
+        out = tmp_path / "valid_pairs.jsonl"
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.lepard_cl_compat",
+                "--lepard",
+                str(tmp_lepard),
+                "--cl-ids",
+                str(tmp_cl_ids_gz),
+                "--court-map",
+                str(tmp_court_map),
+                "--write-valid-pairs",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            check=True,
+        )
+        lines = [line for line in out.read_text().strip().split("\n") if line]
+        assert len(lines) == 2  # deduped, not 3
