@@ -13,6 +13,13 @@ Inputs (all paths configurable; defaults point at tests/fixtures/):
 Outputs: a CompatReport dataclass with id overlap, pair overlap, and
 court distribution -- identical numbers to the live cross-machine run.
 
+Semantic notes:
+  - usable_pct is a UNIQUE-PAIR usability metric, not row-weighted.
+    Duplicates in the LePaRD JSONL affect total_rows but not usable_pct.
+  - court_distribution counts UNIQUE matched CL ids (not per-row occurrences).
+  - Designed for fixture-scale analysis (1K-100K pairs). For full 4M+ corpus
+    runs, consider a streaming/DuckDB-backed variant.
+
 CLI:
     uv run python -m src.lepard_cl_compat
     uv run python -m src.lepard_cl_compat --lepard path/to.jsonl --cl-ids path/to.txt.gz
@@ -98,7 +105,11 @@ class CompatReport:
 
 
 def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
-    """Return (source_id, dest_id) tuples -- duplicates preserved."""
+    """Return (source_id, dest_id) tuples -- duplicates preserved.
+
+    Raises ValueError with line context on malformed JSON, missing
+    required keys, or non-integer id values.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"LePaRD sample not found: {path}")
@@ -112,7 +123,19 @@ def load_lepard_pairs(path: Path | str) -> list[tuple[int, int]]:
             for required_key in ("source_id", "dest_id"):
                 if required_key not in record:
                     raise ValueError(f"missing required key {required_key!r} at line {line_number} of {path}")
-            pairs.append((int(record["source_id"]), int(record["dest_id"])))
+            try:
+                source_id = int(record["source_id"])
+                dest_id = int(record["dest_id"])
+            except (TypeError, ValueError) as exc:
+                # Identify which key was the offender
+                bad_key = "source_id"
+                try:
+                    int(record["source_id"])
+                    bad_key = "dest_id"
+                except (TypeError, ValueError):
+                    pass
+                raise ValueError(f"invalid integer for {bad_key!r} at line {line_number} of {path}: {exc}") from exc
+            pairs.append((source_id, dest_id))
     return pairs
 
 
@@ -158,6 +181,11 @@ def compute_id_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> IdOver
 
 
 def compute_pair_overlap(pairs: list[tuple[int, int]], cl_ids: set[int]) -> PairOverlap:
+    """Compute pair-level bucket counts.
+
+    usable_pct = both_in_cl / unique_pairs (UNIQUE-PAIR usability,
+    not row-weighted). Duplicates in `pairs` affect total_rows only.
+    """
     unique_pairs = set(pairs)
     both_in_cl = source_only_in_cl = dest_only_in_cl = neither_in_cl = 0
     for source_id, dest_id in unique_pairs:
@@ -190,7 +218,7 @@ def analyze_court_distribution(
     cl_ids: set[int],
     court_map: dict[int, str],
 ) -> dict[str, int]:
-    """Return court_id -> count for LePaRD ids present in CL.
+    """Return court_id -> count of UNIQUE matched CL ids (not per-row occurrences).
 
     Sorted by count descending, then court_id ascending (deterministic tie-break).
     """
@@ -203,7 +231,6 @@ def analyze_court_distribution(
         if dest_id in cl_ids:
             matched_ids.add(dest_id)
     counts: Counter[str] = Counter(court_map[matched_id] for matched_id in matched_ids if matched_id in court_map)
-    # Deterministic sort: count desc, court_id asc
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
@@ -313,7 +340,7 @@ def main() -> None:
 
     report = run_full_analysis(args.lepard, args.cl_ids, args.court_map)
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True, ensure_ascii=False))
     else:
         print(format_report(report))
 
