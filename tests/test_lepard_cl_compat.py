@@ -95,6 +95,24 @@ class TestLoaders:
         with pytest.raises(ValueError, match=r"missing required key.*source_id.*line 0"):
             load_lepard_pairs(path)
 
+    def test_load_lepard_rejects_float_id(self, tmp_path):
+        path = tmp_path / "float.jsonl"
+        path.write_text('{"source_id": 1.5, "dest_id": 2}\n')
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+            load_lepard_pairs(path)
+
+    def test_load_lepard_rejects_bool_id(self, tmp_path):
+        path = tmp_path / "bool.jsonl"
+        path.write_text('{"source_id": true, "dest_id": 2}\n')
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+            load_lepard_pairs(path)
+
+    def test_load_lepard_rejects_string_id(self, tmp_path):
+        path = tmp_path / "str.jsonl"
+        path.write_text('{"source_id": "123", "dest_id": 2}\n')
+        with pytest.raises(ValueError, match=r"source_id.*must be int.*line 0"):
+            load_lepard_pairs(path)
+
     def test_load_lepard_non_integer_id_raises_with_line_context(self, tmp_path):
         """Non-integer id coercion must wrap ValueError with line number."""
         path = tmp_path / "bad_int.jsonl"
