@@ -44,7 +44,7 @@
 ## Revised Feasibility Statement
 | Component             | Cap                      | Notes                                                                                 |
 |-----------------------|--------------------------|---------------------------------------------------------------------------------------|
-| Training pairs        | 500K–1M                  | Not 3.2M full LePaRD set                                                              |
+| Training pairs        | 4M                       | Full 4M LePaRD set                                                              |
 | Retrieval evaluation  | 10K–50K queries          | Not 400K full test set                                                                |
 | Generation evaluation | 1,000 stratified queries | Fixed budget, stratified by circuit                                                   |
 | Iteration corpus      | ~150K opinions (10%)     | Loaded via DVC `data/raw/cl_federal_appellate_bulk` subset; full 1.46M for final runs |
@@ -54,7 +54,7 @@
 ## Project Feasibility Statement
 **Infrastructure is complete. Corpus preprocessing is underway. The core experiment is the remaining work.**
 - ✅ Environment bootstrapped, verified, reproducible (`setup.sh`, tests passing, coverage verified)
-- ✅ 1,465,484 federal appellate opinions downloaded, filtered, sharded (7.6GB)
+- ✅ 1,456,611 federal appellate opinions downloaded, filtered, sharded (7.6GB)
 - ✅ DVC + S3 artifact versioning operational
 - ✅ All `src/` modules implemented and tested
 - ✅ CourtListener RAG-readiness refinement completed (Cell 2)
@@ -150,7 +150,7 @@ The evaluation is organized into **three tiers** to keep hallucination measureme
 Retrieval Grounding
 * Uses a **capped LePaRD subset**.
 * Reports standard retrieval metrics:
-  * **Recall@k**
+  * **Hit@k**
   * **MRR**
   * **NDCG@10**
 #### Tier B
@@ -384,7 +384,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ### Evaluation Protocol
 1. **Acquire LePaRD** as the core retrieval dataset.**Cap the training set** to **500K–1M pairs** for feasibility and controlled compute.
 2. Train or adapt **all retrievers** using the **capped training split**, index **`bm25s`** over the **same pre-chunked payloads** used in the experiment.
-3. Validate first on a **10–20% subset** of the CourtListener corpus, scale up to the full corpus **only if the subset results remain stable and promising**. On the validation set, log **Recall@k versus `nprobe`**, use those validation results to **justify the chosen IVF search parameters**.
+3. Validate first on a **10–20% subset** of the CourtListener corpus, scale up to the full corpus **only if the subset results remain stable and promising**. On the validation set, log **Hit@k versus `nprobe`**, use those validation results to **justify the chosen IVF search parameters**.
 4. Evaluation runs **sequentially over each batch of 1,000 queries**.
   * Between phases, the pipeline logs and enforces:
     * allocator diagnostics
@@ -536,7 +536,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `index.train()` is run on an approximately **100K-vector subset**
   * `assert index.is_trained` verifies that training completed successfully
 * To justify the chosen IVF settings:
-  * **recall@k vs. nprobe** is logged on the validation set
+  * **Hit@k vs. nprobe** is logged on the validation set
 * The following FAISS search parameters are logged to **W&B** for each run:
   * `nprobe`
   * `nlist`
@@ -550,7 +550,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Stage | Status | What exists | What remains |
 |-------|--------|-------------|--------------|
 | Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
-| CourtListener download | ✅ Complete | 1,465,484 opinions · 159 shards · 7.6GB | — |
+| CourtListener download | ✅ Complete | 1,456,611 opinions · 159 shards · 7.6GB | — |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
 | CourtListener RAG prep | ✅ Complete | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines corpus evaluation for downstream legal RAG), module-level constants, contract test suite (303 tests), GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), GATE_REGISTRY, stratify_by minority-group-preserving stratified subsampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
@@ -562,7 +562,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ## DL System Stack
 ### Stage 1 — Raw Data Acquisition
 * **CourtListener federal appellate subset (✅)**
-  * Contains **1,465,484 opinions**
+  * Contains **1,456,611 opinions**
   * Stored as **23-field JSONL** records
 * **Tier C citation support**
   * Uses a local **SQLite citation index**
@@ -598,7 +598,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * An **immutable manifest** is generated for the dataset and pipeline state.
 * The manifest records:
   * **159 shard checksums**
-  * **1,465,484 total rows**
+  * **1,456,611 total rows**
   * the full **filter-chain provenance**
   * the **`uv.lock` SHA256** value
 * **Contract tests** validate the manifest on **every pipeline run**.
@@ -785,7 +785,7 @@ Plus: schema consistency (`text_length_consistency_tolerance=200`, `text_length_
 
 #### Mandatory Exact Full-Corpus Scan
 * `import polars as pl` at module top level — no fallback.
-* `run_probe()` defaults `full_scan=True` — always scans all 1,465,484 opinions via `pl.scan_ndjson()` per shard.
+* `run_probe()` defaults `full_scan=True` — always scans all 1,456,611 opinions via `pl.scan_ndjson()` per shard.
 * `provenance["full_scan"]=True` and `provenance["polars_version"]` always recorded.
 
 #### Stage 3 Readiness Gate — `STAGE3_REQUIRED_FIELDS` (17 fields)
@@ -864,7 +864,7 @@ When integrated, the full logger tracks:
   * maximum
   * entropy
 * **FAISS retrieval diagnostics**, including:
-  * Recall@k vs `nprobe`
+  * Hit@k vs `nprobe`
   * `nprobe`
   * `nlist`
 * **NLI window count distributions**
@@ -890,7 +890,7 @@ When integrated, the full logger tracks:
     * `index.train()` runs on a random subset of about **100K vectors**
     * `assert index.is_trained` is checked before search
 * To justify IVF settings, the pipeline logs:
-  * **recall@k vs. nprobe** on the validation set
+  * **Hit@k vs. nprobe** on the validation set
   * **nprobe** and **nlist** per run in **W&B**
 * Threading controls are set in `setup.sh` with:
   * `OMP_NUM_THREADS`
@@ -993,7 +993,7 @@ When integrated, the full logger tracks:
 ## Datasets
 | Dataset | Size | License | Role | Status |
 |---------|------|---------|------|--------|
-| CourtListener federal appellate subset | 1,465,484 opinions | CC BY-ND 4.0 | Retrieval corpus + SQLite citation index | ✅ Complete |
+| CourtListener federal appellate subset | 1,456,611 opinions | CC BY-ND 4.0 | Retrieval corpus + SQLite citation index | ✅ Complete |
 | LePaRD (ACL 2024) | ~4M pairs | Open research | Training (500K–1M cap) + evaluation | ⏳ **Priority 1** |
 ---
 ## Reproducibility
@@ -1073,7 +1073,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | Dense retrieval         | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
 | CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
 | BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
-| Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; recall@k vs nprobe logged; nprobe/nlist logged) for final corpus |
+| Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; Hit@k vs nprobe logged; nprobe/nlist logged) for final corpus |
 | LLM generator           | API-based LLM gpt-5.4-nano                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
@@ -1140,7 +1140,7 @@ uv run python scripts/audit_jsonl_nan.py --strict-encoding --emit-shard-ids
 
 ## Data Audit — `scripts/audit_jsonl_nan.py`
 
-### Verified CLI results on real data (1,465,484 lines, 159 shards, 2026-04)
+### Verified CLI results on real data (1,456,611 lines, 159 shards, 2026-04)
 
 #### Default text output
 ```bash
@@ -1281,7 +1281,7 @@ wandb: Synced 4 W&B file(s), 1 media file(s), 4 artifact file(s)
 
 ### Interpretation of W&B run results
 
-**`data/gate_verdict: CLEAN`** — All 1,465,484 lines across 159 shards passed the data contract. Zero non-finite floats, zero string sentinels, zero malformed JSON, zero encoding errors. The dataset is unconditionally safe to ingest into Stage 3 retrieval, chunking, citation, and NLI pipelines.
+**`data/gate_verdict: CLEAN`** — All 1,456,611 lines across 159 shards passed the data contract. Zero non-finite floats, zero string sentinels, zero malformed JSON, zero encoding errors. The dataset is unconditionally safe to ingest into Stage 3 retrieval, chunking, citation, and NLI pipelines.
 
 **`data/clean_pct: 100`** — The pre-training corpus has been semantically repaired in a prior run (bare NaN tokens in `case_name` were replaced with `null`). This confirms the repair was both complete and idempotent — a second pass changes zero lines.
 
@@ -1331,7 +1331,7 @@ audit_shard() × 159 shards (48 workers, 5.17 shards/s)
 **Date:** 2026-04-03
 **Node:** `gpu-dy-gpu-cr-3`
 **Corpus:** CourtListener Federal Appellate Bulk (`data/raw/cl_federal_appellate_bulk/`)
-**Records:** 1,465,484
+**Records:** 1,456,611
 **Report:** `logs/dataset_probe_report_full.json`
 
 ### Command
@@ -1365,7 +1365,7 @@ Token indices sequence length is longer than the specified maximum sequence leng
 
 | Gate | Description | Severity | Result | RAG Interpretation |
 |------|-------------|----------|--------|--------------------|
-| `schema` | Field presence, types, ranges, `text_length` consistency | Blocking | ✅ PASSED | All 1,465,484 records carry every required field with correct types and internally consistent metadata. No silent coercion risk in downstream vector indexing. |
+| `schema` | Field presence, types, ranges, `text_length` consistency | Blocking | ✅ PASSED | All 1,456,611 records carry every required field with correct types and internally consistent metadata. No silent coercion risk in downstream vector indexing. |
 | `A7` | Text source breakdown (`plain_text`, `html_with_citations`, etc.) | Blocking | ✅ PASSED | Source distribution is dominated by known, parser-compatible formats. No unexpected format drift that would corrupt chunk boundaries or citation extraction. |
 | `A8` | Text length distribution (p5–p95, % below 1,500-char threshold) | Blocking | ✅ PASSED | Fewer than 25% of opinions fall below the provisional minimum length. Long-tail length distribution is healthy — sufficient text density for meaningful embedding. |
 | `A9` | Citation count distribution (zero-citation rate) | Advisory | ✅ PASSED | Fewer than 20% of opinions carry zero citations. High citation density across the corpus is the primary signal that grounded retrieval is possible — directly reducing hallucination risk. |
@@ -1398,7 +1398,7 @@ Two surgical repair passes were applied before this run to eliminate the only tw
 
 ### Verdict
 
-> **The full 1,465,484-record CourtListener Federal Appellate corpus is schema-clean, semantically sound, and model-compatible. All blocking and advisory gates passed at full population scale. The corpus is cleared for Stage 3: citation-aware chunking, BAAI/bge-m3 embedding, FAISS index construction, and hallucination-reduction RAG experiments.**
+> **The full 1,456,611-record CourtListener Federal Appellate corpus is schema-clean, semantically sound, and model-compatible. All blocking and advisory gates passed at full population scale. The corpus is cleared for Stage 3: citation-aware chunking, BAAI/bge-m3 embedding, FAISS index construction, and hallucination-reduction RAG experiments.**
 
 ---
 
@@ -1503,7 +1503,7 @@ The 500K cap on LePaRD ingestion was a conservative compute hedge made at projec
 ### Problems with Keeping 500K
 
 **1. Corpus asymmetry.**
-The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* — they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Recall@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
+The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* — they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Hit@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
 
 **2. Retrieval evaluation validity.**
 LePaRD contains 4M+ ground-truth retrieval pairs. At 500K, the project uses approximately 12% of the available evaluation signal. For a comparative study of five architecture classes, more ground-truth pairs directly produce more statistically reliable MRR and NDCG@10 estimates — especially for the weaker baselines (TF-IDF, CNN) where score variance is high and confidence intervals are wide.
@@ -1518,7 +1518,7 @@ With L4 compute available and no resource constraints, the project adopts the fo
 | Split | Rows | Purpose |
 |---|---|---|
 | LePaRD train | ~4M | Encoder fine-tuning (CNN, BiLSTM, Legal-BERT) |
-| LePaRD test (held-out) | ~1M | Retrieval evaluation (Recall@k, NDCG@10, MRR) |
+| LePaRD test (held-out) | ~1M | Retrieval evaluation (Hit@k, NDCG@10, MRR) |
 | CourtListener federal appellate | ~1.4M | Candidate opinion corpus for retrieval |
 
 `config/lepard.yaml` is updated accordingly:
@@ -1535,7 +1535,7 @@ output_file: lepard_train_{cap}_rev0194f95.jsonl
 "We scope experiments to ~500K for final evaluation, downloaded via CourtListener's paginated API."
 
 **Revised:**
-"We use the full LePaRD training split (~4M pairs) for retriever fine-tuning and a 1M-pair held-out test set for evaluation, consistent with our 1.4M CourtListener opinion corpus and the available L4 compute budget. This eliminates corpus asymmetry between the retrieval candidate space and the ground-truth evaluation signal, maximizes statistical power for Recall@k and NDCG@10 comparisons across five architecture classes, and ensures CNN, BiLSTM, and Transformer encoders are trained to capacity on available hardware."
+"We use the full LePaRD training split (~4M pairs) for retriever fine-tuning and a 1M-pair held-out test set for evaluation, consistent with our 1.4M CourtListener opinion corpus and the available L4 compute budget. This eliminates corpus asymmetry between the retrieval candidate space and the ground-truth evaluation signal, maximizes statistical power for Hit@k and NDCG@10 comparisons across five architecture classes, and ensures CNN, BiLSTM, and Transformer encoders are trained to capacity on available hardware."
 
 ---
 
@@ -1568,11 +1568,11 @@ scripts/audit_jsonl_nan.py            ← Stage 2: Data Quality Gate
 
 ### Why LePaRD and Why 4M Rows
 
-LePaRD (Legal Passage Retrieval Dataset, Mahari et al., ACL 2024) contains 4M+ ground-truth `(legal argument context, cited precedent passage)` pairs extracted from actual U.S. federal judicial opinions. It is the **evaluation backbone** of this project: for each legal argument, we know exactly which precedent passage a federal judge cited, enabling automated measurement of retrieval quality (Recall@k, NDCG@10, MRR) without human annotation.
+LePaRD (Legal Passage Retrieval Dataset, Mahari et al., ACL 2024) contains 4M+ ground-truth `(legal argument context, cited precedent passage)` pairs extracted from actual U.S. federal judicial opinions. It is the **evaluation backbone** of this project: for each legal argument, we know exactly which precedent passage a federal judge cited, enabling automated measurement of retrieval quality (Hit@k, NDCG@10, MRR) without human annotation.
 
 The cap was revised from 500K → 4M rows for three reasons:
 
-1. **Corpus asymmetry**: evaluating against 1.4M CourtListener opinions with only 500K ground-truth pairs systematically underestimates Recall@k.
+1. **Corpus asymmetry**: evaluating against 1.4M CourtListener opinions with only 500K ground-truth pairs systematically underestimates Hit@k.
 2. **Statistical power**: 4M pairs produce reliable NDCG@10 estimates across all five architecture classes (TF-IDF, CNN, BiLSTM, Legal-BERT, KG-augmented).
 3. **Fine-tuning capacity**: CNN and BiLSTM encoders are underfit at 500K; the Google Colab Pro A100 High RAM runtime / Harvard OnDemand GPU Cluster L4/A10G  can saturate the full 4M training split.
 
@@ -1726,7 +1726,7 @@ LePaRD <-> CourtListener compatibility analysis
 ============================================================
 [1] ID-level overlap
   LePaRD unique ids:       512
-  CL unique ids:           1,465,484
+  CL unique ids:           1,456,611
   Overlap:                 70 (13.7% of LePaRD)
   LePaRD id range max:     12,419,282
   CL id range max:         11,233,407
@@ -1765,7 +1765,7 @@ This section answers: *do the two datasets even share the same identifier space?
 
 - **`LePaRD unique ids: 512`** — The 1,000-row LePaRD sample contains exactly 512 distinct opinion identifiers when source and destination columns are flattened together. The fact that 1,000 rows collapse to 512 unique ids already signals heavy duplication: the same opinions appear repeatedly as either citing or cited documents (this is expected in legal corpora — landmark precedents are cited many times).
 
-- **`CL unique ids: 1,465,484`** — The full CourtListener federal-appellate corpus shipped with this project contains 1.46M opinion ids. This is the "candidate pool" any retriever trained on LePaRD will eventually have to search.
+- **`CL unique ids: 1,456,611`** — The full CourtListener federal-appellate corpus shipped with this project contains 1.46M opinion ids. This is the "candidate pool" any retriever trained on LePaRD will eventually have to search.
 
 - **`Overlap: 70 (13.7% of LePaRD)`** — Of the 512 LePaRD ids, only 70 are present in the local CourtListener corpus. This is the **schema-compatibility signal**: the fact that *any* overlap exists at the integer level confirms LePaRD's `source_id`/`dest_id` columns and CourtListener's `id` column are drawn from the same id space (CourtListener opinion ids), not unrelated counters that happen to be integers. Without this confirmation, the entire compatibility analysis would be meaningless.
 
@@ -1863,7 +1863,7 @@ print(f"Usable gold pairs: {report.pair_overlap.both_in_cl} "
 | `scripts/demo_lepard_cl_compat.py` | TF demo runner with narrative + interpretation; reproduces the cross-machine investigation in <1 second |
 | `tests/test_lepard_cl_compat.py` | 56 tests: loaders, pure analysis, Hypothesis property invariants, CLI gate, deterministic ordering, real-fixture regression |
 | `tests/fixtures/lepard_sample_1k.jsonl` | 1,000 LePaRD rows (1.4 MB) — committed |
-| `tests/fixtures/cl_ids.txt.gz` | 1,465,484 CL opinion ids (3.1 MB gzipped) — committed |
+| `tests/fixtures/cl_ids.txt.gz` | 1,456,611 CL opinion ids (3.1 MB gzipped) — committed |
 | `tests/fixtures/cl_matched_courts.json` | 70 matched id → court_id entries (1.4 KB) — committed |
 
 ---
@@ -1892,7 +1892,7 @@ This project uses two distinct reproducibility strategies for its two core datas
 | **Source** | CourtListener public S3 | Free Law Project bulk opinion data |
 | **Local path** | `data/raw/cl_federal_appellate_bulk/` | 43 GB, 159 shards |
 | **Shards** | 159 × `shard_NNNN.jsonl` | 10,000 records/shard (last shard partial) |
-| **Opinions** | 1,465,484 extracted | From 10,682,555 raw records scanned |
+| **Opinions** | 1,456,611 extracted | From 10,682,555 raw records scanned |
 | **Filter** | Federal appellate only | ca1–ca11, cadc, cafc |
 | **DVC tracked** |  **No** | Intentional — do not expect a `cl_federal_appellate_bulk.dvc` file |
 | **S3 remote** |  Not in project S3 bucket | Stays in CourtListener's public S3 |
@@ -1934,6 +1934,46 @@ Cache and remote 's3-dvc' are in sync.
 ```
 
 Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored here by design.
+
+---
+## Modules from src/ and scripts/ are being used in the MS2 submission notebook cells
+
+**Used in notebook (15 src/ modules + 2 scripts):**
+
+| Cell | Direct | Transitive (via pipeline) |
+|---|---|---|
+| 3 | repro, environment, timer | — |
+| 4 | config, s3_discovery, bulk_download | — |
+| 5 | config, pipeline, exceptions, timer | manifest, s3_discovery, bulk_download, filter_chain, extract, validation, schemas |
+| 6 | dataset_probe, timer | — |
+| 7 | scripts/ingest_lepard.py | — |
+| 8 | lepard_cl_compat | — |
+| 9 | scripts/audit_jsonl_nan.py | — |
+
+**Not called in notebook (scope mismatch — not data pipeline):**
+
+| Module | Belongs to stage |
+|---|---|
+| `src/dataset_config.py` | Stage 5 (training) — LePaRD loader config |
+| `src/dataset_loader.py` | Stage 5 (training) — HF dataset loader |
+| `src/row_validator.py` | Stage 5 — used by dataset_loader |
+| `src/row_normalizer.py` | Stage 5 — used by dataset_loader |
+| `src/lightning_datamodule.py` | Stage 5 — PyTorch DataModule |
+| `src/model_loader.py` | Stage 5/6 — BGE-M3 loader |
+| `src/split.py` | Stage 5 — train/val/test splits |
+| `src/hf_export.py` | Stage 7 — HF Hub publish |
+| `src/wandb_logger.py` | Stage 7 — W&B telemetry |
+| `src/drift_check.py` | setup.sh tier 4/5 — not notebook |
+| `src/manifest_collector.py` | setup.sh manifest — not notebook |
+| `scripts/ci_audit_report.py` | CI only |
+| `scripts/ci_write_env.py` | CI only |
+| `scripts/migrate_gate_instantiation.py` | one-shot migration |
+| `scripts/patch_run_probe_docstring.py` | one-shot patch |
+| `scripts/repair_text_length.py` | one-shot repair |
+| `scripts/update_version_pins.py` | one-shot maintenance |
+| `scripts/audit_jsonl_nan.py` | ✓ used (Cell 9) |
+
+**Verdict:** The notebook covers the **complete data pipeline** (Stages 1–3 + readiness gates) as defined in the README. Every module relevant to data acquisition, audit, probing, and compatibility checks is called. Unused modules belong to Stage 5 (training), Stage 6 (evaluation), Stage 7 (publishing), or are CI/setup.sh/one-shot maintenance helpers — per README these are "not started" and correctly excluded from the data-pipeline notebook.
 
 ---
 
