@@ -33,7 +33,6 @@ Design notes
   private helper; :func:`configure` is a thin orchestrator so the
   individual stages can be unit-tested in isolation.
 """
-
 from __future__ import annotations
 
 import logging
