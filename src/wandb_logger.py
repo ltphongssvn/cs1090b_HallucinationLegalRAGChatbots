@@ -207,7 +207,6 @@ def log_quality_signals(
         Mapping of signal name → fire count across the sample.
     """
     import wandb
-    from src.dataset_probe import ModelQualitySignals
 
     signal_counts: dict[str, int] = {}
     for row in rows[:sample_size]:

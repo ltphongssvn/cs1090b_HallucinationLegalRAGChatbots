@@ -55,6 +55,7 @@ dev = [
     "vulture>=2.15",
     "dvc>=3.67.0",
     "dvc-s3>=3.3.0",
+    "great-expectations>=1.16.0",
 ]
 [tool.pytest.ini_options]
 pythonpath = ["."]
