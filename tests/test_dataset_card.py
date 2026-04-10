@@ -6,8 +6,8 @@ pytestmark = pytest.mark.unit
 
 from src.dataset_card import (
     DatasetCardError,
-    build_card_yaml_frontmatter,
     build_card_markdown,
+    build_card_yaml_frontmatter,
     write_dataset_card,
 )
 
