@@ -1,21 +1,63 @@
 # src/manifest.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/src/manifest.py
-# SRP: Write, read, and validate manifest + checksums + run metadata.
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/manifest.py
+"""Run manifest writer, reader, and validator for the ingest pipeline.
 
-import hashlib  # used: SHA256 checksums
-import json  # used: manifest JSON
-import subprocess  # used: git revision
-import sys  # used: python version
-from datetime import datetime, timezone  # used: timestamp
-from pathlib import Path  # used: file paths
+Every extraction run produces a single ``manifest.json`` under
+:attr:`PipelineConfig.shard_dir` that captures everything needed to
+audit or reproduce the run:
+
+* **Run metadata**: UTC timestamp, Python version, Git revision, and a
+  projection of the :class:`PipelineConfig` fields that affect output.
+* **Source provenance**: filenames and SHA-256 checksums of the four
+  input CSVs.
+* **Output provenance**: filenames and SHA-256 checksums of every
+  emitted shard.
+* **Filter chain sizes**: court/docket/cluster counts after each stage.
+* **Extraction statistics**: totals, per-source counts, distributions,
+  skip reasons, text-length percentiles, schema sample.
+
+Design notes
+------------
+* **Checksums cover both ends**: source files *and* output shards are
+  hashed, so a later run can prove byte-for-byte identity of both its
+  inputs and its outputs.
+* **Schema version**: the top-level ``"version"`` field is bumped
+  whenever the manifest layout changes, letting downstream tools
+  detect incompatible formats.
+* **No side effects beyond the manifest file**: this module never
+  touches shard files or source CSVs — only reads their bytes for
+  hashing.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Set, Union
 
+#: Block size for streaming SHA-256 hashing. 8 KiB balances syscall
+#: overhead against per-call buffer allocation.
 CHECKSUM_BUFFER_SIZE: int = 8192
 
 
 def file_checksum(filepath: Union[str, Path], buffer_size: int = CHECKSUM_BUFFER_SIZE) -> str:
-    """Compute SHA256 checksum of a file."""
+    """Return the hex SHA-256 of ``filepath``, streamed in fixed-size blocks.
+
+    Streaming avoids loading multi-GB bulk CSVs and shard files into
+    memory. The default block size matches :data:`CHECKSUM_BUFFER_SIZE`.
+
+    Args:
+        filepath: File to hash. Must be readable.
+        buffer_size: Read-block size in bytes.
+
+    Returns:
+        64-character lowercase hex digest.
+    """
     sha = hashlib.sha256()
     with open(filepath, "rb") as fh:
         for chunk in iter(lambda: fh.read(buffer_size), b""):
@@ -24,7 +66,13 @@ def file_checksum(filepath: Union[str, Path], buffer_size: int = CHECKSUM_BUFFER
 
 
 def _get_git_revision() -> str:
-    """Get current git commit hash, or 'unknown' if not in a repo."""
+    """Return the current HEAD commit hash, or ``"unknown"``.
+
+    Falls back to ``"unknown"`` when git is not installed, the
+    invocation times out, or the working directory is not a git repo —
+    the manifest is still useful without this field, so a failure here
+    must not abort the write.
+    """
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -38,7 +86,14 @@ def _get_git_revision() -> str:
 
 
 def _get_run_metadata(config: Any) -> Dict[str, Any]:
-    """Collect reproducibility metadata for this pipeline run."""
+    """Build the ``run_metadata`` block embedded in every manifest.
+
+    Captures the fields that affect reproducibility: timestamp, Python
+    version, Git revision, and the :class:`PipelineConfig` knobs whose
+    values change pipeline output. Fields that only affect performance
+    (e.g. chunk sizes) are deliberately excluded to keep diffs focused
+    on behaviourally-meaningful changes.
+    """
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "python_version": sys.version.split()[0],
@@ -66,7 +121,31 @@ def write_manifest(
     shard_size: int,
     config: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Write manifest with checksums, stats, and run metadata."""
+    """Assemble and write the run manifest as indented JSON.
+
+    Hashes every ``shard_*.jsonl`` under ``shard_dir`` and every file
+    in ``local_paths`` that exists, builds the run-metadata block, and
+    merges in the extraction statistics. The manifest layout is
+    version-stamped (``"version": 2``) so downstream tools can detect
+    format drift.
+
+    Args:
+        manifest_path: Destination JSON file path.
+        shard_dir: Directory containing the emitted ``shard_*.jsonl``
+            files to hash.
+        extraction_stats: Statistics dict returned by
+            :func:`src.extract.extract_opinions_to_shards`.
+        local_paths: Mapping of corpus label → source CSV path for the
+            four input files.
+        fed_court_ids: Set of federal appellate court slugs used.
+        docket_count: Federal-appellate docket count after filtering.
+        cluster_count: Federal-appellate cluster count after filtering.
+        shard_size: Rows-per-shard used by the writer.
+        config: Pipeline configuration; defaults to :class:`PipelineConfig`.
+
+    Returns:
+        The fully-populated manifest dict (also written to disk).
+    """
     from src.config import PipelineConfig
 
     if config is None:
@@ -115,7 +194,12 @@ def write_manifest(
 
 
 def read_manifest(manifest_path: Union[str, Path]) -> Dict[str, Any]:
-    """Read manifest JSON. Returns empty dict if not found."""
+    """Load a previously-written manifest, or an empty dict if absent.
+
+    Returning an empty dict rather than raising lets callers probe for
+    a manifest without try/except — a missing manifest is a normal
+    "first run" condition, not an error.
+    """
     manifest_file = Path(manifest_path)
     if manifest_file.exists():
         return json.loads(manifest_file.read_text())  # type: ignore[no-any-return]
@@ -123,7 +207,22 @@ def read_manifest(manifest_path: Union[str, Path]) -> Dict[str, Any]:
 
 
 def validate_manifest_shards(manifest_data: Dict[str, Any], shard_dir: Union[str, Path]) -> bool:
-    """Verify all shards exist and checksums match."""
+    """Verify every shard listed in the manifest exists with the recorded hash.
+
+    Returns ``False`` on the first discrepancy rather than reporting
+    all mismatches — the caller's expected action on any single
+    failure is the same (rerun extraction), so early exit is the
+    right economy.
+
+    Args:
+        manifest_data: Manifest dict returned by :func:`read_manifest`
+            or :func:`write_manifest`.
+        shard_dir: Directory containing the shards to verify.
+
+    Returns:
+        ``True`` iff the manifest has a ``checksum`` block and every
+        listed shard is present on disk with a matching SHA-256.
+    """
     if "checksum" not in manifest_data:
         return False
     shard_dir_path = Path(shard_dir)

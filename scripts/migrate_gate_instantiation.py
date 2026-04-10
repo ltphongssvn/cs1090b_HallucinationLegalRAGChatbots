@@ -78,7 +78,9 @@ def migrate(file_path: Path, dry_run: bool = False) -> None:
 
     # Idempotency: exit cleanly if migration already applied.
     if _is_already_applied(original):
-        print(f"[migrate] Already applied — no {PATTERN.pattern!r} occurrences found in {file_path.name}. Nothing to do.")
+        print(
+            f"[migrate] Already applied — no {PATTERN.pattern!r} occurrences found in {file_path.name}. Nothing to do."
+        )
         return
 
     # Verify original is syntactically valid before touching it.

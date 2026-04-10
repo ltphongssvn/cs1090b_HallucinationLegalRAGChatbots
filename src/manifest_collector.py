@@ -1,4 +1,36 @@
 # src/manifest_collector.py
+# Project: HallucinationLegalRAGChatbots
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/manifest_collector.py
+"""Environment-manifest collector for the setup.sh bootstrap pipeline.
+
+This module is invoked as a subprocess by ``scripts/manifest.sh`` at the
+end of every ``bash setup.sh`` run. It gathers a comprehensive snapshot
+of the Python, GPU, CUDA, library, and hardware state and prints a
+single JSON document to stdout, which the shell wrapper redirects to
+``logs/environment_manifest.json``.
+
+The manifest is the authoritative record of *what ran where* for a
+given experiment. Alongside the run manifest written by
+:mod:`src.manifest` (which captures corpus identity), this file
+captures platform identity: commit SHAs, uv.lock hash, target vs.
+detected hardware, torch/CUDA/cuDNN versions, installed package
+versions, a full ``pip freeze`` snapshot, and the live reproducibility
+flags after :func:`src.repro.configure` has run.
+
+stdout / stderr contract
+------------------------
+* **stdout**: a single line of JSON and nothing else. The shell caller
+  parses it directly; any non-JSON output would corrupt the file.
+* **stderr**: human-readable messages from :func:`src.repro.configure`
+  and any informational prints. Everything that is not the JSON result
+  goes here.
+
+To enforce this, :func:`collect` wraps the ``configure()`` call in
+:func:`contextlib.redirect_stdout` → :data:`sys.stderr`.
+"""
+
+from __future__ import annotations
+
 import argparse
 import contextlib
 import importlib.metadata as meta
@@ -12,6 +44,12 @@ from datetime import datetime
 
 
 def get_nvcc_version() -> str:
+    """Return the ``nvcc --version`` release line, or a sentinel on failure.
+
+    Returns ``"nvcc not found"`` if the toolkit is not installed (common
+    on inference-only nodes) and ``"unknown"`` when the expected
+    ``release`` line is absent from the output.
+    """
     try:
         r = subprocess.run(["nvcc", "--version"], capture_output=True, text=True)
         for line in r.stdout.splitlines():
@@ -23,6 +61,11 @@ def get_nvcc_version() -> str:
 
 
 def get_driver_cuda() -> str:
+    """Return the CUDA version the NVIDIA driver reports via ``nvidia-smi``.
+
+    This is the *driver-side* CUDA (the forward-compat maximum), which
+    can differ from the torch-runtime CUDA (cu117 in our lockfile).
+    """
     try:
         r = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
         for line in r.stdout.splitlines():
@@ -34,6 +77,7 @@ def get_driver_cuda() -> str:
 
 
 def get_driver_version() -> str:
+    """Return the NVIDIA kernel driver version string."""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
@@ -46,6 +90,12 @@ def get_driver_version() -> str:
 
 
 def get_faiss_version() -> str:
+    """Return the installed ``faiss`` version string or a status sentinel.
+
+    The ``faiss`` wheel does not always publish ``__version__``, so a
+    successful import without the attribute is reported distinctly
+    from "not installed".
+    """
     try:
         import faiss  # type: ignore[import]
 
@@ -55,6 +105,15 @@ def get_faiss_version() -> str:
 
 
 def get_installed_versions(pkgs: list[str]) -> dict[str, str]:
+    """Look up each distribution in ``pkgs`` via :mod:`importlib.metadata`.
+
+    Args:
+        pkgs: PyPI distribution names (not import names).
+
+    Returns:
+        Mapping of each requested name to either its installed version
+        or the literal string ``"not installed"``.
+    """
     out: dict[str, str] = {}
     for p in pkgs:
         try:
@@ -65,6 +124,12 @@ def get_installed_versions(pkgs: list[str]) -> dict[str, str]:
 
 
 def parse_freeze(freeze_str: str) -> dict[str, str]:
+    """Parse a ``pip freeze``-style string into a ``{pkg: version}`` dict.
+
+    Lines that do not contain ``==`` (editable installs, VCS URLs) are
+    preserved with a ``"unknown-format"`` sentinel so they still appear
+    in the manifest rather than being silently dropped.
+    """
     result: dict[str, str] = {}
     for line in freeze_str.strip().splitlines():
         line = line.strip()
@@ -79,6 +144,13 @@ def parse_freeze(freeze_str: str) -> dict[str, str]:
 
 
 def get_cpu_info() -> dict[str, object]:
+    """Return a best-effort CPU/RAM summary from ``/proc`` and stdlib.
+
+    Each probe is wrapped in a broad try/except because ``/proc`` is
+    Linux-specific and missing/malformed files must not abort the
+    manifest. Fields for which no value could be determined are
+    returned as the literal string ``"unknown"``.
+    """
     info: dict[str, object] = {
         "physical_cores": "unknown",
         "logical_cores": "unknown",
@@ -114,6 +186,12 @@ def get_cpu_info() -> dict[str, object]:
 
 
 def get_gpu_list() -> list[dict[str, object]]:
+    """Return per-device GPU info via the torch CUDA API.
+
+    Returns:
+        A list of dicts with ``index``, ``name``, ``vram_gb``, and
+        ``compute_capability``. Empty when CUDA is unavailable.
+    """
     import torch  # type: ignore[import]
 
     gpus: list[dict[str, object]] = []
@@ -132,6 +210,23 @@ def get_gpu_list() -> list[dict[str, object]]:
 
 
 def collect(args: argparse.Namespace) -> dict[str, object]:
+    """Assemble the full environment manifest dict.
+
+    Runs :func:`src.repro.configure` first (with stdout redirected to
+    stderr so its human-readable output does not corrupt the JSON
+    stdout contract), then pulls every platform/library field the
+    manifest tracks. Import failures on optional modules are tolerated
+    so a broken ``src/repro.py`` cannot block manifest emission.
+
+    Args:
+        args: Parsed CLI namespace from :func:`main`, carrying the
+            scalar fields the shell caller knows (git SHA, target
+            hardware values, detected hardware values, etc.).
+
+    Returns:
+        A JSON-serialisable dict suitable for direct
+        :func:`json.dumps` output.
+    """
     import spacy  # type: ignore[import]
     import torch  # type: ignore[import]
     import transformers  # type: ignore[import]
@@ -247,6 +342,14 @@ def collect(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main() -> None:
+    """CLI entry point: parse shell-supplied args, collect, print JSON.
+
+    Every scalar the shell wrapper already knows (git SHA, target
+    hardware constants, detected hardware values) is passed as a
+    required flag rather than re-probed here. This keeps the Python
+    side free of duplicate detection logic and preserves the
+    single-source-of-truth in ``scripts/lib.sh``.
+    """
     parser = argparse.ArgumentParser(description="Collect environment manifest and print JSON.")
     parser.add_argument("--git-sha", required=True)
     parser.add_argument("--git-branch", required=True)

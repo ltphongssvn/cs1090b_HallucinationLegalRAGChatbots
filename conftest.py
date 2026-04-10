@@ -31,10 +31,10 @@ def pytest_configure(config):
     """
     try:
         from src.repro import configure
+
         repro_cfg = configure(verbose=False)
         logger.debug(
-            "conftest: reproducibility configured — "
-            "PYTHONHASHSEED=%s RANDOM_SEED=%s deterministic_algorithms=%s",
+            "conftest: reproducibility configured — PYTHONHASHSEED=%s RANDOM_SEED=%s deterministic_algorithms=%s",
             repro_cfg.get("PYTHONHASHSEED"),
             repro_cfg.get("random_seed"),
             repro_cfg.get("deterministic_algorithms"),

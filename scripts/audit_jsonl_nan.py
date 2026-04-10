@@ -101,15 +101,11 @@ from tqdm import tqdm
 # Module-level constants (immutable — safe to import directly in tests)
 # ---------------------------------------------------------------------------
 
-_STRING_NAN_VALUES: frozenset[str] = frozenset(
-    {"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"}
-)
+_STRING_NAN_VALUES: frozenset[str] = frozenset({"NaN", "nan", "Infinity", "-Infinity", "Inf", "-Inf"})
 
 # Default advisory fields — single source of truth shared by AuditSettings
 # and gate_verdict(). NaN in these fields is REPAIRABLE, not HARD_FAILURE.
-_DEFAULT_ADVISORY_FIELDS: frozenset[str] = frozenset(
-    {"case_name", "raw_text", "cleaning_flags"}
-)
+_DEFAULT_ADVISORY_FIELDS: frozenset[str] = frozenset({"case_name", "raw_text", "cleaning_flags"})
 
 # Retained for regex contract tests only — NOT used in repair path.
 # Repair uses semantic parse->walk->reserialize because this regex is not
@@ -137,11 +133,7 @@ def derive_advisory_from_schema(schema_cls: type) -> frozenset[str]:
     Required fields with NaN become HARD_FAILURE under this policy.
     """
     hints = get_type_hints(schema_cls)
-    return frozenset(
-        field
-        for field, typ in hints.items()
-        if get_origin(typ) is Union and type(None) in get_args(typ)
-    )
+    return frozenset(field for field, typ in hints.items() if get_origin(typ) is Union and type(None) in get_args(typ))
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +220,7 @@ class DatasetHealth:
             nan_shards=self.nan_shards + (1 if other.nan_lines else 0),
             total_shards=self.total_shards,
             nan_fields=merged,
-            contaminated_shards=sorted(
-                self.contaminated_shards
-                + ([other.shard] if other.nan_lines else [])
-            ),
+            contaminated_shards=sorted(self.contaminated_shards + ([other.shard] if other.nan_lines else [])),
             nonfinite_lines=self.nonfinite_lines + other.nonfinite_lines,
             string_sentinel_lines=self.string_sentinel_lines + other.string_sentinel_lines,
             decode_error_lines=self.decode_error_lines + other.decode_error_lines,
@@ -239,11 +228,7 @@ class DatasetHealth:
 
     @property
     def clean_pct(self) -> float:
-        return (
-            100.0 * (self.total_lines - self.nan_lines) / self.total_lines
-            if self.total_lines
-            else 0.0
-        )
+        return 100.0 * (self.total_lines - self.nan_lines) / self.total_lines if self.total_lines else 0.0
 
     def gate_verdict(self, advisory: frozenset[str] | None = None) -> str:
         """
@@ -481,9 +466,7 @@ def repair_shard(shard_path: Path, dry_run: bool = False) -> tuple[int, int, int
 
     tmp = shard_path.with_suffix(".jsonl.tmp")
     try:
-        with shard_path.open(encoding="utf-8", errors="replace") as fh, tmp.open(
-            "w", encoding="utf-8"
-        ) as out:
+        with shard_path.open(encoding="utf-8", errors="replace") as fh, tmp.open("w", encoding="utf-8") as out:
             for raw_line in fh:
                 total += 1
                 try:
@@ -574,9 +557,7 @@ def repair_dataset(
         tasks = [(s, dry_run) for s in shards]
         with ProcessPoolExecutor(max_workers=ncpus) as pool:
             futures = {pool.submit(_repair_shard_task, t): t[0] for t in tasks}
-            for future in tqdm(
-                as_completed(futures), total=len(futures), unit="shard", desc="repairing"
-            ):
+            for future in tqdm(as_completed(futures), total=len(futures), unit="shard", desc="repairing"):
                 _, repaired, _, _ = future.result()
                 total_repaired += repaired
     else:
@@ -718,14 +699,13 @@ def log_health_to_wandb(
         return
 
     try:
-        git_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         git_sha = "unknown"
 
     try:
         import polars as pl
+
         polars_version = pl.__version__
     except Exception:
         polars_version = "unknown"
@@ -760,6 +740,7 @@ def log_health_to_wandb(
 
         # DatasetHealth artifact for lineage
         import tempfile
+
         artifact = wandb.Artifact("dataset-health", type="dataset")
         tmp = Path(tempfile.mktemp(suffix=".json"))
         tmp.write_text(
@@ -802,22 +783,12 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--input-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk")
-    )
+    parser.add_argument("--input-dir", type=Path, default=Path("data/raw/cl_federal_appellate_bulk"))
     parser.add_argument("--json", action="store_true", help="Emit JSON summary.")
-    parser.add_argument(
-        "--emit-shard-ids", action="store_true", help="Print contaminated shard names."
-    )
-    parser.add_argument(
-        "--csv", type=Path, default=None, help="Write per-field NaN counts to CSV."
-    )
-    parser.add_argument(
-        "--fix", action="store_true", help="Repair NaN->null in-place with .bak backup."
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="With --fix: preview without writing."
-    )
+    parser.add_argument("--emit-shard-ids", action="store_true", help="Print contaminated shard names.")
+    parser.add_argument("--csv", type=Path, default=None, help="Write per-field NaN counts to CSV.")
+    parser.add_argument("--fix", action="store_true", help="Repair NaN->null in-place with .bak backup.")
+    parser.add_argument("--dry-run", action="store_true", help="With --fix: preview without writing.")
     parser.add_argument(
         "--validate",
         action="store_true",
@@ -841,15 +812,9 @@ def main() -> None:
             "Stricter 2026 policy: required fields with NaN become HARD_FAILURE."
         ),
     )
-    parser.add_argument(
-        "--workers", type=int, default=None, help="Worker processes (default: cpu_count)."
-    )
-    parser.add_argument(
-        "--wandb", action="store_true", help="Log health metrics to Weights & Biases."
-    )
-    parser.add_argument(
-        "--config", type=Path, default=None, help="YAML config for advisory_fields etc."
-    )
+    parser.add_argument("--workers", type=int, default=None, help="Worker processes (default: cpu_count).")
+    parser.add_argument("--wandb", action="store_true", help="Log health metrics to Weights & Biases.")
+    parser.add_argument("--config", type=Path, default=None, help="YAML config for advisory_fields etc.")
     parser.add_argument(
         "--telemetry-level",
         choices=["summary", "detailed", "debug"],

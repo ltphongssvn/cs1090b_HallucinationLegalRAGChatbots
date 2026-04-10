@@ -1,6 +1,23 @@
 # scripts/ci_write_env.py
-# Write .env and ensure src/ exists for CI runs (no cluster setup.sh needed).
-import os
+# Project: HallucinationLegalRAGChatbots
+# Path: cs1090b_HallucinationLegalRAGChatbots/scripts/ci_write_env.py
+"""Minimal .env + directory bootstrap for CI runs.
+
+CI containers do not run the full ``bash setup.sh`` — they do not have
+GPUs, cluster schedulers, or the bandwidth budget for a fresh venv
+build. But they still need the four reproducibility env vars that
+:mod:`src.repro` expects in ``.env``, plus empty ``src/`` and ``logs/``
+directories so imports and log writes succeed.
+
+This script is the CI-only shortcut: it writes a minimal ``.env`` with
+``PYTHONHASHSEED``, ``CUBLAS_WORKSPACE_CONFIG``,
+``TOKENIZERS_PARALLELISM``, and ``RANDOM_SEED`` (all matching the
+values the full setup.sh would produce), then ensures ``src/`` and
+``logs/`` exist. Idempotent — safe to re-run.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent

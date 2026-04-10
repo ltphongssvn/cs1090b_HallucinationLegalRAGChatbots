@@ -1,7 +1,15 @@
 # src/timer.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/src/timer.py
-# SRP: Cell execution timer for notebook visibility.
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/timer.py
+"""Wall-clock timer context manager for notebook cells and CLI blocks.
+
+Provides a single zero-dependency :func:`cell_timer` helper that logs
+or prints the elapsed time when its ``with`` block exits, with units
+(s/m/h) scaled to the magnitude so short blocks don't report
+``"0h 0m 1.2s"`` and long training loops don't report raw seconds.
+"""
+
+from __future__ import annotations
 
 import time
 from contextlib import contextmanager
@@ -14,17 +22,28 @@ def cell_timer(
     logger: Optional[Any] = None,
     _override_elapsed: Optional[float] = None,
 ) -> Generator[None, None, None]:
-    """Context manager that prints elapsed time when a notebook cell completes.
+    """Time the enclosed block and emit a human-scaled duration on exit.
 
-    Usage in notebook:
-        from src.timer import cell_timer
-        with cell_timer("Cell 1", logger=logger):
-            # ... cell code ...
+    The ``finally`` clause runs even on exception, so a cell that
+    raises still reports how long it ran before failing. Output
+    format adapts to magnitude:
+
+    * ``< 1 minute``  → ``"X.Ys"``
+    * ``< 1 hour``    → ``"Xm Y.Ys"``
+    * ``>= 1 hour``   → ``"Xh Ym Z.Zs"``
+
+    Example:
+        >>> from src.timer import cell_timer
+        >>> with cell_timer("Cell 1", logger=logger):
+        ...     # ... cell code ...
 
     Args:
-        label: Display name for the cell.
-        logger: If provided, logs instead of printing.
-        _override_elapsed: Test-only override for formatting tests.
+        label: Display name shown in the output line.
+        logger: Optional logger. When ``None``, the message is printed
+            to stdout; otherwise it is emitted at INFO level.
+        _override_elapsed: Test-only hook to inject a fixed elapsed
+            value so the format branches can be unit-tested without
+            actually sleeping.
     """
     start = time.time()
     try:

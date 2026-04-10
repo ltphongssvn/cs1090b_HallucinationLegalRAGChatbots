@@ -1,8 +1,59 @@
 # src/extract.py
 # Project: HallucinationLegalRAGChatbots
-# Path: cs1090b_hw2/src/extract.py
-# SRP: Stream opinions CSV → filter + enrich + normalize + shard + diagnose.
-# Pure functions extracted for testability. Supports checkpoint/resume.
+# Path: cs1090b_HallucinationLegalRAGChatbots/src/extract.py
+"""Streaming CourtListener opinions extractor with sharded output and resume.
+
+This module is the workhorse of the ingest pipeline. It consumes the
+raw CourtListener opinions CSV (optionally bz2-compressed), joins each
+row against pre-built cluster/docket/court metadata maps, normalises
+the opinion text, and writes the results as numbered JSONL or Parquet
+shards under :attr:`PipelineConfig.shard_dir`.
+
+Architecture
+------------
+The module is organised as a thin orchestration function
+(:func:`extract_opinions_to_shards`) over a set of **pure** helpers:
+
+* :class:`ShardWriter` — buffered shard accumulator with JSONL/Parquet
+  backends and ``start_index`` support for resume.
+* Text-cleaning functions (:func:`_normalize_text` and friends) —
+  stateless, regex-driven, easy to unit-test.
+* Metric helpers (:func:`_count_citations`, :func:`_citation_density`,
+  :func:`_text_entropy`) — stateless scalar functions used to build the
+  per-record quality features.
+* :func:`build_record` — assembles a :class:`OpinionRecord` from raw
+  inputs and the metadata joins.
+
+The orchestrator itself handles only: checkpoint load/save, CSV
+streaming, per-row filter decisions, statistics aggregation, and
+logging.
+
+Resume semantics
+----------------
+A ``checkpoint.json`` is written every
+:attr:`PipelineConfig.checkpoint_interval` rows and at the end of every
+run. On re-entry the orchestrator skips the first ``scanned`` rows
+(already processed), continues shard numbering at ``num_shards``, and
+adds to the accumulated counters. This makes the extractor safe to kill
+and restart on cluster-timeout boundaries.
+
+Skip reasons
+------------
+Rows can be dropped for four reasons, each counted separately:
+
+* ``bad_cluster_id`` — ``cluster_id`` is not an int (counted under
+  ``skipped_parse``).
+* ``bad_opinion_id`` — ``id`` is not an int, usually a sign of CSV
+  field misalignment (counted under ``skipped_parse``).
+* ``skipped_empty`` — no text field passed the minimum length floor.
+* ``skipped_stub`` — text shrank below the floor *after* normalisation
+  (e.g. only HTML boilerplate).
+
+Skipped rows with parse failures are written to the optional
+quarantine JSONL for later inspection.
+"""
+
+from __future__ import annotations
 
 import bz2
 import csv
@@ -27,7 +78,20 @@ from src.schemas import OpinionRecord
 
 
 class ShardWriter:
-    """Accumulates records, flushes to numbered JSONL or Parquet shard files."""
+    """Buffered writer that emits numbered JSONL or Parquet shards.
+
+    Records are accumulated in an in-memory buffer and flushed whenever
+    the buffer reaches ``shard_size``. The caller must invoke
+    :meth:`flush` once at the end to write any remaining partial shard.
+
+    Shards are numbered with a zero-padded 4-digit index and named
+    ``shard_NNNN.<ext>``. Passing ``start_index`` lets resume runs
+    continue the numbering without clobbering shards from a prior
+    incarnation.
+
+    Attributes:
+        shard_count: Number of shards already flushed (read-only).
+    """
 
     def __init__(
         self,
@@ -37,6 +101,18 @@ class ShardWriter:
         output_format: str = "jsonl",
         start_index: int = 0,
     ) -> None:
+        """Initialise the writer.
+
+        Args:
+            shard_dir: Directory that will contain the shard files.
+                Must already exist; the writer does not create it.
+            shard_size: Number of records per flushed shard.
+            compress: When ``True`` and ``output_format == "jsonl"``,
+                shards are written as ``.jsonl.gz``. Ignored for
+                Parquet.
+            output_format: ``"jsonl"`` (default) or ``"parquet"``.
+            start_index: Initial shard number, used for resume.
+        """
         self._shard_dir = Path(shard_dir)
         self._shard_size = shard_size
         self._compress = compress
@@ -46,20 +122,33 @@ class ShardWriter:
 
     @property
     def shard_count(self) -> int:
+        """Number of shards successfully flushed so far."""
         return self._index
 
     def _shard_path(self, index: int) -> Path:
+        """Return the filesystem path for shard ``index``."""
         if self._output_format == "parquet":
             return self._shard_dir / f"shard_{index:04d}.parquet"
         ext = "jsonl.gz" if self._compress else "jsonl"
         return self._shard_dir / f"shard_{index:04d}.{ext}"
 
     def add(self, record: Any) -> None:
+        """Append a record and auto-flush when the buffer fills.
+
+        Args:
+            record: Either an object with a ``to_dict()`` method
+                (e.g. :class:`OpinionRecord`) or a plain dict.
+        """
         self._buffer.append(record)
         if len(self._buffer) >= self._shard_size:
             self.flush()
 
     def flush(self) -> None:
+        """Write the current buffer as a new shard, then reset.
+
+        A no-op when the buffer is empty, so callers can invoke it
+        unconditionally at cleanup time.
+        """
         if not self._buffer:
             return
         shard_path = self._shard_path(self._index)
@@ -71,6 +160,7 @@ class ShardWriter:
         self._buffer = []
 
     def _flush_jsonl(self, shard_path: Path) -> None:
+        """Write the buffer as newline-delimited JSON, gzipped if enabled."""
         import gzip as _gzip
 
         opener = _gzip.open if self._compress else open
@@ -80,6 +170,7 @@ class ShardWriter:
                 file_handle.write(json.dumps(d) + "\n")
 
     def _flush_parquet(self, shard_path: Path) -> None:
+        """Write the buffer as a single Parquet file via pyarrow."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -94,31 +185,56 @@ class ShardWriter:
 # Legal text cleaning — pure functions
 # ============================================================
 
+#: Matches any HTML tag. Used for tag stripping before citation-aware
+#: reflow; does not attempt full HTML parsing.
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+#: Collapses runs of spaces/tabs into a single space.
 _MULTI_SPACE_RE = re.compile(r"[ \t]+")
+
+#: Matches 3+ consecutive newlines for paragraph-break normalisation.
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+#: Strips NUL bytes that occasionally survive bz2 decoding.
 _NULL_BYTE_RE = re.compile(r"\x00")
+
+#: Matches Latin-1 C1 control characters — common mojibake marker.
 _MOJIBAKE_RE = re.compile(r"[\x80-\x9f]")
+
+#: Matches Westlaw page-number markers of the form ``*NN`` on their
+#: own line (with optional surrounding newlines).
 _PAGE_STAR_RE = re.compile(r"\n?\*\d+\n?")
+
+#: Matches the Westlaw reporter header block that prefixes unreported
+#: opinions, which is legal boilerplate with no semantic content.
 _WESTLAW_HEADER_RE = re.compile(r"^(Not Reported in .*?\n|Only the Westlaw citation.*?\n)", re.MULTILINE)
 
 
 def _strip_html_preserve_citations(text: str) -> str:
-    """Remove HTML tags while preserving legal citation text."""
+    """Strip HTML tags while keeping inline citation text intact.
+
+    Replaces tags with a single space (to avoid welding adjacent words
+    together) then collapses runs of whitespace.
+    """
     text = _HTML_TAG_RE.sub(" ", text)
     text = _MULTI_SPACE_RE.sub(" ", text)
     return text.strip()
 
 
 def _remove_boilerplate(text: str) -> str:
-    """Remove common legal boilerplate."""
+    """Delete Westlaw headers and page-break star markers."""
     text = _WESTLAW_HEADER_RE.sub("", text)
     text = _PAGE_STAR_RE.sub(" ", text)
     return text.strip()
 
 
 def _clean_encoding(text: str) -> str:
-    """Fix encoding artifacts common in OCR and scraped legal text."""
+    """Repair encoding artifacts common in OCR and scraped opinions.
+
+    Removes NUL bytes and C1 control chars; maps smart quotes and
+    en/em dashes to their ASCII equivalents so downstream tokenisers
+    do not see near-duplicate vocabulary.
+    """
     text = _NULL_BYTE_RE.sub("", text)
     text = _MOJIBAKE_RE.sub("", text)
     text = text.replace("\u201c", '"').replace("\u201d", '"')
@@ -128,13 +244,37 @@ def _clean_encoding(text: str) -> str:
 
 
 def _strip_html(text: str) -> str:
+    """Plain HTML tag stripper — no citation preservation logic.
+
+    Kept for callers that just want the text content of a single HTML
+    field without the full :func:`_normalize_text` pipeline.
+    """
     text = _HTML_TAG_RE.sub(" ", text)
     text = _MULTI_SPACE_RE.sub(" ", text)
     return text.strip()
 
 
 def _normalize_text(raw_text: str, text_source: str) -> Tuple[str, List[str]]:
-    """Full normalization pipeline. Returns (normalized_text, cleaning_flags)."""
+    """Apply the full cleaning pipeline and record which stages fired.
+
+    Pipeline order:
+
+    1. Encoding repair.
+    2. HTML stripping (only when ``text_source != "plain_text"``).
+    3. Boilerplate removal.
+    4. Newline collapse.
+    5. Final strip.
+
+    Args:
+        raw_text: Unmodified text from the chosen CSV field.
+        text_source: The field name the text came from; used to decide
+            whether HTML stripping is needed.
+
+    Returns:
+        ``(cleaned_text, flags)`` where ``flags`` is a list of stage
+        names that actually mutated the text (for per-corpus cleaning
+        statistics).
+    """
     flags: List[str] = []
     cleaned = _clean_encoding(raw_text)
     if cleaned != raw_text:
@@ -165,7 +305,20 @@ def select_best_text(
     text_source_fields: Tuple[str, ...],
     min_length: int = 50,
 ) -> Tuple[str, str]:
-    """Select best text field from a CSV row by priority order."""
+    """Pick the highest-priority text field that meets the length floor.
+
+    Iterates ``text_source_fields`` in order and returns the first
+    whose stripped value is at least ``min_length`` characters long.
+
+    Args:
+        row: A CSV row as a dict.
+        text_source_fields: Ordered priority list of column names.
+        min_length: Minimum character count to accept.
+
+    Returns:
+        ``(text, source_field_name)``, or ``("", "")`` when no field
+        qualifies.
+    """
     for source_field in text_source_fields:
         candidate = (row.get(source_field) or "").strip()
         if len(candidate) >= min_length:
@@ -174,7 +327,11 @@ def select_best_text(
 
 
 def _attr(obj: Any, key: str, default: Any = "") -> Any:
-    """Get attribute from dataclass or dict."""
+    """Attribute/key accessor that works on both dataclasses and dicts.
+
+    Used in :func:`build_record` so cluster/docket metadata can be
+    supplied as either typed dataclasses or raw dicts without branching.
+    """
     if hasattr(obj, key):
         return getattr(obj, key)
     if isinstance(obj, dict):
@@ -183,28 +340,36 @@ def _attr(obj: Any, key: str, default: Any = "") -> Any:
 
 
 def _extract_year(date_filed: Optional[str]) -> str:
+    """Return the 4-digit year prefix of a date string, or ``"unknown"``."""
     if not date_filed or date_filed == "nan":
         return "unknown"
     match = re.match(r"(\d{4})", str(date_filed))
     return match.group(1) if match else "unknown"
 
 
+#: Matches U.S. legal reporter citations (U.S., S.Ct., L.Ed., F.Nd,
+#: F.Supp.N). Intentionally loose — false positives are cheap, misses
+#: hurt corpus metrics.
 _CITATION_RE = re.compile(r"\d+\s+(?:U\.S\.|S\.Ct\.|L\.Ed\.|F\.\d[a-z]*|F\.Supp\.\d*)")
 
 
 def _count_citations(text: str) -> int:
-    """Count legal citations in text."""
+    """Return the number of legal reporter citations in ``text``."""
     return len(_CITATION_RE.findall(text))
 
 
 def _count_paragraphs(text: str) -> int:
-    """Count paragraphs (blocks separated by blank lines)."""
+    """Return the paragraph count, bottoming out at 1 for non-empty text."""
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     return max(len(paragraphs), 1)
 
 
 def _citation_density(citation_count: int, text_length: int) -> float:
-    """Citations per 1K tokens. Token estimate: text_length // 4."""
+    """Citations per 1K tokens, using a 4-chars-per-token estimate.
+
+    The 4:1 estimate is accurate enough for corpus-level density
+    statistics; per-document token counts use the actual tokenizer.
+    """
     token_count = text_length // 4
     if token_count == 0:
         return 0.0
@@ -212,7 +377,12 @@ def _citation_density(citation_count: int, text_length: int) -> float:
 
 
 def _text_entropy(text: str) -> float:
-    """Shannon entropy of character distribution. Detects gibberish/OCR noise."""
+    """Shannon entropy of the character distribution in ``text``.
+
+    Used as a cheap gibberish detector: clean English prose scores
+    around 4.0–4.5 bits/char, while OCR garble drops below 3.0 or
+    spikes above 5.0 depending on the failure mode.
+    """
     if not text:
         return 0.0
     counts: Counter[str] = Counter(text)
@@ -226,7 +396,11 @@ def _text_entropy(text: str) -> float:
 
 
 def parse_opinion_id(raw: str) -> Optional[int]:
-    """Parse opinion ID from CSV field. Returns None if not a valid integer."""
+    """Parse an opinion ID from a CSV cell, returning ``None`` on failure.
+
+    A ``None`` return is the main signal of CSV field misalignment
+    (e.g. an embedded newline shifted subsequent columns).
+    """
     try:
         return int(raw)
     except (ValueError, TypeError):
@@ -246,7 +420,29 @@ def build_record(
     docket_meta: Dict[int, Any],
     court_name_map: Dict[str, str],
 ) -> OpinionRecord:
-    """Build a single opinion record with full provenance resolution."""
+    """Assemble a fully-joined :class:`OpinionRecord` for a single opinion.
+
+    Performs the cluster → docket → court join, computes the quality
+    metric features (citation count/density, entropy, token estimate,
+    paragraph count), and hashes the normalised text for dedup.
+
+    Args:
+        opinion_id: Parsed opinion ID from the CSV.
+        cluster_id: Parsed cluster ID, already verified as a federal
+            appellate cluster.
+        raw_text: Unmodified text from the chosen source field.
+        normalized_text: Output of :func:`_normalize_text`.
+        text_source: Name of the source field.
+        cleaning_flags: Flags emitted by :func:`_normalize_text`.
+        opinion_type: CourtListener opinion type (``"010combined"``, etc.).
+        extracted_by_ocr: Raw string from the OCR flag column.
+        cluster_meta: Map of cluster_id → cluster metadata object/dict.
+        docket_meta: Map of docket_id → docket metadata object/dict.
+        court_name_map: Map of court_id → human-readable court name.
+
+    Returns:
+        A fully-populated :class:`OpinionRecord` ready for shard output.
+    """
     empty: Dict[str, Any] = {}
     cluster_metadata = cluster_meta.get(cluster_id, empty)
     docket_id: Optional[int] = _attr(cluster_metadata, "docket_id", None)
@@ -290,7 +486,18 @@ def build_record(
 
 
 def _open_csv(filepath: Union[str, Path]) -> IO[str]:
-    """Open CSV/CSV.bz2 with PostgreSQL COPY escape handling."""
+    """Open a CourtListener opinions CSV, transparently handling bz2.
+
+    Uses ``errors="replace"`` because the raw dump contains occasional
+    invalid UTF-8 sequences that the downstream :func:`_clean_encoding`
+    step will strip anyway.
+
+    Args:
+        filepath: Path to a ``.csv`` or ``.csv.bz2`` file.
+
+    Returns:
+        A text-mode file handle ready for :class:`csv.DictReader`.
+    """
     filepath = str(filepath)
     if filepath.endswith(".bz2"):
         return io.TextIOWrapper(bz2.open(filepath, "rb"), encoding="utf-8", errors="replace")
@@ -303,7 +510,11 @@ def _open_csv(filepath: Union[str, Path]) -> IO[str]:
 
 
 def _write_quarantine(quarantine_path: Optional[Path], reason: str, row: Dict[str, Any]) -> None:
-    """Append skipped row to quarantine JSONL file for later inspection."""
+    """Append a rejected row to the quarantine JSONL, if configured.
+
+    A no-op when ``quarantine_path`` is ``None``, making the call safe
+    inside the hot row loop.
+    """
     if quarantine_path is None:
         return
     with open(quarantine_path, "a") as fh:
@@ -316,7 +527,7 @@ def _write_quarantine(quarantine_path: Optional[Path], reason: str, row: Dict[st
 
 
 def _load_checkpoint(shard_dir: Path) -> Optional[Dict[str, Any]]:
-    """Load checkpoint from previous partial run. Returns None if no checkpoint."""
+    """Load ``checkpoint.json`` from ``shard_dir``, or ``None`` if absent."""
     cp_path = shard_dir / "checkpoint.json"
     if cp_path.exists():
         return json.loads(cp_path.read_text())
@@ -324,7 +535,7 @@ def _load_checkpoint(shard_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def _save_checkpoint(shard_dir: Path, data: Dict[str, Any]) -> None:
-    """Save checkpoint for resume after timeout."""
+    """Persist the extraction state to ``checkpoint.json`` for resume."""
     cp_path = shard_dir / "checkpoint.json"
     cp_path.write_text(json.dumps(data))
 
@@ -342,16 +553,41 @@ def extract_opinions_to_shards(
     config: Optional[PipelineConfig] = None,
     logger: Any = None,
 ) -> Dict[str, Any]:
-    """Stream opinions CSV, filter + enrich + normalize + shard.
+    """Stream the opinions CSV into shards, with full stats and resume.
 
-    Supports checkpoint/resume: if a previous run was interrupted,
-    resumes from the last checkpointed row position.
+    Workflow per row:
 
-    Uses escapechar='\\' for CourtListener PostgreSQL COPY CSV format.
+    1. Parse ``cluster_id``; drop on failure.
+    2. Skip rows whose cluster is not in the federal appellate set.
+    3. Select the best text field via :func:`select_best_text`; drop
+       if none qualifies.
+    4. Normalise via :func:`_normalize_text`; drop stubs that shrank
+       below the floor.
+    5. Parse ``opinion_id``; drop on failure.
+    6. Build the full :class:`OpinionRecord` and enqueue it.
+    7. Update running statistics.
+    8. Every ``checkpoint_interval`` rows, flush the writer and save a
+       checkpoint.
 
-    Skip semantics (tracked in skipped_parse_reasons):
-    - bad_cluster_id: cluster_id column is not a valid integer
-    - bad_opinion_id: id column is not a valid integer (CSV misalignment)
+    Uses ``escapechar='\\\\'`` in the CSV reader to match the
+    PostgreSQL ``COPY`` format used by the CourtListener dump.
+
+    Args:
+        opinions_path: Path to the opinions CSV (plain or ``.bz2``).
+        cluster_meta: Map of cluster_id → cluster metadata, pre-filtered
+            to federal appellate clusters only.
+        docket_meta: Map of docket_id → docket metadata.
+        court_name_map: Map of court_id → human-readable court name.
+        config: Pipeline configuration. A default :class:`PipelineConfig`
+            is constructed when ``None``.
+        logger: Optional logger for progress and summary output.
+
+    Returns:
+        A statistics dict containing scan/extract/skip counters, text
+        source breakdown, cleaning flag counts, court/year/type
+        distributions, text-length and token-count percentiles,
+        duplicate counts, OCR counts, and a schema sample of the first
+        emitted record.
     """
     if config is None:
         config = PipelineConfig()
