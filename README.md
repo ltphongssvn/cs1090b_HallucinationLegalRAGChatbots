@@ -2145,7 +2145,7 @@ All 8 gates PASS. 1,456,611 records loaded via Polars fast-path, 0 parse errors,
 - **A11 tail warning:** one opinion tokenizes to 9,214 subwords (>8,192 bge-m3 limit). Known outlier — Stage 3 must enforce recursive chunking to avoid tail truncation of holdings.
 - **probe_version 2.5.12, polars 1.25.2, full_scan=True** — provenance logged.
 - **Runtime 9m 39.9s** ≈ prior 9m 29.2s. Matches expected "~9–10 min full scan."
-- **Demo point:** This is the Go/No-Go gate. 8/8 green = corpus is structurally RAG-ready.
+- This is the Go/No-Go gate. 8/8 green = corpus is structurally RAG-ready.
 
 5. **Corpus cleared for Stage 3.** All 6 blocking gates pass:
    - Schema: every record conforms to the Pydantic contract
@@ -2206,5 +2206,3 @@ The full pipeline is green end-to-end:
 - Closes the data-pipeline loop. Every record that enters Stage 3 indexing is provably clean at the byte level.
 
 ---
-
-
