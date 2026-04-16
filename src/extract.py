@@ -770,6 +770,7 @@ def extract_opinions_to_shards(
             "min": sorted_lengths[0],
             "max": sorted_lengths[-1],
             "median": sorted_lengths[n // 2],
+            "p5": sorted_lengths[n // 20],
             "p25": sorted_lengths[n // 4],
             "p75": sorted_lengths[3 * n // 4],
             "p90": sorted_lengths[int(n * 0.9)],
