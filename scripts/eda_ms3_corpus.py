@@ -30,6 +30,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -52,6 +53,27 @@ POLARS_SCHEMA: dict[str, pl.DataType] = {
 
 # Canonical US federal circuit order (numeric ascending, then DC, then Federal).
 CANONICAL_CIRCUITS = [f"ca{i}" for i in range(1, 12)] + ["cadc", "cafc"]
+
+
+class SummaryModel(BaseModel):
+    """Pydantic runtime contract for summary.json (fail-loud on NaN/None)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    n_total: int = Field(ge=0)
+    n_after_filter: int = Field(ge=0)
+    n_short_lt_100: int = Field(ge=0)
+    text_length_mean: float = Field(ge=0, allow_inf_nan=False)
+    text_length_median: float = Field(ge=0, allow_inf_nan=False)
+    text_length_mean_filtered: float = Field(ge=0, allow_inf_nan=False)
+    text_length_median_filtered: float = Field(ge=0, allow_inf_nan=False)
+    filter_threshold: int
+    circuit_counts: dict[str, int]
+    chart_ranges: dict[str, list[int]]
+    corpus_manifest_sha: str = Field(min_length=64, max_length=64)
+    figure_hashes: dict[str, str]
+    git_sha: str
 
 
 class SummaryDict(TypedDict, total=False):
@@ -284,10 +306,11 @@ def _build_summary(
 
 
 def _write_summary(summary: SummaryDict, out_dir: Path) -> Path:
-    """Emit summary.json deterministically (sort_keys, no NaN, UTF-8)."""
+    """Emit summary.json deterministically after Pydantic runtime validation."""
+    validated = SummaryModel.model_validate(dict(summary))
     path = out_dir / "summary.json"
     path.write_text(
-        json.dumps(dict(summary), indent=2, sort_keys=True, allow_nan=False),
+        json.dumps(validated.model_dump(), indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
     return path

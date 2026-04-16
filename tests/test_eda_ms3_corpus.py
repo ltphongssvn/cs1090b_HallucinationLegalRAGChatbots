@@ -472,3 +472,65 @@ def test_circuit_order_deterministic(eda_module, tmp_path: Path, fake_manifest: 
     keys = list(result["circuit_counts"].keys())
     canonical = sorted(keys, key=lambda c: (0, int(c[2:])) if c[2:].isdigit() else (1, c))
     assert keys == canonical
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 3 — Pydantic runtime validation + shared filter expression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_data_contracts_exports_filter_expression() -> None:
+    """Filter logic must be single-sourced in src/data_contracts.py."""
+    from src import data_contracts
+
+    assert callable(getattr(data_contracts, "valid_record_expr", None))
+    assert hasattr(data_contracts, "FILTER_MIN_CHARS")
+    assert data_contracts.FILTER_MIN_CHARS == 100
+
+
+@pytest.mark.unit
+def test_valid_record_expr_returns_polars_expr() -> None:
+    """valid_record_expr must return a pl.Expr usable in filters."""
+    import polars as pl
+
+    from src.data_contracts import valid_record_expr
+
+    expr = valid_record_expr()
+    assert isinstance(expr, pl.Expr)
+    df = pl.DataFrame({"text_length": [50, 100, 150]})
+    kept = df.filter(expr).height
+    assert kept == 2  # 100 and 150 pass
+
+
+@pytest.mark.contract
+def test_summary_pydantic_model_exists(eda_module) -> None:
+    """SummaryModel must be a Pydantic BaseModel for runtime I/O validation."""
+    from pydantic import BaseModel
+
+    model = getattr(eda_module, "SummaryModel", None)
+    assert model is not None and issubclass(model, BaseModel)
+
+
+@pytest.mark.unit
+def test_summary_model_rejects_nan(eda_module) -> None:
+    """SummaryModel must reject NaN in numeric fields (fail-loud contract)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        eda_module.SummaryModel(
+            schema_version="1.1.0",
+            n_total=10,
+            n_after_filter=5,
+            n_short_lt_100=5,
+            text_length_mean=float("nan"),
+            text_length_median=100.0,
+            text_length_mean_filtered=150.0,
+            text_length_median_filtered=150.0,
+            filter_threshold=100,
+            circuit_counts={"ca9": 10},
+            chart_ranges={"text_length_hist": [0, 100000], "citation_density": [0, 100]},
+            corpus_manifest_sha="a" * 64,
+            figure_hashes={},
+            git_sha="abc",
+        )
