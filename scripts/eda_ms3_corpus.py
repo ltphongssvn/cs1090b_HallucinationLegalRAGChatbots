@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+SCHEMA_VERSION = "1.0.0"
 FILTER_MIN_CHARS = 100
 DEFAULT_SHARD_GLOB = "data/raw/cl_federal_appellate_bulk/shard_*.jsonl"
 DEFAULT_OUT_DIR = Path("logs/eda_ms3")
@@ -213,6 +214,7 @@ def main(
         "text_length_mean": float(stats["mean"][0]),
         "text_length_median": float(stats["median"][0]),
         "n_short_lt_100": int(stats["n_short"][0]),
+        "schema_version": SCHEMA_VERSION,
         "filter_threshold": FILTER_MIN_CHARS,
         "circuit_counts": dict(zip(courts, counts)),
         "corpus_manifest_sha": corpus_sha,

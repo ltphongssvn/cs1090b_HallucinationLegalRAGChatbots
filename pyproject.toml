@@ -70,7 +70,9 @@ markers = [
     "contract: Schema, provenance, quality thresholds",
     "regression: Guard against schema drift",
     "gpu: Requires CUDA GPU",
+    "property: Hypothesis property-based tests",
 ]
+addopts = "--strict-markers --import-mode=importlib"
 [tool.ruff]
 line-length = 120
 [tool.ruff.lint]
