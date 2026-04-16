@@ -1,0 +1,8 @@
+{"id": 1, "court_id": "ca9", "text": "A full legal opinion body that exceeds one hundred characters so it passes the short-record filter threshold used downstream in baseline retrieval.", "text_length": 150, "citation_count": 3, "text_source": "plain_text"}
+{"id": 2, "court_id": "ca9", "text": "Another sufficiently long appellate opinion body for tests. Padding padding padding padding padding padding.", "text_length": 110, "citation_count": 1, "text_source": "plain_text"}
+{"id": 3, "court_id": "ca5", "text": "short", "text_length": 5, "citation_count": 0, "text_source": "plain_text"}
+{"id": 4, "court_id": "ca5", "text": "Mid-sized opinion text for ca5. Padding padding padding padding padding padding padding padding padding.", "text_length": 108, "citation_count": 2, "text_source": "html_with_citations"}
+{"id": 5, "court_id": "ca2", "text": "tiny", "text_length": 4, "citation_count": 0, "text_source": "plain_text"}
+{"id": 6, "court_id": "ca2", "text": "Exactly ninety-nine characters long padding padding padding padding padding padding padding pad", "text_length": 99, "citation_count": 0, "text_source": "plain_text"}
+{"id": 7, "court_id": "ca2", "text": "Exactly one hundred characters long padding padding padding padding padding padding padding paddin", "text_length": 100, "citation_count": 1, "text_source": "plain_text"}
+{"id": 8, "court_id": "ca1", "text": "Exactly one hundred and one characters long padding padding padding padding padding padding padding p", "text_length": 101, "citation_count": 1, "text_source": "plain_text"}
