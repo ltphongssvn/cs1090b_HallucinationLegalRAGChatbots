@@ -1,26 +1,24 @@
 """MS3 EDA: CourtListener federal appellate corpus distributions.
 
-Refactored for SRP + Polars efficiency:
-    - _compute_stats(): single Polars collect producing all scalars + arrays.
-    - _plot_*(): pure rendering from arrays.
-    - _write_summary(): atomic JSON emit with provenance.
-    - main(): thin orchestration.
-
-Artifacts (written to out_dir):
-    - text_length_hist.png, text_length_hist_log.png
-    - circuit_distribution.png, citation_density.png (if available)
-    - summary.json (SummaryDict-conformant)
+2026 production hardening applied:
+    - No import-time side effects; matplotlib/rcParams/seed inside _apply_plot_defaults().
+    - Fail-fast manifest validation before expensive scan.
+    - Stale-artifact cleanup in out_dir before re-render.
+    - Pre-filter + post-filter stats reported (n_after_filter, text_length_mean_filtered).
+    - chart_ranges recorded in summary for audit.
+    - Deterministic JSON: sort_keys=True, allow_nan=False, explicit UTF-8.
+    - Canonical federal-circuit ordering (ca1..ca11, cadc, cafc) not frequency.
+    - argparse CLI matching src/lepard_cl_compat.py + src/manifest_collector.py patterns.
+    - W&B Artifact includes summary.json (full provenance, not only PNGs).
 
 Module-level constants (repo convention; no Hydra in stack):
-    SCHEMA_VERSION    = "1.0.0"
-    FILTER_MIN_CHARS  = 100  (mirrors data_contracts p5 threshold)
-
-W&B telemetry: isolated in _log_to_wandb(), gated by main(log_to_wandb=).
-Matches src/dataset_probe.py::_log_report_to_wandb isolation contract.
+    SCHEMA_VERSION    = "1.1.0"  (bumped: n_after_filter + chart_ranges added)
+    FILTER_MIN_CHARS  = 100      (mirrors data_contracts p5 threshold)
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
@@ -29,8 +27,6 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -39,45 +35,51 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="[eda_ms3] %(message)s")
 
+SCHEMA_VERSION = "1.1.0"
+FILTER_MIN_CHARS = 100
+DEFAULT_SHARD_GLOB = "data/raw/cl_federal_appellate_bulk/shard_*.jsonl"
+DEFAULT_OUT_DIR = Path("logs/eda_ms3")
+DEFAULT_MANIFEST = Path("data/raw/cl_federal_appellate_bulk/manifest.json")
+
+TEXT_LENGTH_HIST_RANGE = (0, 100_000)
+CITATION_HIST_RANGE = (0, 100)
+
 POLARS_SCHEMA: dict[str, pl.DataType] = {
     "text_length": pl.Int64,
     "court_id": pl.Utf8,
     "citation_count": pl.Int64,
 }
 
-SCHEMA_VERSION = "1.0.0"
-FILTER_MIN_CHARS = 100
-DEFAULT_SHARD_GLOB = "data/raw/cl_federal_appellate_bulk/shard_*.jsonl"
-DEFAULT_OUT_DIR = Path("logs/eda_ms3")
-DEFAULT_MANIFEST = Path("data/raw/cl_federal_appellate_bulk/manifest.json")
-
-plt.rcParams["savefig.dpi"] = 120
-plt.rcParams["figure.autolayout"] = True
-np.random.seed(0)
+# Canonical US federal circuit order (numeric ascending, then DC, then Federal).
+CANONICAL_CIRCUITS = [f"ca{i}" for i in range(1, 12)] + ["cadc", "cafc"]
 
 
-class SummaryDict(TypedDict):
-    """Strict shape of summary.json payload (mirrors SummarySchema test)."""
+class SummaryDict(TypedDict, total=False):
+    """Strict shape of summary.json payload."""
 
     schema_version: str
     n_total: int
+    n_after_filter: int
+    n_short_lt_100: int
     text_length_mean: float
     text_length_median: float
-    n_short_lt_100: int
+    text_length_mean_filtered: float
+    text_length_median_filtered: float
     filter_threshold: int
     circuit_counts: dict[str, int]
+    chart_ranges: dict[str, list[int]]
     corpus_manifest_sha: str
     figure_hashes: dict[str, str]
     git_sha: str
 
 
 class _ComputedStats(TypedDict):
-    """Intermediate stats bundle — input to renderers + summary writer."""
-
     n_total: int
     mean: float
     median: float
     n_short: int
+    mean_filtered: float
+    median_filtered: float
     courts: list[str]
     counts: list[int]
     lengths: np.ndarray
@@ -85,12 +87,22 @@ class _ComputedStats(TypedDict):
 
 
 def is_valid_record(text_length: int) -> bool:
-    """Public predicate: record passes short-record filter iff length >= FILTER_MIN_CHARS.
+    """Public predicate: record passes filter iff length >= FILTER_MIN_CHARS.
 
     Exposed for reuse by downstream baseline scripts (BM25, BGE-M3 indexers).
-    Tested in tests/test_eda_ms3_corpus.py (contract + property tiers).
     """
     return bool(text_length >= FILTER_MIN_CHARS)
+
+
+def _apply_plot_defaults() -> None:
+    """Configure matplotlib for headless deterministic rendering.
+
+    Deferred from import time so tests importing the module do not mutate
+    global matplotlib state.
+    """
+    matplotlib.use("Agg", force=False)
+    plt.rcParams["savefig.dpi"] = 120
+    plt.rcParams["figure.autolayout"] = True
 
 
 def _sha256_file(path: Path) -> str:
@@ -98,15 +110,39 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _compute_stats(shard_glob: str) -> _ComputedStats:
-    """Single-scan Polars aggregation producing all values main() needs.
+def _git_sha() -> str:
+    """Current HEAD SHA (12-char) for lineage; empty string if not a git repo."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
 
-    Consolidates scalar stats, circuit counts, length array, and citation
-    array into one logical pass. Polars' lazy engine can optimise the
-    shared scan internally; we still materialise two columns (lengths
-    for histograms, citations for density plot) because matplotlib needs
-    raw values — acceptable at corpus size 1.5M (11.7 MB int64).
-    """
+
+def _validate_inputs(shard_glob: str, manifest_path: Path) -> None:
+    """Fail-fast validation before any expensive scan."""
+    if not Path(manifest_path).exists():
+        raise FileNotFoundError(f"manifest not found: {manifest_path}")
+
+
+def _canonical_circuit_sort(courts: list[str], counts: list[int]) -> tuple[list[str], list[int]]:
+    """Sort (courts, counts) by canonical federal-circuit order, not frequency."""
+    pairs = dict(zip(courts, counts))
+    ordered: list[tuple[str, int]] = []
+    for c in CANONICAL_CIRCUITS:
+        if c in pairs:
+            ordered.append((c, pairs.pop(c)))
+    # Append any non-canonical remainders alphabetically for determinism.
+    for c in sorted(pairs):
+        ordered.append((c, pairs[c]))
+    return [c for c, _ in ordered], [n for _, n in ordered]
+
+
+def _compute_stats(shard_glob: str) -> _ComputedStats:
+    """Single-scan Polars aggregation producing all values main() needs."""
     df = pl.scan_ndjson(shard_glob, schema_overrides=POLARS_SCHEMA, low_memory=True)
 
     scalars = df.select(
@@ -115,10 +151,13 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
             pl.col("text_length").mean().alias("mean"),
             pl.col("text_length").median().alias("median"),
             (pl.col("text_length") < FILTER_MIN_CHARS).sum().alias("n_short"),
+            pl.col("text_length").filter(pl.col("text_length") >= FILTER_MIN_CHARS).mean().alias("mean_filtered"),
+            pl.col("text_length").filter(pl.col("text_length") >= FILTER_MIN_CHARS).median().alias("median_filtered"),
         ]
     ).collect()
 
     court_dist = df.group_by("court_id").agg(pl.len().alias("n")).sort("n", descending=True).collect()
+    courts, counts = _canonical_circuit_sort(court_dist["court_id"].to_list(), court_dist["n"].to_list())
 
     lengths = df.select("text_length").collect().to_series().to_numpy()
 
@@ -133,15 +172,24 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
         mean=float(scalars["mean"][0]),
         median=float(scalars["median"][0]),
         n_short=int(scalars["n_short"][0]),
-        courts=court_dist["court_id"].to_list(),
-        counts=court_dist["n"].to_list(),
+        mean_filtered=float(scalars["mean_filtered"][0] or 0.0),
+        median_filtered=float(scalars["median_filtered"][0] or 0.0),
+        courts=courts,
+        counts=counts,
         lengths=lengths,
         citations=citations,
     )
 
 
-def _plot_text_length_hist(lengths: np.ndarray, out: Path, log_scale: bool = False) -> Path:
-    """Text-length histogram with the FILTER_MIN_CHARS threshold marked."""
+def _clean_stale_artifacts(out_dir: Path) -> None:
+    """Remove PNGs and summary.json from prior runs to prevent stale survival."""
+    for pattern in ("*.png", "summary.json"):
+        for p in out_dir.glob(pattern):
+            p.unlink()
+
+
+def _plot_text_length_hist(lengths: np.ndarray, out: Path, *, log_scale: bool = False) -> Path:
+    """Text-length histogram with FILTER_MIN_CHARS threshold marked."""
     fig, ax = plt.subplots(figsize=(9, 5))
     if log_scale:
         pos = lengths[lengths > 0]
@@ -152,7 +200,7 @@ def _plot_text_length_hist(lengths: np.ndarray, out: Path, log_scale: bool = Fal
         ax.set_ylabel("Count (log)")
         ax.set_title("Text length distribution (log-log)")
     else:
-        ax.hist(lengths, bins=100, range=(0, 100_000), color="steelblue", edgecolor="white")
+        ax.hist(lengths, bins=100, range=TEXT_LENGTH_HIST_RANGE, color="steelblue", edgecolor="white")
         ax.set_xlabel("Text length (characters)")
         ax.set_ylabel("Count")
         ax.set_title(f"CourtListener federal appellate: text length (N={len(lengths):,})")
@@ -169,10 +217,10 @@ def _plot_text_length_hist(lengths: np.ndarray, out: Path, log_scale: bool = Fal
 
 
 def _plot_circuit_distribution(courts: list[str], counts: list[int], out: Path) -> Path:
-    """Bar chart: opinion count per federal circuit."""
+    """Bar chart in canonical circuit order."""
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(courts, counts, color="steelblue", edgecolor="white")
-    ax.set_xlabel("Court (federal circuit)")
+    ax.set_xlabel("Court (federal circuit, canonical order)")
     ax.set_ylabel("Opinion count")
     ax.set_title("Corpus distribution across federal appellate circuits")
     for i, c in enumerate(counts):
@@ -183,9 +231,9 @@ def _plot_circuit_distribution(courts: list[str], counts: list[int], out: Path) 
 
 
 def _plot_citation_density(counts: np.ndarray, out: Path) -> Path:
-    """Histogram of citations per opinion, clipped to [0, 100]."""
+    """Histogram of citations per opinion, clipped to CITATION_HIST_RANGE."""
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.hist(counts, bins=60, range=(0, 100), color="darkorange", edgecolor="white")
+    ax.hist(counts, bins=60, range=CITATION_HIST_RANGE, color="darkorange", edgecolor="white")
     ax.set_xlabel("Citations per opinion")
     ax.set_ylabel("Count")
     ax.set_title("Citation density distribution (0-100)")
@@ -196,6 +244,7 @@ def _plot_citation_density(counts: np.ndarray, out: Path) -> Path:
 
 def _render_all(stats: _ComputedStats, out_dir: Path) -> list[Path]:
     """Render every figure; return list of emitted paths."""
+    _apply_plot_defaults()
     paths: list[Path] = [
         _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist.png"),
         _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist_log.png", log_scale=True),
@@ -211,15 +260,23 @@ def _build_summary(
     manifest_path: Path,
     figure_paths: list[Path],
 ) -> SummaryDict:
-    """Assemble the SummaryDict payload with SHA256 provenance."""
+    """Assemble SummaryDict payload with SHA256 + git provenance."""
+    n_after = stats["n_total"] - stats["n_short"]
     return SummaryDict(
         schema_version=SCHEMA_VERSION,
         n_total=stats["n_total"],
+        n_after_filter=n_after,
+        n_short_lt_100=stats["n_short"],
         text_length_mean=stats["mean"],
         text_length_median=stats["median"],
-        n_short_lt_100=stats["n_short"],
+        text_length_mean_filtered=stats["mean_filtered"],
+        text_length_median_filtered=stats["median_filtered"],
         filter_threshold=FILTER_MIN_CHARS,
         circuit_counts=dict(zip(stats["courts"], stats["counts"])),
+        chart_ranges={
+            "text_length_hist": list(TEXT_LENGTH_HIST_RANGE),
+            "citation_density": list(CITATION_HIST_RANGE),
+        },
         corpus_manifest_sha=_sha256_file(manifest_path),
         figure_hashes={fp.name: _sha256_file(fp) for fp in figure_paths},
         git_sha=_git_sha(),
@@ -227,30 +284,24 @@ def _build_summary(
 
 
 def _write_summary(summary: SummaryDict, out_dir: Path) -> Path:
-    """Emit summary.json with explicit UTF-8 encoding."""
+    """Emit summary.json deterministically (sort_keys, no NaN, UTF-8)."""
     path = out_dir / "summary.json"
-    path.write_text(json.dumps(dict(summary), indent=2), encoding="utf-8")
+    path.write_text(
+        json.dumps(dict(summary), indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
     return path
-
-
-def _git_sha() -> str:
-    """Current HEAD SHA (short) for lineage; empty string if not a git repo."""
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short=12", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
 
 
 def _log_to_wandb(
     summary: SummaryDict,
     figure_paths: list[Path],
+    summary_path: Path,
     entity: str = "phl690-harvard-extension-schol",
     project: str = "cs1090b",
     run_name: str = "eda_ms3_corpus",
 ) -> None:
-    """Single-call W&B logger matching dataset_probe isolation contract."""
+    """Single-call W&B logger; Artifact includes summary.json + all figures."""
     try:
         import wandb
     except ImportError:
@@ -267,16 +318,19 @@ def _log_to_wandb(
     )
     metrics: dict[str, Any] = {
         "eda/n_total": summary["n_total"],
+        "eda/n_after_filter": summary["n_after_filter"],
         "eda/text_length_mean": summary["text_length_mean"],
         "eda/text_length_median": summary["text_length_median"],
         "eda/n_short_lt_100": summary["n_short_lt_100"],
         "eda/corpus_manifest_sha": summary["corpus_manifest_sha"],
+        "eda/git_sha": summary["git_sha"],
     }
     for fp in figure_paths:
         metrics[f"eda/figures/{fp.stem}"] = wandb.Image(str(fp))
     wandb.log(metrics)
 
     art = wandb.Artifact("ms3_eda_corpus", type="eda-report")
+    art.add_file(str(summary_path))
     for fp in figure_paths:
         art.add_file(str(fp))
     wandb.log_artifact(art)
@@ -285,38 +339,48 @@ def _log_to_wandb(
         logger.info(f"W&B run complete — {entity}/{project}")
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """CLI matching src/lepard_cl_compat.py + src/manifest_collector.py convention."""
+    ap = argparse.ArgumentParser(
+        description="MS3 EDA over CourtListener federal appellate corpus.",
+    )
+    ap.add_argument("--shard-glob", type=str, default=DEFAULT_SHARD_GLOB)
+    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--manifest-path", type=Path, default=DEFAULT_MANIFEST)
+    ap.add_argument("--log-to-wandb", action="store_true")
+    return ap
+
+
 def main(
     shard_glob: str = DEFAULT_SHARD_GLOB,
     out_dir: Path = DEFAULT_OUT_DIR,
     manifest_path: Path = DEFAULT_MANIFEST,
     log_to_wandb: bool = False,
 ) -> SummaryDict:
-    """Thin orchestration: compute → render → persist → (optional) telemetry.
-
-    Args:
-        shard_glob: Polars glob for JSONL shards.
-        out_dir: Destination for PNG + JSON artifacts.
-        manifest_path: Source manifest for corpus_manifest_sha provenance.
-        log_to_wandb: Gate for W&B telemetry (default False for CI isolation).
-
-    Returns:
-        SummaryDict payload (also written to out_dir/summary.json).
-    """
+    """Thin orchestration: validate → compute → render → persist → telemetry."""
+    _validate_inputs(shard_glob, manifest_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    _clean_stale_artifacts(out_dir)
 
     logger.info(f"Scanning {shard_glob} via Polars lazy scan...")
     stats = _compute_stats(shard_glob)
     figure_paths = _render_all(stats, out_dir)
     summary = _build_summary(stats, manifest_path, figure_paths)
-    _write_summary(summary, out_dir)
+    summary_path = _write_summary(summary, out_dir)
     logger.info(f"Wrote {len(figure_paths)} figures + summary.json to {out_dir}/")
 
     if log_to_wandb:
-        _log_to_wandb(summary, figure_paths)
+        _log_to_wandb(summary, figure_paths, summary_path)
 
     return summary
 
 
 if __name__ == "__main__":
-    main()
+    args = _build_arg_parser().parse_args()
+    main(
+        shard_glob=args.shard_glob,
+        out_dir=args.out_dir,
+        manifest_path=args.manifest_path,
+        log_to_wandb=args.log_to_wandb,
+    )

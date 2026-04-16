@@ -321,8 +321,9 @@ def test_compute_stats_single_scan(eda_module) -> None:
 @pytest.mark.unit
 def test_polars_schema_applied_at_scan(eda_module) -> None:
     """POLARS_SCHEMA must be passed to pl.scan_ndjson (not just declared)."""
-    import polars as pl
     from unittest.mock import patch
+
+    import polars as pl
 
     original = pl.scan_ndjson
     captured_kwargs: dict = {}
@@ -334,5 +335,140 @@ def test_polars_schema_applied_at_scan(eda_module) -> None:
     with patch.object(pl, "scan_ndjson", side_effect=capturing_scan):
         eda_module._compute_stats(str(MINI_SHARD))
 
-    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs, \
+    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs, (
         "POLARS_SCHEMA not passed to scan_ndjson"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 2 — fail-fast validation, idempotency, CLI, temporal EDA
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_no_import_time_side_effects() -> None:
+    """Re-import must not mutate matplotlib rcParams or numpy RNG state.
+
+    Import-time side effects break test isolation and library usage.
+    Backend/rcParams/seed config belongs inside function bodies.
+    """
+    import importlib
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    baseline_dpi = plt.rcParams["savefig.dpi"]
+    plt.rcParams["savefig.dpi"] = 999
+    np.random.seed(42)
+    sentinel = np.random.rand()
+
+    importlib.reload(importlib.import_module("scripts.eda_ms3_corpus"))
+
+    assert plt.rcParams["savefig.dpi"] == 999, "rcParams mutated at import"
+    np.random.seed(42)
+    assert np.random.rand() == sentinel, "numpy RNG reseeded at import"
+    plt.rcParams["savefig.dpi"] = baseline_dpi
+
+
+@pytest.mark.unit
+def test_missing_manifest_fails_fast(eda_module, tmp_path: Path) -> None:
+    """Missing manifest must raise FileNotFoundError before expensive scan."""
+    missing = tmp_path / "does_not_exist.json"
+    with pytest.raises(FileNotFoundError):
+        eda_module.main(
+            shard_glob=str(MINI_SHARD),
+            out_dir=tmp_path,
+            manifest_path=missing,
+            log_to_wandb=False,
+        )
+
+
+@pytest.mark.unit
+def test_stale_artifacts_removed(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Pre-existing stale PNG from a prior run must be removed before re-render."""
+    stale = tmp_path / "text_length_hist.png"
+    stale.write_bytes(b"stale")
+    stale_sha = hashlib.sha256(b"stale").hexdigest()
+
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert stale.exists()
+    assert hashlib.sha256(stale.read_bytes()).hexdigest() != stale_sha
+
+
+@pytest.mark.unit
+def test_summary_includes_filtered_stats(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Summary must report both pre-filter and post-filter corpus stats."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "n_after_filter" in result
+    # mini_shard: 8 records, 3 short (<100) → 5 pass filter
+    assert result["n_after_filter"] == 5
+    assert result["n_after_filter"] + result["n_short_lt_100"] == result["n_total"]
+    assert "text_length_mean_filtered" in result
+
+
+@pytest.mark.unit
+def test_summary_includes_chart_ranges(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Chart clipping bounds must be recorded in summary for audit."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "chart_ranges" in result
+    cr = result["chart_ranges"]
+    assert "text_length_hist" in cr
+    assert cr["text_length_hist"] == [0, 100_000]
+
+
+@pytest.mark.unit
+def test_summary_json_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """summary.json must serialize with sort_keys=True for stable diffs."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    raw = (tmp_path / "summary.json").read_text(encoding="utf-8")
+    import json as _json
+
+    loaded = _json.loads(raw)
+    resorted = _json.dumps(loaded, indent=2, sort_keys=True)
+    assert raw.strip() == resorted.strip()
+
+
+@pytest.mark.contract
+def test_module_has_cli(eda_module) -> None:
+    """Script must expose _build_arg_parser() for argparse CLI (repo convention)."""
+    import argparse
+
+    fn = getattr(eda_module, "_build_arg_parser", None)
+    assert callable(fn)
+    parser = fn()
+    assert isinstance(parser, argparse.ArgumentParser)
+
+
+@pytest.mark.unit
+def test_circuit_order_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Circuit bars must use canonical federal circuit order, not frequency."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    # mini_shard circuits: ca1, ca2, ca5, ca9; canonical numeric order: ca1,ca2,ca5,ca9
+    keys = list(result["circuit_counts"].keys())
+    canonical = sorted(keys, key=lambda c: (0, int(c[2:])) if c[2:].isdigit() else (1, c))
+    assert keys == canonical
