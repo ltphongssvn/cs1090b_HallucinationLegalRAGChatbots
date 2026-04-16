@@ -519,3 +519,94 @@ def test_clean_stale_false_preserves_prior_artifacts(eda_module, tmp_path: Path,
         clean_stale=False,
     )
     assert keeper.exists()
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 5 — honest docstrings, import purity, atomic writes,
+# canonical order in JSON, overflow accounting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_no_basicConfig_at_import() -> None:
+    """basicConfig must fire only under `if __name__ == "__main__"`, not at import."""
+    import ast
+
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def is_main_guard(node: ast.If) -> bool:
+        test = node.test
+        if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == "__name__":
+            for c in test.comparators:
+                if isinstance(c, ast.Constant) and c.value == "__main__":
+                    return True
+        return False
+
+    for top in tree.body:
+        if isinstance(top, ast.If) and is_main_guard(top):
+            continue  # basicConfig allowed inside __main__ guard
+        for sub in ast.walk(top):
+            if isinstance(sub, ast.Call) and getattr(sub.func, "attr", None) == "basicConfig":
+                raise AssertionError("basicConfig fires at import (outside __main__ guard)")
+
+
+@pytest.mark.unit
+def test_summary_includes_overflow_counts(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Histogram clipping must record overflow counts in summary for audit."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "chart_overflow_counts" in result
+    assert "text_length_hist" in result["chart_overflow_counts"]
+    # mini_shard max length is 150 < 100_000 → zero overflow expected
+    assert result["chart_overflow_counts"]["text_length_hist"] == 0
+
+
+@pytest.mark.unit
+def test_circuit_order_preserved_in_json(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Canonical circuit order must survive JSON serialization (not alphabetized)."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    raw = (tmp_path / "summary.json").read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    assert "circuit_order" in parsed
+    # mini_shard: ca1, ca2, ca5, ca9 in canonical numeric order
+    assert parsed["circuit_order"] == ["ca1", "ca2", "ca5", "ca9"]
+
+
+@pytest.mark.unit
+def test_stale_artifacts_preserved_on_render_failure(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Failed run must NOT wipe prior good artifacts (atomic swap semantics)."""
+    good_png = tmp_path / "text_length_hist.png"
+    good_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"prior_good_artifact" * 100)
+    prior_sha = hashlib.sha256(good_png.read_bytes()).hexdigest()
+
+    # Force failure after cleanup would have run, before new render completes
+    with patch.object(eda_module, "_render_all", side_effect=RuntimeError("simulated")):
+        with pytest.raises(RuntimeError, match="simulated"):
+            eda_module.main(
+                shard_glob=str(MINI_SHARD),
+                out_dir=tmp_path,
+                manifest_path=fake_manifest,
+                log_to_wandb=False,
+            )
+    # Prior artifact must still exist unchanged after failed run.
+    assert good_png.exists()
+    assert hashlib.sha256(good_png.read_bytes()).hexdigest() == prior_sha
+
+
+@pytest.mark.contract
+def test_summary_dict_required_fields_strict(eda_module) -> None:
+    """SummaryDict must not be total=False — required fields explicit."""
+    import inspect
+
+    src = inspect.getsource(eda_module.SummaryDict)
+    assert "total=False" not in src, "SummaryDict must use Required/NotRequired, not total=False"
