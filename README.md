@@ -4,9 +4,12 @@
 - **Author:** Alex Oort Alonso, Allan Korir, PHONG LE, and Brit Biddle
 - **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
-> - Although compute nodes physically contain 4× NVIDIA L4/A10G GPUs, student jobs are allocated a
-> single GPU by the SLURM scheduler. `CUDA_VISIBLE_DEVICES` is set automatically by SLURM, and
-> PyTorch correctly reports `torch.cuda.device_count() == 1`.
+> - Compute nodes physically contain 4× NVIDIA L4/A10G GPUs. The allocated GPU count is resolved at
+> setup time from `CUDA_VISIBLE_DEVICES` (if exported) or `nvidia-smi` visible count, written to
+> `.env` as `TARGET_GPU_COUNT`, and enforced as an **exact** match by `run_preflight_checks`
+> (both over- and under-allocation fail). To force a single-GPU run on a 4-GPU node, export
+> `CUDA_VISIBLE_DEVICES=0` before `bash setup.sh`. PyTorch then reports
+> `torch.cuda.device_count() == TARGET_GPU_COUNT`.
 >
 > - All code uses `.to("cuda")` or
 > `.to("cuda:0")` — never a hardcoded physical ordinal — since SLURM remaps the allocated GPU
@@ -71,7 +74,7 @@
   * `torch.cuda.get_device_capability()[0] >= 8`
   * `torch.cuda.is_bf16_supported()`
 * These checks ensure the environment matches the repo's certified GPU and library assumptions before execution starts.
-* `TARGET_GPU_COUNT=1` is set in `.env` to match the **single-GPU allocation** provided by SLURM.
+* `TARGET_GPU_COUNT` is written to `.env` by `setup.sh` (resolved from `CUDA_VISIBLE_DEVICES` count, else `nvidia-smi` visible count). It reflects the **actual GPU allocation** — 1 when `CUDA_VISIBLE_DEVICES=0` is exported, up to 4 on an unmasked node. `run_preflight_checks` enforces exact match against `torch.cuda.device_count()`.
 * During preflight, `setup.sh` validates that:
   * `torch.cuda.device_count() == 1`
 * This ensures the runtime environment matches the expected **single-GPU execution setup**.
@@ -90,6 +93,20 @@
 * **Per phase**, W&B logs:
   * **peak allocated CUDA memory**
   * **peak reserved CUDA memory**
+
+### Forcing a single-GPU run on a multi-GPU node
+
+On a 4-GPU node, to run the pipeline against exactly one GPU (for memory isolation, deterministic
+`cuda:0` semantics, or to match Colab A100 single-GPU behavior), export `CUDA_VISIBLE_DEVICES`
+before running setup:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+bash setup.sh
+```
+
+`setup.sh` reads the mask, writes `TARGET_GPU_COUNT=1` to `.env`, and `run_preflight_checks` then
+enforces `torch.cuda.device_count() == 1`. To switch back to all visible GPUs, `unset CUDA_VISIBLE_DEVICES && bash setup.sh`.
 
 ---
 | Phase | Model loaded| Est. VRAM| Strategy|
@@ -1608,7 +1625,7 @@ DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
 {
   "ingestion_ts_utc": "2026-04-08T20:31:00+00:00",
   "script_git_commit": "<40-char SHA>",
-  "hf_revision": "0194f95c3091acceab3b887c9b09ef432cf84052",
+  "hf_revision": "0194f95c3091acceab3b887c9b09ef432cf84052",  # pragma: allowlist secret
   "dataset": "rmahari/LePaRD",
   "split": "train",
   "cap": 4000000,
@@ -1976,7 +1993,7 @@ Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored
 **Verdict:** The notebook covers the **complete data pipeline** (Stages 1–3 + readiness gates) as defined in the README. Every module relevant to data acquisition, audit, probing, and compatibility checks is called. Unused modules belong to Stage 5 (training), Stage 6 (evaluation), Stage 7 (publishing), or are CI/setup.sh/one-shot maintenance helpers — per README these are "not started" and correctly excluded from the data-pipeline notebook.
 
 ---
-## Google Colab notebook code cell console output 
+## Google Colab notebook code cell console output
 
 **Cell 1 — Bootstrap interpretation:**
 

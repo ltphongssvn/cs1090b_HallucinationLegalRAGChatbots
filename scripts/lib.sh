@@ -9,13 +9,27 @@
 # ===========================================================================
 # Hardware target constants — GPU auto-detected below
 # ===========================================================================
-TARGET_GPU_COUNT=4
+# TARGET_GPU_COUNT: source of truth = what torch actually sees.
+# Precedence: CUDA_VISIBLE_DEVICES count (explicit mask — highest fidelity to torch)
+#           > nvidia-smi visible count (no mask applied)
+#           > 1 (CPU-only or no GPU).
+# NOTE: SLURM_GPUS_ON_NODE is intentionally NOT used — on Harvard OnDemand,
+# SLURM reports allocation intent but does not mask nvidia-smi/torch visibility,
+# so it drifts from torch.cuda.device_count(). To enforce strict N-GPU, export
+# both TARGET_GPU_COUNT=N and CUDA_VISIBLE_DEVICES=<N indices> before setup.sh.
+if [ -n "${USER_CUDA_VISIBLE_DEVICES:-}" ]; then
+    TARGET_GPU_COUNT=$(echo "${USER_CUDA_VISIBLE_DEVICES}" | awk -F',' '{print NF}')
+elif command -v nvidia-smi &>/dev/null; then
+    TARGET_GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
+    [ "${TARGET_GPU_COUNT}" = "0" ] && TARGET_GPU_COUNT=1
+else
+    TARGET_GPU_COUNT=1
+fi
 TARGET_VRAM_GB_MIN=22.0
 TARGET_TORCH_CUDA_RUNTIME="11.7"
 TARGET_DRIVER_CUDA="12.8"
 TARGET_PYTHON_VERSION="3.11.9"
 TARGET_MIN_DISK_GB=50
-
 # Auto-detect GPU type from nvidia-smi and set GPU-specific constants
 _detect_target_gpu() {
     local gpu_name=""
@@ -42,7 +56,6 @@ _detect_target_gpu() {
     esac
 }
 _detect_target_gpu
-
 # ===========================================================================
 # Reproducibility constants
 # ===========================================================================

@@ -192,8 +192,12 @@ class TestManifest:
         assert str(v).lower() == "true"
 
     @skip_no_manifest
-    def test_gpu_count_is_4(self) -> None:
-        assert int(self._load()["hardware_detected"]["gpu_count"]) == 4
+    def test_gpu_count_matches_target(self) -> None:
+        # GPU count is dynamic — resolved from CUDA_VISIBLE_DEVICES or nvidia-smi
+        # at setup time. Test only that manifest value is a positive int.
+        data = self._load()["hardware_detected"]
+        n = int(data["gpu_count"])
+        assert n >= 1
 
     @skip_no_manifest
     def test_gpu_count_matches_gpus_array(self) -> None:

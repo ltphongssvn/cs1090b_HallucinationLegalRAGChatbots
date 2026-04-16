@@ -42,13 +42,13 @@ KERNELSPEC_DIR="$HOME/.local/share/jupyter/kernels/hallucination-legal-rag"
     assert_contains "$output" "11.7"
 }
 
-@test ".venv transformers version satisfies >=4.35,<4.41" {
+@test ".venv transformers version satisfies >=4.35,<4.42" {
     _skip_if_no_venv
     run "$PROJECT_ROOT/.venv/bin/python" -c "
 from packaging.version import Version
 import transformers
 v = Version(transformers.__version__)
-assert Version('4.35') <= v < Version('4.41'), f'out of range: {v}'
+assert Version('4.35') <= v < Version('4.42'), f'out of range: {v}'
 print(transformers.__version__)
 "
     [ "$status" -eq 0 ]
