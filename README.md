@@ -574,7 +574,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Feature/index generation | ⏳ Not started | `src/lightning_datamodule.py`, `src/split.py` | BM25 (pre-chunked payloads) + FAISS Flat (eval) / IVF (train+add, final) |
 | Model training | ⏳ Not started | Architectures + compute caps specified | Training runs |
 | Evaluation (Tiers A/B/C) | ⏳ Not started | Sequential loading + repo-certified overflow windowing documented | Capped eval runs |
-| Experiment tracking | ⏳ Not started | `src/wandb_logger.py` implemented; W&B lazily imported; `wandb>=0.16` pinned in uv.lock | W&B run init + per-phase VRAM logging integration pending |
+| Experiment tracking | ✅ Operational | `src/wandb_logger.py` (218 lines): `setup_wandb_auth`, `load_artifact`, `log_run_start`, `log_dataset_stats`, `log_quality_signals`; `src/dataset_probe.py::_log_report_to_wandb()` with single `wandb.log` call + Artifact upload; `--log-to-wandb` CLI flag; 4 W&B isolation contract tests enforced; 50+ offline runs on disk (entity `phl690-harvard-extension-schol`, project `cs1090b`); `wandb=0.25.1` pinned in uv.lock | Per-phase VRAM logging integration deferred to Stage 6 evaluation |
 ---
 ## DL System Stack
 ### Stage 1 — Raw Data Acquisition
