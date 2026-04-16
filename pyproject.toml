@@ -74,7 +74,7 @@ markers = [
 [tool.ruff]
 line-length = 120
 [tool.ruff.lint]
-per-file-ignores = {"tests/*.py" = ["E402"], "notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb" = ["E402"]}
+per-file-ignores = {"tests/*.py" = ["E402"], "notebooks/*.ipynb" = ["E402", "E702"]}
 select = ["E", "F", "I"]
 ignore = ["E501"]
 [tool.mypy]
