@@ -260,3 +260,79 @@ def test_wandb_called_exactly_once_when_flag_true(eda_module, tmp_path: Path, fa
             log_to_wandb=True,
         )
         assert mock_log.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier — single-pass scan, structured logging, schema, git SHA
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_module_has_polars_schema(eda_module) -> None:
+    """POLARS_SCHEMA dict enforces column types at scan time (corruption guard)."""
+    schema = getattr(eda_module, "POLARS_SCHEMA", None)
+    assert isinstance(schema, dict)
+    assert "text_length" in schema
+    assert "court_id" in schema
+
+
+@pytest.mark.contract
+def test_module_uses_logging(eda_module) -> None:
+    """Script must use stdlib logging (repo convention), not print."""
+    import logging as stdlib_logging
+
+    logger = getattr(eda_module, "logger", None)
+    assert isinstance(logger, stdlib_logging.Logger)
+
+
+@pytest.mark.unit
+def test_summary_includes_git_sha(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """summary.json must record git_sha for lineage audit."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    s = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert "git_sha" in s
+    assert isinstance(s["git_sha"], str) and len(s["git_sha"]) >= 7
+
+
+@pytest.mark.unit
+def test_compute_stats_single_scan(eda_module) -> None:
+    """_compute_stats must not call scan_ndjson more than once per invocation."""
+    from unittest.mock import patch
+
+    import polars as pl
+
+    original = pl.scan_ndjson
+    call_count = [0]
+
+    def counting_scan(*args, **kwargs):
+        call_count[0] += 1
+        return original(*args, **kwargs)
+
+    with patch.object(pl, "scan_ndjson", side_effect=counting_scan):
+        eda_module._compute_stats(str(MINI_SHARD))
+    assert call_count[0] == 1, f"expected 1 scan, got {call_count[0]}"
+
+
+@pytest.mark.unit
+def test_polars_schema_applied_at_scan(eda_module) -> None:
+    """POLARS_SCHEMA must be passed to pl.scan_ndjson (not just declared)."""
+    import polars as pl
+    from unittest.mock import patch
+
+    original = pl.scan_ndjson
+    captured_kwargs: dict = {}
+
+    def capturing_scan(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return original(*args, **kwargs)
+
+    with patch.object(pl, "scan_ndjson", side_effect=capturing_scan):
+        eda_module._compute_stats(str(MINI_SHARD))
+
+    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs, \
+        "POLARS_SCHEMA not passed to scan_ndjson"

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -32,6 +34,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="[eda_ms3] %(message)s")
+
+POLARS_SCHEMA: dict[str, pl.DataType] = {
+    "text_length": pl.Int64,
+    "court_id": pl.Utf8,
+    "citation_count": pl.Int64,
+}
 
 SCHEMA_VERSION = "1.0.0"
 FILTER_MIN_CHARS = 100
@@ -56,6 +68,7 @@ class SummaryDict(TypedDict):
     circuit_counts: dict[str, int]
     corpus_manifest_sha: str
     figure_hashes: dict[str, str]
+    git_sha: str
 
 
 class _ComputedStats(TypedDict):
@@ -94,7 +107,7 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
     for histograms, citations for density plot) because matplotlib needs
     raw values — acceptable at corpus size 1.5M (11.7 MB int64).
     """
-    df = pl.scan_ndjson(shard_glob, low_memory=True)
+    df = pl.scan_ndjson(shard_glob, schema_overrides=POLARS_SCHEMA, low_memory=True)
 
     scalars = df.select(
         [
@@ -209,6 +222,7 @@ def _build_summary(
         circuit_counts=dict(zip(stats["courts"], stats["counts"])),
         corpus_manifest_sha=_sha256_file(manifest_path),
         figure_hashes={fp.name: _sha256_file(fp) for fp in figure_paths},
+        git_sha=_git_sha(),
     )
 
 
@@ -217,6 +231,16 @@ def _write_summary(summary: SummaryDict, out_dir: Path) -> Path:
     path = out_dir / "summary.json"
     path.write_text(json.dumps(dict(summary), indent=2), encoding="utf-8")
     return path
+
+
+def _git_sha() -> str:
+    """Current HEAD SHA (short) for lineage; empty string if not a git repo."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
 
 
 def _log_to_wandb(
@@ -230,7 +254,7 @@ def _log_to_wandb(
     try:
         import wandb
     except ImportError:
-        print("[eda_ms3] wandb not installed — skipping W&B logging")
+        logger.warning("wandb not installed — skipping W&B logging")
         return
 
     run = wandb.init(
@@ -258,7 +282,7 @@ def _log_to_wandb(
     wandb.log_artifact(art)
     wandb.finish()
     if run is not None:
-        print(f"[eda_ms3] W&B run complete — {entity}/{project}")
+        logger.info(f"W&B run complete — {entity}/{project}")
 
 
 def main(
@@ -281,12 +305,12 @@ def main(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[eda_ms3] Scanning {shard_glob} via Polars lazy scan...")
+    logger.info(f"Scanning {shard_glob} via Polars lazy scan...")
     stats = _compute_stats(shard_glob)
     figure_paths = _render_all(stats, out_dir)
     summary = _build_summary(stats, manifest_path, figure_paths)
     _write_summary(summary, out_dir)
-    print(f"[eda_ms3] Wrote {len(figure_paths)} figures + summary.json to {out_dir}/")
+    logger.info(f"Wrote {len(figure_paths)} figures + summary.json to {out_dir}/")
 
     if log_to_wandb:
         _log_to_wandb(summary, figure_paths)
