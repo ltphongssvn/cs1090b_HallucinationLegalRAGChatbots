@@ -11,6 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import polars as pl
+
+FILTER_MIN_CHARS = 100
+
+
+def valid_record_expr() -> pl.Expr:
+    """Canonical filter expression: record passes iff text_length >= FILTER_MIN_CHARS.
+
+    Single-source-of-truth used by EDA, baseline indexers, and data gates.
+    """
+    return pl.col("text_length") >= FILTER_MIN_CHARS
+
 
 class DataContractError(RuntimeError):
     """Raised when a data contract fails in strict mode."""
