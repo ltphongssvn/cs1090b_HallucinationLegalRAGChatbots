@@ -379,12 +379,14 @@ def main(
     out_dir: Path = DEFAULT_OUT_DIR,
     manifest_path: Path = DEFAULT_MANIFEST,
     log_to_wandb: bool = False,
+    clean_stale: bool = True,
 ) -> SummaryDict:
     """Thin orchestration: validate → compute → render → persist → telemetry."""
     _validate_inputs(shard_glob, manifest_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _clean_stale_artifacts(out_dir)
+    if clean_stale:
+        _clean_stale_artifacts(out_dir)
 
     logger.info(f"Scanning {shard_glob} via Polars lazy scan...")
     stats = _compute_stats(shard_glob)
