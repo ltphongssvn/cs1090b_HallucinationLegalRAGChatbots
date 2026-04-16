@@ -260,3 +260,277 @@ def test_wandb_called_exactly_once_when_flag_true(eda_module, tmp_path: Path, fa
             log_to_wandb=True,
         )
         assert mock_log.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier — single-pass scan, structured logging, schema, git SHA
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_module_has_polars_schema(eda_module) -> None:
+    """POLARS_SCHEMA dict enforces column types at scan time (corruption guard)."""
+    schema = getattr(eda_module, "POLARS_SCHEMA", None)
+    assert isinstance(schema, dict)
+    assert "text_length" in schema
+    assert "court_id" in schema
+
+
+@pytest.mark.contract
+def test_module_uses_logging(eda_module) -> None:
+    """Script must use stdlib logging (repo convention), not print."""
+    import logging as stdlib_logging
+
+    logger = getattr(eda_module, "logger", None)
+    assert isinstance(logger, stdlib_logging.Logger)
+
+
+@pytest.mark.unit
+def test_summary_includes_git_sha(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """summary.json must record git_sha for lineage audit."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    s = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert "git_sha" in s
+    assert isinstance(s["git_sha"], str) and len(s["git_sha"]) >= 7
+
+
+@pytest.mark.unit
+def test_compute_stats_single_scan(eda_module) -> None:
+    """_compute_stats must not call scan_ndjson more than once per invocation."""
+    from unittest.mock import patch
+
+    import polars as pl
+
+    original = pl.scan_ndjson
+    call_count = [0]
+
+    def counting_scan(*args, **kwargs):
+        call_count[0] += 1
+        return original(*args, **kwargs)
+
+    with patch.object(pl, "scan_ndjson", side_effect=counting_scan):
+        eda_module._compute_stats(str(MINI_SHARD))
+    assert call_count[0] == 1, f"expected 1 scan, got {call_count[0]}"
+
+
+@pytest.mark.unit
+def test_polars_schema_applied_at_scan(eda_module) -> None:
+    """POLARS_SCHEMA must be passed to pl.scan_ndjson (not just declared)."""
+    from unittest.mock import patch
+
+    import polars as pl
+
+    original = pl.scan_ndjson
+    captured_kwargs: dict = {}
+
+    def capturing_scan(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return original(*args, **kwargs)
+
+    with patch.object(pl, "scan_ndjson", side_effect=capturing_scan):
+        eda_module._compute_stats(str(MINI_SHARD))
+
+    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs, (
+        "POLARS_SCHEMA not passed to scan_ndjson"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 2 — fail-fast validation, idempotency, CLI, temporal EDA
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_no_import_time_side_effects() -> None:
+    """Re-import must not mutate matplotlib rcParams or numpy RNG state.
+
+    Import-time side effects break test isolation and library usage.
+    Backend/rcParams/seed config belongs inside function bodies.
+    """
+    import importlib
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    baseline_dpi = plt.rcParams["savefig.dpi"]
+    plt.rcParams["savefig.dpi"] = 999
+    np.random.seed(42)
+    sentinel = np.random.rand()
+
+    importlib.reload(importlib.import_module("scripts.eda_ms3_corpus"))
+
+    assert plt.rcParams["savefig.dpi"] == 999, "rcParams mutated at import"
+    np.random.seed(42)
+    assert np.random.rand() == sentinel, "numpy RNG reseeded at import"
+    plt.rcParams["savefig.dpi"] = baseline_dpi
+
+
+@pytest.mark.unit
+def test_missing_manifest_fails_fast(eda_module, tmp_path: Path) -> None:
+    """Missing manifest must raise FileNotFoundError before expensive scan."""
+    missing = tmp_path / "does_not_exist.json"
+    with pytest.raises(FileNotFoundError):
+        eda_module.main(
+            shard_glob=str(MINI_SHARD),
+            out_dir=tmp_path,
+            manifest_path=missing,
+            log_to_wandb=False,
+        )
+
+
+@pytest.mark.unit
+def test_stale_artifacts_removed(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Pre-existing stale PNG from a prior run must be removed before re-render."""
+    stale = tmp_path / "text_length_hist.png"
+    stale.write_bytes(b"stale")
+    stale_sha = hashlib.sha256(b"stale").hexdigest()
+
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert stale.exists()
+    assert hashlib.sha256(stale.read_bytes()).hexdigest() != stale_sha
+
+
+@pytest.mark.unit
+def test_summary_includes_filtered_stats(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Summary must report both pre-filter and post-filter corpus stats."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "n_after_filter" in result
+    # mini_shard: 8 records, 3 short (<100) → 5 pass filter
+    assert result["n_after_filter"] == 5
+    assert result["n_after_filter"] + result["n_short_lt_100"] == result["n_total"]
+    assert "text_length_mean_filtered" in result
+
+
+@pytest.mark.unit
+def test_summary_includes_chart_ranges(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Chart clipping bounds must be recorded in summary for audit."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "chart_ranges" in result
+    cr = result["chart_ranges"]
+    assert "text_length_hist" in cr
+    assert cr["text_length_hist"] == [0, 100_000]
+
+
+@pytest.mark.unit
+def test_summary_json_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """summary.json must serialize with sort_keys=True for stable diffs."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    raw = (tmp_path / "summary.json").read_text(encoding="utf-8")
+    import json as _json
+
+    loaded = _json.loads(raw)
+    resorted = _json.dumps(loaded, indent=2, sort_keys=True)
+    assert raw.strip() == resorted.strip()
+
+
+@pytest.mark.contract
+def test_module_has_cli(eda_module) -> None:
+    """Script must expose _build_arg_parser() for argparse CLI (repo convention)."""
+    import argparse
+
+    fn = getattr(eda_module, "_build_arg_parser", None)
+    assert callable(fn)
+    parser = fn()
+    assert isinstance(parser, argparse.ArgumentParser)
+
+
+@pytest.mark.unit
+def test_circuit_order_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Circuit bars must use canonical federal circuit order, not frequency."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    # mini_shard circuits: ca1, ca2, ca5, ca9; canonical numeric order: ca1,ca2,ca5,ca9
+    keys = list(result["circuit_counts"].keys())
+    canonical = sorted(keys, key=lambda c: (0, int(c[2:])) if c[2:].isdigit() else (1, c))
+    assert keys == canonical
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 3 — Pydantic runtime validation + shared filter expression
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_data_contracts_exports_filter_expression() -> None:
+    """Filter logic must be single-sourced in src/data_contracts.py."""
+    from src import data_contracts
+
+    assert callable(getattr(data_contracts, "valid_record_expr", None))
+    assert hasattr(data_contracts, "FILTER_MIN_CHARS")
+    assert data_contracts.FILTER_MIN_CHARS == 100
+
+
+@pytest.mark.unit
+def test_valid_record_expr_returns_polars_expr() -> None:
+    """valid_record_expr must return a pl.Expr usable in filters."""
+    import polars as pl
+
+    from src.data_contracts import valid_record_expr
+
+    expr = valid_record_expr()
+    assert isinstance(expr, pl.Expr)
+    df = pl.DataFrame({"text_length": [50, 100, 150]})
+    kept = df.filter(expr).height
+    assert kept == 2  # 100 and 150 pass
+
+
+@pytest.mark.contract
+def test_summary_pydantic_model_exists(eda_module) -> None:
+    """SummaryModel must be a Pydantic BaseModel for runtime I/O validation."""
+    from pydantic import BaseModel
+
+    model = getattr(eda_module, "SummaryModel", None)
+    assert model is not None and issubclass(model, BaseModel)
+
+
+@pytest.mark.unit
+def test_summary_model_rejects_nan(eda_module) -> None:
+    """SummaryModel must reject NaN in numeric fields (fail-loud contract)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        eda_module.SummaryModel(
+            schema_version="1.1.0",
+            n_total=10,
+            n_after_filter=5,
+            n_short_lt_100=5,
+            text_length_mean=float("nan"),
+            text_length_median=100.0,
+            text_length_mean_filtered=150.0,
+            text_length_median_filtered=150.0,
+            filter_threshold=100,
+            circuit_counts={"ca9": 10},
+            chart_ranges={"text_length_hist": [0, 100000], "citation_density": [0, 100]},
+            corpus_manifest_sha="a" * 64,
+            figure_hashes={},
+            git_sha="abc",
+        )
