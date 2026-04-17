@@ -595,3 +595,216 @@ class TestSummarySchemaIncludesGoldPairHashes:
         from src.eda_schemas import BaselinePrepSummary
 
         assert "gold_pair_hashes" in BaselinePrepSummary.model_fields
+
+
+# ---------- second hardening round ----------
+
+
+@pytest.mark.unit
+class TestSummaryJsonRoundtrip:
+    """Real summary.json must validate against BaselinePrepSummary."""
+
+    def test_produced_summary_validates(
+        self,
+        baseline_module: Any,
+        tmp_path: Path,
+        mini_shard: Path,
+        mini_lepard: Path,
+        mini_cl_ids: Path,
+        mini_court_map: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.eda_schemas import BaselinePrepSummary
+
+        monkeypatch.setattr(
+            baseline_module,
+            "_get_tokenizer",
+            lambda: DummyTokenizer(),
+        )
+        out_dir = tmp_path / "out"
+        baseline_module.main(
+            shard_dir=mini_shard,
+            lepard_path=mini_lepard,
+            cl_ids_path=mini_cl_ids,
+            court_map_path=mini_court_map,
+            out_dir=out_dir,
+            log_to_wandb=False,
+            resume=False,
+            seed=0,
+            val_size=2,
+            test_size=2,
+        )
+        raw = (out_dir / "summary.json").read_bytes()
+        validated = BaselinePrepSummary.model_validate_json(raw)
+        assert validated.gold_pairs_val <= 2
+        assert validated.gold_pairs_test <= 2
+        assert validated.gold_pairs_val + validated.gold_pairs_test <= validated.gold_pairs_total
+        assert validated.schema_version == baseline_module.SCHEMA_VERSION
+        assert len(validated.corpus_manifest_sha) == 64
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("n_tokens", [1023, 1024, 1025, 1152, 1153, 1920, 1921])
+class TestChunkBoundaryExact:
+    """Exact off-by-one boundaries around CHUNK_SIZE_SUBWORDS and stride."""
+
+    def test_never_exceeds_window(
+        self,
+        baseline_module: Any,
+        n_tokens: int,
+    ) -> None:
+        tok = DummyTokenizer()
+        text = "w " * n_tokens
+        chunks = baseline_module._chunk_text(text, opinion_id=1, tok=tok)
+        for c in chunks:
+            assert len(tok.encode(c["text"])) <= baseline_module.CHUNK_SIZE_SUBWORDS
+
+    def test_chunk_count_matches_formula(
+        self,
+        baseline_module: Any,
+        n_tokens: int,
+    ) -> None:
+        tok = DummyTokenizer()
+        text = "w " * n_tokens
+        chunks = baseline_module._chunk_text(text, opinion_id=1, tok=tok)
+        window = baseline_module.CHUNK_SIZE_SUBWORDS
+        stride = window - baseline_module.CHUNK_OVERLAP_SUBWORDS
+        if n_tokens <= window:
+            expected = 1
+        else:
+            import math
+
+            expected = 1 + math.ceil((n_tokens - window) / stride)
+        assert len(chunks) == expected
+
+
+@pytest.mark.unit
+class TestSplitLeakage:
+    """val and test splits must be disjoint by pair AND by opinion pair-hash."""
+
+    def test_val_test_disjoint_by_pair(self, baseline_module: Any) -> None:
+        pairs = [
+            {"source_id": i, "dest_id": i + 10000, "source_court": "ca5" if i % 2 == 0 else "ca9"} for i in range(1000)
+        ]
+        val, test = baseline_module._stratified_split(
+            pairs,
+            val_size=100,
+            test_size=500,
+            seed=0,
+        )
+        val_keys = {(p["source_id"], p["dest_id"]) for p in val}
+        test_keys = {(p["source_id"], p["dest_id"]) for p in test}
+        assert val_keys & test_keys == set()
+
+    def test_no_duplicate_pairs_within_split(self, baseline_module: Any) -> None:
+        pairs = [
+            {"source_id": i, "dest_id": i + 10000, "source_court": "ca5" if i % 2 == 0 else "ca9"} for i in range(1000)
+        ]
+        val, test = baseline_module._stratified_split(
+            pairs,
+            val_size=100,
+            test_size=500,
+            seed=0,
+        )
+        val_keys = [(p["source_id"], p["dest_id"]) for p in val]
+        test_keys = [(p["source_id"], p["dest_id"]) for p in test]
+        assert len(val_keys) == len(set(val_keys))
+        assert len(test_keys) == len(set(test_keys))
+
+
+@pytest.mark.contract
+class TestBasicConfigScopedToModuleTop:
+    """basicConfig ban must apply to module top-level only, not __main__ block."""
+
+    def test_ast_walks_only_top_level(self) -> None:
+        src = (REPO_ROOT / "scripts" / "baseline_prep.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        # Only inspect direct children of the module body, not descendants
+        # (so if __name__ == "__main__": logging.basicConfig(...) is allowed)
+        for node in tree.body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                fn = node.value.func
+                if (
+                    isinstance(fn, ast.Attribute)
+                    and isinstance(fn.value, ast.Name)
+                    and fn.value.id == "logging"
+                    and fn.attr == "basicConfig"
+                ):
+                    raise AssertionError(
+                        "logging.basicConfig at module top-level",
+                    )
+
+
+@pytest.mark.unit
+class TestWandbBranchBehavior:
+    """log_to_wandb flag must gate _log_to_wandb call count."""
+
+    def test_false_does_not_call(
+        self,
+        baseline_module: Any,
+        tmp_path: Path,
+        mini_shard: Path,
+        mini_lepard: Path,
+        mini_cl_ids: Path,
+        mini_court_map: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            baseline_module,
+            "_get_tokenizer",
+            lambda: DummyTokenizer(),
+        )
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            baseline_module,
+            "_log_to_wandb",
+            lambda *a, **kw: calls.append((a, kw)),
+        )
+        baseline_module.main(
+            shard_dir=mini_shard,
+            lepard_path=mini_lepard,
+            cl_ids_path=mini_cl_ids,
+            court_map_path=mini_court_map,
+            out_dir=tmp_path / "out",
+            log_to_wandb=False,
+            resume=False,
+            seed=0,
+            val_size=2,
+            test_size=2,
+        )
+        assert calls == []
+
+    def test_true_calls_exactly_once(
+        self,
+        baseline_module: Any,
+        tmp_path: Path,
+        mini_shard: Path,
+        mini_lepard: Path,
+        mini_cl_ids: Path,
+        mini_court_map: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            baseline_module,
+            "_get_tokenizer",
+            lambda: DummyTokenizer(),
+        )
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            baseline_module,
+            "_log_to_wandb",
+            lambda *a, **kw: calls.append((a, kw)),
+        )
+        baseline_module.main(
+            shard_dir=mini_shard,
+            lepard_path=mini_lepard,
+            cl_ids_path=mini_cl_ids,
+            court_map_path=mini_court_map,
+            out_dir=tmp_path / "out",
+            log_to_wandb=True,
+            resume=False,
+            seed=0,
+            val_size=2,
+            test_size=2,
+        )
+        assert len(calls) == 1
