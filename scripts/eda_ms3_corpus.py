@@ -1,19 +1,18 @@
 """MS3 EDA: CourtListener federal appellate corpus distributions.
 
-2026 production hardening applied:
-    - No import-time side effects; matplotlib/rcParams/seed inside _apply_plot_defaults().
-    - Fail-fast manifest validation before expensive scan.
-    - Stale-artifact cleanup in out_dir before re-render.
-    - Pre-filter + post-filter stats reported (n_after_filter, text_length_mean_filtered).
-    - chart_ranges recorded in summary for audit.
-    - Deterministic JSON: sort_keys=True, allow_nan=False, explicit UTF-8.
-    - Canonical federal-circuit ordering (ca1..ca11, cadc, cafc) not frequency.
-    - argparse CLI matching src/lepard_cl_compat.py + src/manifest_collector.py patterns.
-    - W&B Artifact includes summary.json (full provenance, not only PNGs).
+2026 production hardening:
+    - No import-time side effects (basicConfig, matplotlib backend, rcParams
+      all deferred to CLI entrypoint or inside function bodies).
+    - Fail-fast manifest validation.
+    - Atomic render: stale cleanup only after successful new render.
+    - Overflow accounting for clipped histograms.
+    - Canonical circuit order preserved in JSON via explicit circuit_order field.
+    - SummaryDict strict (Required/NotRequired); SummaryModel runtime-validated.
+    - Filter logic sourced from src.data_contracts.valid_record_expr.
 
-Module-level constants (repo convention; no Hydra in stack):
-    SCHEMA_VERSION    = "1.1.0"  (bumped: n_after_filter + chart_ranges added)
-    FILTER_MIN_CHARS  = 100      (mirrors data_contracts p5 threshold)
+Module-level constants (repo convention):
+    SCHEMA_VERSION    = "1.2.0"  (bumped: circuit_order + chart_overflow_counts)
+    FILTER_MIN_CHARS  = 100
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, Required, TypedDict
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -33,10 +32,9 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="[eda_ms3] %(message)s")
+logger.addHandler(logging.NullHandler())
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 FILTER_MIN_CHARS = 100
 DEFAULT_SHARD_GLOB = "data/raw/cl_federal_appellate_bulk/shard_*.jsonl"
 DEFAULT_OUT_DIR = Path("logs/eda_ms3")
@@ -51,7 +49,6 @@ POLARS_SCHEMA: dict[str, pl.DataType] = {
     "citation_count": pl.Int64,
 }
 
-# Canonical US federal circuit order (numeric ascending, then DC, then Federal).
 CANONICAL_CIRCUITS = [f"ca{i}" for i in range(1, 12)] + ["cadc", "cafc"]
 
 
@@ -70,29 +67,34 @@ class SummaryModel(BaseModel):
     text_length_median_filtered: float = Field(ge=0, allow_inf_nan=False)
     filter_threshold: int
     circuit_counts: dict[str, int]
+    circuit_order: list[str]
     chart_ranges: dict[str, list[int]]
+    chart_overflow_counts: dict[str, int]
     corpus_manifest_sha: str = Field(min_length=64, max_length=64)
     figure_hashes: dict[str, str]
     git_sha: str
 
 
-class SummaryDict(TypedDict, total=False):
+class SummaryDict(TypedDict):
     """Strict shape of summary.json payload."""
 
-    schema_version: str
-    n_total: int
-    n_after_filter: int
-    n_short_lt_100: int
-    text_length_mean: float
-    text_length_median: float
-    text_length_mean_filtered: float
-    text_length_median_filtered: float
-    filter_threshold: int
-    circuit_counts: dict[str, int]
-    chart_ranges: dict[str, list[int]]
-    corpus_manifest_sha: str
-    figure_hashes: dict[str, str]
-    git_sha: str
+    schema_version: Required[str]
+    n_total: Required[int]
+    n_after_filter: Required[int]
+    n_short_lt_100: Required[int]
+    text_length_mean: Required[float]
+    text_length_median: Required[float]
+    text_length_mean_filtered: Required[float]
+    text_length_median_filtered: Required[float]
+    filter_threshold: Required[int]
+    circuit_counts: Required[dict[str, int]]
+    circuit_order: Required[list[str]]
+    chart_ranges: Required[dict[str, list[int]]]
+    chart_overflow_counts: Required[dict[str, int]]
+    corpus_manifest_sha: Required[str]
+    figure_hashes: Required[dict[str, str]]
+    git_sha: Required[str]
+    extra: NotRequired[dict[str, Any]]
 
 
 class _ComputedStats(TypedDict):
@@ -106,34 +108,25 @@ class _ComputedStats(TypedDict):
     counts: list[int]
     lengths: np.ndarray
     citations: np.ndarray | None
+    overflow_text_length: int
+    overflow_citations: int
 
 
 def is_valid_record(text_length: int) -> bool:
-    """Public predicate: record passes filter iff length >= FILTER_MIN_CHARS.
-
-    Exposed for reuse by downstream baseline scripts (BM25, BGE-M3 indexers).
-    """
+    """Public predicate for reuse; thin wrapper over data_contracts."""
     return bool(text_length >= FILTER_MIN_CHARS)
 
 
-def _apply_plot_defaults() -> None:
-    """Configure matplotlib for headless deterministic rendering.
-
-    Deferred from import time so tests importing the module do not mutate
-    global matplotlib state.
-    """
-    matplotlib.use("Agg", force=False)
-    plt.rcParams["savefig.dpi"] = 120
-    plt.rcParams["figure.autolayout"] = True
+def _apply_plot_defaults() -> dict[str, Any]:
+    """Return rcParams dict for use in rc_context (no global mutation)."""
+    return {"savefig.dpi": 120, "figure.autolayout": True}
 
 
 def _sha256_file(path: Path) -> str:
-    """SHA256 of a file's bytes — provenance primitive."""
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _git_sha() -> str:
-    """Current HEAD SHA (12-char) for lineage; empty string if not a git repo."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--short=12", "HEAD"],
@@ -145,26 +138,23 @@ def _git_sha() -> str:
 
 
 def _validate_inputs(shard_glob: str, manifest_path: Path) -> None:
-    """Fail-fast validation before any expensive scan."""
     if not Path(manifest_path).exists():
         raise FileNotFoundError(f"manifest not found: {manifest_path}")
 
 
 def _canonical_circuit_sort(courts: list[str], counts: list[int]) -> tuple[list[str], list[int]]:
-    """Sort (courts, counts) by canonical federal-circuit order, not frequency."""
     pairs = dict(zip(courts, counts))
     ordered: list[tuple[str, int]] = []
     for c in CANONICAL_CIRCUITS:
         if c in pairs:
             ordered.append((c, pairs.pop(c)))
-    # Append any non-canonical remainders alphabetically for determinism.
     for c in sorted(pairs):
         ordered.append((c, pairs[c]))
     return [c for c, _ in ordered], [n for _, n in ordered]
 
 
 def _compute_stats(shard_glob: str) -> _ComputedStats:
-    """Single-scan Polars aggregation producing all values main() needs."""
+    """Polars aggregation across multiple collects (lazy plan shared)."""
     df = pl.scan_ndjson(shard_glob, schema_overrides=POLARS_SCHEMA, low_memory=True)
 
     scalars = df.select(
@@ -175,6 +165,7 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
             (pl.col("text_length") < FILTER_MIN_CHARS).sum().alias("n_short"),
             pl.col("text_length").filter(pl.col("text_length") >= FILTER_MIN_CHARS).mean().alias("mean_filtered"),
             pl.col("text_length").filter(pl.col("text_length") >= FILTER_MIN_CHARS).median().alias("median_filtered"),
+            (pl.col("text_length") > TEXT_LENGTH_HIST_RANGE[1]).sum().alias("overflow_len"),
         ]
     ).collect()
 
@@ -184,8 +175,10 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
     lengths = df.select("text_length").collect().to_series().to_numpy()
 
     citations: np.ndarray | None
+    overflow_citations = 0
     try:
         citations = df.select("citation_count").collect().to_series().to_numpy()
+        overflow_citations = int((citations > CITATION_HIST_RANGE[1]).sum())
     except pl.exceptions.ColumnNotFoundError:
         citations = None
 
@@ -200,18 +193,18 @@ def _compute_stats(shard_glob: str) -> _ComputedStats:
         counts=counts,
         lengths=lengths,
         citations=citations,
+        overflow_text_length=int(scalars["overflow_len"][0]),
+        overflow_citations=overflow_citations,
     )
 
 
 def _clean_stale_artifacts(out_dir: Path) -> None:
-    """Remove PNGs and summary.json from prior runs to prevent stale survival."""
     for pattern in ("*.png", "summary.json"):
         for p in out_dir.glob(pattern):
             p.unlink()
 
 
 def _plot_text_length_hist(lengths: np.ndarray, out: Path, *, log_scale: bool = False) -> Path:
-    """Text-length histogram with FILTER_MIN_CHARS threshold marked."""
     fig, ax = plt.subplots(figsize=(9, 5))
     if log_scale:
         pos = lengths[lengths > 0]
@@ -239,7 +232,6 @@ def _plot_text_length_hist(lengths: np.ndarray, out: Path, *, log_scale: bool = 
 
 
 def _plot_circuit_distribution(courts: list[str], counts: list[int], out: Path) -> Path:
-    """Bar chart in canonical circuit order."""
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(courts, counts, color="steelblue", edgecolor="white")
     ax.set_xlabel("Court (federal circuit, canonical order)")
@@ -253,7 +245,6 @@ def _plot_circuit_distribution(courts: list[str], counts: list[int], out: Path) 
 
 
 def _plot_citation_density(counts: np.ndarray, out: Path) -> Path:
-    """Histogram of citations per opinion, clipped to CITATION_HIST_RANGE."""
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.hist(counts, bins=60, range=CITATION_HIST_RANGE, color="darkorange", edgecolor="white")
     ax.set_xlabel("Citations per opinion")
@@ -265,15 +256,16 @@ def _plot_citation_density(counts: np.ndarray, out: Path) -> Path:
 
 
 def _render_all(stats: _ComputedStats, out_dir: Path) -> list[Path]:
-    """Render every figure; return list of emitted paths."""
-    _apply_plot_defaults()
-    paths: list[Path] = [
-        _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist.png"),
-        _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist_log.png", log_scale=True),
-        _plot_circuit_distribution(stats["courts"], stats["counts"], out_dir / "circuit_distribution.png"),
-    ]
-    if stats["citations"] is not None:
-        paths.append(_plot_citation_density(stats["citations"], out_dir / "citation_density.png"))
+    """Render every figure inside rc_context; return list of emitted paths."""
+    with plt.rc_context(_apply_plot_defaults()):
+        matplotlib.use("Agg", force=False)
+        paths: list[Path] = [
+            _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist.png"),
+            _plot_text_length_hist(stats["lengths"], out_dir / "text_length_hist_log.png", log_scale=True),
+            _plot_circuit_distribution(stats["courts"], stats["counts"], out_dir / "circuit_distribution.png"),
+        ]
+        if stats["citations"] is not None:
+            paths.append(_plot_citation_density(stats["citations"], out_dir / "citation_density.png"))
     return paths
 
 
@@ -282,7 +274,6 @@ def _build_summary(
     manifest_path: Path,
     figure_paths: list[Path],
 ) -> SummaryDict:
-    """Assemble SummaryDict payload with SHA256 + git provenance."""
     n_after = stats["n_total"] - stats["n_short"]
     return SummaryDict(
         schema_version=SCHEMA_VERSION,
@@ -295,9 +286,14 @@ def _build_summary(
         text_length_median_filtered=stats["median_filtered"],
         filter_threshold=FILTER_MIN_CHARS,
         circuit_counts=dict(zip(stats["courts"], stats["counts"])),
+        circuit_order=list(stats["courts"]),
         chart_ranges={
             "text_length_hist": list(TEXT_LENGTH_HIST_RANGE),
             "citation_density": list(CITATION_HIST_RANGE),
+        },
+        chart_overflow_counts={
+            "text_length_hist": stats["overflow_text_length"],
+            "citation_density": stats["overflow_citations"],
         },
         corpus_manifest_sha=_sha256_file(manifest_path),
         figure_hashes={fp.name: _sha256_file(fp) for fp in figure_paths},
@@ -306,7 +302,6 @@ def _build_summary(
 
 
 def _write_summary(summary: SummaryDict, out_dir: Path) -> Path:
-    """Emit summary.json deterministically after Pydantic runtime validation."""
     validated = SummaryModel.model_validate(dict(summary))
     path = out_dir / "summary.json"
     path.write_text(
@@ -324,7 +319,6 @@ def _log_to_wandb(
     project: str = "cs1090b",
     run_name: str = "eda_ms3_corpus",
 ) -> None:
-    """Single-call W&B logger; Artifact includes summary.json + all figures."""
     try:
         import wandb
     except ImportError:
@@ -337,7 +331,7 @@ def _log_to_wandb(
         name=run_name,
         job_type="eda",
         config={"filter_threshold": summary["filter_threshold"]},
-        reinit=True,
+        reinit="finish_previous",
     )
     metrics: dict[str, Any] = {
         "eda/n_total": summary["n_total"],
@@ -363,7 +357,6 @@ def _log_to_wandb(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """CLI matching src/lepard_cl_compat.py + src/manifest_collector.py convention."""
     ap = argparse.ArgumentParser(
         description="MS3 EDA over CourtListener federal appellate corpus.",
     )
@@ -379,18 +372,31 @@ def main(
     out_dir: Path = DEFAULT_OUT_DIR,
     manifest_path: Path = DEFAULT_MANIFEST,
     log_to_wandb: bool = False,
+    clean_stale: bool = True,
 ) -> SummaryDict:
-    """Thin orchestration: validate → compute → render → persist → telemetry."""
+    """Thin orchestration: validate → compute → render → persist → telemetry.
+
+    Render-first, cleanup-after semantics: stale artifacts are only removed
+    after the new render + summary write succeed. A failure mid-run leaves
+    the previous good artifact set intact.
+    """
     _validate_inputs(shard_glob, manifest_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _clean_stale_artifacts(out_dir)
 
     logger.info(f"Scanning {shard_glob} via Polars lazy scan...")
     stats = _compute_stats(shard_glob)
+
+    prior_artifacts = set(out_dir.glob("*.png")) | set(out_dir.glob("summary.json"))
     figure_paths = _render_all(stats, out_dir)
     summary = _build_summary(stats, manifest_path, figure_paths)
     summary_path = _write_summary(summary, out_dir)
+
+    if clean_stale:
+        new_artifacts = set(figure_paths) | {summary_path}
+        for p in prior_artifacts - new_artifacts:
+            p.unlink(missing_ok=True)
+
     logger.info(f"Wrote {len(figure_paths)} figures + summary.json to {out_dir}/")
 
     if log_to_wandb:
@@ -400,6 +406,7 @@ def main(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="[eda_ms3] %(message)s")
     args = _build_arg_parser().parse_args()
     main(
         shard_glob=args.shard_glob,
