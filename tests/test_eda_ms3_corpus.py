@@ -1,14 +1,4 @@
-"""TDD REFACTOR: contract + unit + property tests for scripts/eda_ms3_corpus.py.
-
-2026 hardening applied:
-    - Paths anchored to REPO_ROOT (not CWD).
-    - Explicit UTF-8 encoding on all text I/O.
-    - Mathematical invariants: n_short <= n_total; sum(circuit_counts) == n_total.
-    - PNG non-empty validation (not just existence).
-    - Boundary coverage at length=99/100/101.
-    - schema_version field in SummarySchema for artifact evolution.
-    - property marker for Hypothesis tests.
-"""
+"""TDD contract + unit + property tests for scripts/eda_ms3_corpus.py."""
 
 from __future__ import annotations
 
@@ -32,8 +22,6 @@ REAL_LOGS_DIR = REPO_ROOT / "logs" / "eda_ms3"
 
 
 class SummarySchema(BaseModel):
-    """Strict contract for logs/eda_ms3/summary.json."""
-
     schema_version: str = Field(min_length=1)
     n_total: int = Field(ge=1)
     text_length_mean: float = Field(ge=0)
@@ -47,18 +35,13 @@ class SummarySchema(BaseModel):
 
 @pytest.fixture(scope="module")
 def eda_module() -> Any:
-    """Import scripts.eda_ms3_corpus via pyproject pythonpath."""
     return importlib.import_module("scripts.eda_ms3_corpus")
 
 
 @pytest.fixture
 def fake_manifest(tmp_path: Path) -> Path:
-    """Synthetic manifest.json used for corpus_manifest_sha provenance."""
     m = tmp_path / "manifest.json"
-    m.write_text(
-        json.dumps({"checksum": {"mini_shard.jsonl": "a" * 64}}),
-        encoding="utf-8",
-    )
+    m.write_text(json.dumps({"checksum": {"mini_shard.jsonl": "a" * 64}}), encoding="utf-8")
     return m
 
 
@@ -96,7 +79,6 @@ def test_module_has_filter_predicate(eda_module) -> None:
 
 @pytest.mark.contract
 def test_module_has_wandb_logger(eda_module) -> None:
-    """Matches src/dataset_probe.py::_log_report_to_wandb isolation."""
     assert callable(getattr(eda_module, "_log_to_wandb", None))
 
 
@@ -109,7 +91,6 @@ def test_main_signature_has_log_to_wandb_flag(eda_module) -> None:
 
 @pytest.mark.contract
 def test_module_declares_schema_version(eda_module) -> None:
-    """SCHEMA_VERSION required for artifact evolution tracking."""
     sv = getattr(eda_module, "SCHEMA_VERSION", None)
     assert isinstance(sv, str) and len(sv) > 0
 
@@ -127,7 +108,6 @@ def test_mini_shard_fixture_exists() -> None:
 
 @pytest.mark.unit
 def test_filter_predicate_boundary(eda_module) -> None:
-    """Boundary semantics: length >= 100 passes; < 100 fails."""
     assert eda_module.is_valid_record(99) is False
     assert eda_module.is_valid_record(100) is True
     assert eda_module.is_valid_record(101) is True
@@ -147,8 +127,8 @@ def test_filter_predicate_property(length: int) -> None:
 def test_main_deterministic_on_mini_shard(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
     """8 records: lengths [150,110,5,108,4,99,100,101].
 
-    n_total=8; mean=(150+110+5+108+4+99+100+101)/8=84.625; median=99.5
-    short (<100): ids 3,5,6 → 3; circuit_counts: ca9=2, ca5=2, ca2=3, ca1=1.
+    mean=(150+110+5+108+4+99+100+101)/8=84.625; short (<100): ids 3,5,6 → 3;
+    circuit_counts: ca9=2, ca5=2, ca2=3, ca1=1.
     """
     result = eda_module.main(
         shard_glob=str(MINI_SHARD),
@@ -159,7 +139,7 @@ def test_main_deterministic_on_mini_shard(eda_module, tmp_path: Path, fake_manif
     assert result["n_total"] == 8
     assert abs(result["text_length_mean"] - 84.625) < 1e-6
     assert result["n_short_lt_100"] == 3
-    assert result["circuit_counts"] == {"ca9": 2, "ca5": 2, "ca2": 3, "ca1": 1}
+    assert result["circuit_counts"] == {"ca1": 1, "ca2": 3, "ca5": 2, "ca9": 2}
 
 
 @pytest.mark.unit
@@ -180,7 +160,6 @@ def test_summary_validates_against_pydantic_schema(eda_module, tmp_path: Path, f
 
 @pytest.mark.unit
 def test_summary_invariants(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Mathematical invariants every run must satisfy."""
     result = eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -196,7 +175,6 @@ def test_summary_invariants(eda_module, tmp_path: Path, fake_manifest: Path) -> 
 
 @pytest.mark.unit
 def test_figures_written_to_tmp_path_and_non_empty(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """PNGs must exist AND be non-empty valid files (>1KB sanity floor)."""
     eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -206,8 +184,8 @@ def test_figures_written_to_tmp_path_and_non_empty(eda_module, tmp_path: Path, f
     for fname in ("text_length_hist.png", "circuit_distribution.png"):
         fp = tmp_path / fname
         assert fp.exists()
-        assert fp.stat().st_size > 1024, f"{fname} suspiciously small"
-        assert fp.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", f"{fname} not a valid PNG"
+        assert fp.stat().st_size > 1024
+        assert fp.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 @pytest.mark.unit
@@ -251,7 +229,6 @@ def test_wandb_not_called_when_flag_false(eda_module, tmp_path: Path, fake_manif
 
 @pytest.mark.unit
 def test_wandb_called_exactly_once_when_flag_true(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Matches TestLogReportToWandbSingleCall contract from src/dataset_probe.py."""
     with patch.object(eda_module, "_log_to_wandb") as mock_log:
         eda_module.main(
             shard_glob=str(MINI_SHARD),
@@ -263,13 +240,12 @@ def test_wandb_called_exactly_once_when_flag_true(eda_module, tmp_path: Path, fa
 
 
 # ---------------------------------------------------------------------------
-# 2026 hardening tier — single-pass scan, structured logging, schema, git SHA
+# 2026 hardening — schema + logging + single-scan + git SHA + Polars schema
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.contract
 def test_module_has_polars_schema(eda_module) -> None:
-    """POLARS_SCHEMA dict enforces column types at scan time (corruption guard)."""
     schema = getattr(eda_module, "POLARS_SCHEMA", None)
     assert isinstance(schema, dict)
     assert "text_length" in schema
@@ -278,7 +254,6 @@ def test_module_has_polars_schema(eda_module) -> None:
 
 @pytest.mark.contract
 def test_module_uses_logging(eda_module) -> None:
-    """Script must use stdlib logging (repo convention), not print."""
     import logging as stdlib_logging
 
     logger = getattr(eda_module, "logger", None)
@@ -287,7 +262,6 @@ def test_module_uses_logging(eda_module) -> None:
 
 @pytest.mark.unit
 def test_summary_includes_git_sha(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """summary.json must record git_sha for lineage audit."""
     eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -301,9 +275,6 @@ def test_summary_includes_git_sha(eda_module, tmp_path: Path, fake_manifest: Pat
 
 @pytest.mark.unit
 def test_compute_stats_single_scan(eda_module) -> None:
-    """_compute_stats must not call scan_ndjson more than once per invocation."""
-    from unittest.mock import patch
-
     import polars as pl
 
     original = pl.scan_ndjson
@@ -315,14 +286,11 @@ def test_compute_stats_single_scan(eda_module) -> None:
 
     with patch.object(pl, "scan_ndjson", side_effect=counting_scan):
         eda_module._compute_stats(str(MINI_SHARD))
-    assert call_count[0] == 1, f"expected 1 scan, got {call_count[0]}"
+    assert call_count[0] == 1
 
 
 @pytest.mark.unit
 def test_polars_schema_applied_at_scan(eda_module) -> None:
-    """POLARS_SCHEMA must be passed to pl.scan_ndjson (not just declared)."""
-    from unittest.mock import patch
-
     import polars as pl
 
     original = pl.scan_ndjson
@@ -334,26 +302,16 @@ def test_polars_schema_applied_at_scan(eda_module) -> None:
 
     with patch.object(pl, "scan_ndjson", side_effect=capturing_scan):
         eda_module._compute_stats(str(MINI_SHARD))
-
-    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs, (
-        "POLARS_SCHEMA not passed to scan_ndjson"
-    )
+    assert "schema_overrides" in captured_kwargs or "schema" in captured_kwargs
 
 
 # ---------------------------------------------------------------------------
-# 2026 hardening tier 2 — fail-fast validation, idempotency, CLI, temporal EDA
+# 2026 hardening tier 2 — fail-fast, idempotent, filtered stats, CLI, order
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.contract
 def test_no_import_time_side_effects() -> None:
-    """Re-import must not mutate matplotlib rcParams or numpy RNG state.
-
-    Import-time side effects break test isolation and library usage.
-    Backend/rcParams/seed config belongs inside function bodies.
-    """
-    import importlib
-
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -364,15 +322,14 @@ def test_no_import_time_side_effects() -> None:
 
     importlib.reload(importlib.import_module("scripts.eda_ms3_corpus"))
 
-    assert plt.rcParams["savefig.dpi"] == 999, "rcParams mutated at import"
+    assert plt.rcParams["savefig.dpi"] == 999
     np.random.seed(42)
-    assert np.random.rand() == sentinel, "numpy RNG reseeded at import"
+    assert np.random.rand() == sentinel
     plt.rcParams["savefig.dpi"] = baseline_dpi
 
 
 @pytest.mark.unit
 def test_missing_manifest_fails_fast(eda_module, tmp_path: Path) -> None:
-    """Missing manifest must raise FileNotFoundError before expensive scan."""
     missing = tmp_path / "does_not_exist.json"
     with pytest.raises(FileNotFoundError):
         eda_module.main(
@@ -385,11 +342,9 @@ def test_missing_manifest_fails_fast(eda_module, tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_stale_artifacts_removed(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Pre-existing stale PNG from a prior run must be removed before re-render."""
     stale = tmp_path / "text_length_hist.png"
     stale.write_bytes(b"stale")
     stale_sha = hashlib.sha256(b"stale").hexdigest()
-
     eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -402,7 +357,6 @@ def test_stale_artifacts_removed(eda_module, tmp_path: Path, fake_manifest: Path
 
 @pytest.mark.unit
 def test_summary_includes_filtered_stats(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Summary must report both pre-filter and post-filter corpus stats."""
     result = eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -410,7 +364,6 @@ def test_summary_includes_filtered_stats(eda_module, tmp_path: Path, fake_manife
         log_to_wandb=False,
     )
     assert "n_after_filter" in result
-    # mini_shard: 8 records, 3 short (<100) → 5 pass filter
     assert result["n_after_filter"] == 5
     assert result["n_after_filter"] + result["n_short_lt_100"] == result["n_total"]
     assert "text_length_mean_filtered" in result
@@ -418,7 +371,6 @@ def test_summary_includes_filtered_stats(eda_module, tmp_path: Path, fake_manife
 
 @pytest.mark.unit
 def test_summary_includes_chart_ranges(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Chart clipping bounds must be recorded in summary for audit."""
     result = eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -433,7 +385,6 @@ def test_summary_includes_chart_ranges(eda_module, tmp_path: Path, fake_manifest
 
 @pytest.mark.unit
 def test_summary_json_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """summary.json must serialize with sort_keys=True for stable diffs."""
     eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
@@ -441,16 +392,13 @@ def test_summary_json_deterministic(eda_module, tmp_path: Path, fake_manifest: P
         log_to_wandb=False,
     )
     raw = (tmp_path / "summary.json").read_text(encoding="utf-8")
-    import json as _json
-
-    loaded = _json.loads(raw)
-    resorted = _json.dumps(loaded, indent=2, sort_keys=True)
+    loaded = json.loads(raw)
+    resorted = json.dumps(loaded, indent=2, sort_keys=True)
     assert raw.strip() == resorted.strip()
 
 
 @pytest.mark.contract
 def test_module_has_cli(eda_module) -> None:
-    """Script must expose _build_arg_parser() for argparse CLI (repo convention)."""
     import argparse
 
     fn = getattr(eda_module, "_build_arg_parser", None)
@@ -461,27 +409,24 @@ def test_module_has_cli(eda_module) -> None:
 
 @pytest.mark.unit
 def test_circuit_order_deterministic(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
-    """Circuit bars must use canonical federal circuit order, not frequency."""
     result = eda_module.main(
         shard_glob=str(MINI_SHARD),
         out_dir=tmp_path,
         manifest_path=fake_manifest,
         log_to_wandb=False,
     )
-    # mini_shard circuits: ca1, ca2, ca5, ca9; canonical numeric order: ca1,ca2,ca5,ca9
     keys = list(result["circuit_counts"].keys())
     canonical = sorted(keys, key=lambda c: (0, int(c[2:])) if c[2:].isdigit() else (1, c))
     assert keys == canonical
 
 
 # ---------------------------------------------------------------------------
-# 2026 hardening tier 3 — Pydantic runtime validation + shared filter expression
+# 2026 hardening tier 3 — Pydantic runtime validation + shared filter expr
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.contract
 def test_data_contracts_exports_filter_expression() -> None:
-    """Filter logic must be single-sourced in src/data_contracts.py."""
     from src import data_contracts
 
     assert callable(getattr(data_contracts, "valid_record_expr", None))
@@ -491,7 +436,6 @@ def test_data_contracts_exports_filter_expression() -> None:
 
 @pytest.mark.unit
 def test_valid_record_expr_returns_polars_expr() -> None:
-    """valid_record_expr must return a pl.Expr usable in filters."""
     import polars as pl
 
     from src.data_contracts import valid_record_expr
@@ -500,12 +444,11 @@ def test_valid_record_expr_returns_polars_expr() -> None:
     assert isinstance(expr, pl.Expr)
     df = pl.DataFrame({"text_length": [50, 100, 150]})
     kept = df.filter(expr).height
-    assert kept == 2  # 100 and 150 pass
+    assert kept == 2
 
 
 @pytest.mark.contract
 def test_summary_pydantic_model_exists(eda_module) -> None:
-    """SummaryModel must be a Pydantic BaseModel for runtime I/O validation."""
     from pydantic import BaseModel
 
     model = getattr(eda_module, "SummaryModel", None)
@@ -514,7 +457,6 @@ def test_summary_pydantic_model_exists(eda_module) -> None:
 
 @pytest.mark.unit
 def test_summary_model_rejects_nan(eda_module) -> None:
-    """SummaryModel must reject NaN in numeric fields (fail-loud contract)."""
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
@@ -534,3 +476,137 @@ def test_summary_model_rejects_nan(eda_module) -> None:
             figure_hashes={},
             git_sha="abc",
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 4 — rc_context + clean_stale opt-out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_rcparams_not_mutated_after_render(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Plotting must use rc_context; global rcParams unchanged post-run."""
+    import matplotlib.pyplot as plt
+
+    before_dpi = plt.rcParams["savefig.dpi"]
+    before_autolayout = plt.rcParams["figure.autolayout"]
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert plt.rcParams["savefig.dpi"] == before_dpi
+    assert plt.rcParams["figure.autolayout"] == before_autolayout
+
+
+@pytest.mark.contract
+def test_main_accepts_clean_stale_flag(eda_module) -> None:
+    sig = inspect.signature(eda_module.main)
+    assert "clean_stale" in sig.parameters
+    assert sig.parameters["clean_stale"].default is True
+
+
+@pytest.mark.unit
+def test_clean_stale_false_preserves_prior_artifacts(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    keeper = tmp_path / "stale_keep.png"
+    keeper.write_bytes(b"stale")
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+        clean_stale=False,
+    )
+    assert keeper.exists()
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier 5 — honest docstrings, import purity, atomic writes,
+# canonical order in JSON, overflow accounting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_no_basicConfig_at_import() -> None:
+    """basicConfig must fire only under `if __name__ == "__main__"`, not at import."""
+    import ast
+
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def is_main_guard(node: ast.If) -> bool:
+        test = node.test
+        if isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == "__name__":
+            for c in test.comparators:
+                if isinstance(c, ast.Constant) and c.value == "__main__":
+                    return True
+        return False
+
+    for top in tree.body:
+        if isinstance(top, ast.If) and is_main_guard(top):
+            continue  # basicConfig allowed inside __main__ guard
+        for sub in ast.walk(top):
+            if isinstance(sub, ast.Call) and getattr(sub.func, "attr", None) == "basicConfig":
+                raise AssertionError("basicConfig fires at import (outside __main__ guard)")
+
+
+@pytest.mark.unit
+def test_summary_includes_overflow_counts(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Histogram clipping must record overflow counts in summary for audit."""
+    result = eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    assert "chart_overflow_counts" in result
+    assert "text_length_hist" in result["chart_overflow_counts"]
+    # mini_shard max length is 150 < 100_000 → zero overflow expected
+    assert result["chart_overflow_counts"]["text_length_hist"] == 0
+
+
+@pytest.mark.unit
+def test_circuit_order_preserved_in_json(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Canonical circuit order must survive JSON serialization (not alphabetized)."""
+    eda_module.main(
+        shard_glob=str(MINI_SHARD),
+        out_dir=tmp_path,
+        manifest_path=fake_manifest,
+        log_to_wandb=False,
+    )
+    raw = (tmp_path / "summary.json").read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    assert "circuit_order" in parsed
+    # mini_shard: ca1, ca2, ca5, ca9 in canonical numeric order
+    assert parsed["circuit_order"] == ["ca1", "ca2", "ca5", "ca9"]
+
+
+@pytest.mark.unit
+def test_stale_artifacts_preserved_on_render_failure(eda_module, tmp_path: Path, fake_manifest: Path) -> None:
+    """Failed run must NOT wipe prior good artifacts (atomic swap semantics)."""
+    good_png = tmp_path / "text_length_hist.png"
+    good_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"prior_good_artifact" * 100)
+    prior_sha = hashlib.sha256(good_png.read_bytes()).hexdigest()
+
+    # Force failure after cleanup would have run, before new render completes
+    with patch.object(eda_module, "_render_all", side_effect=RuntimeError("simulated")):
+        with pytest.raises(RuntimeError, match="simulated"):
+            eda_module.main(
+                shard_glob=str(MINI_SHARD),
+                out_dir=tmp_path,
+                manifest_path=fake_manifest,
+                log_to_wandb=False,
+            )
+    # Prior artifact must still exist unchanged after failed run.
+    assert good_png.exists()
+    assert hashlib.sha256(good_png.read_bytes()).hexdigest() == prior_sha
+
+
+@pytest.mark.contract
+def test_summary_dict_required_fields_strict(eda_module) -> None:
+    """SummaryDict must not be total=False — required fields explicit."""
+    import inspect
+
+    src = inspect.getsource(eda_module.SummaryDict)
+    assert "total=False" not in src, "SummaryDict must use Required/NotRequired, not total=False"
