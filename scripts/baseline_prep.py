@@ -18,22 +18,16 @@ src/bulk_download.py:141 repo convention). Crashed runs resume from
 last completed shard.
 
 Stratification: source_court key (via cl_matched_courts.json lookup),
-minority-group-preserving proportional split. Matches inference-time
+minority-group-preserving largest-remainder allocation. Guarantees every
+stratum with >=2 members appears in val or test. Matches inference-time
 query distribution (a user's question comes from a specific circuit).
-
-CLI:
-    uv run python scripts/baseline_prep.py \\
-        --shard-dir data/raw/cl_federal_appellate_bulk \\
-        --lepard-path lepard_train_4000000_rev0194f95.jsonl \\
-        --cl-ids-path data/processed/cl_ids.txt.gz \\
-        --court-map-path data/processed/cl_matched_courts.json \\
-        --out-dir data/processed/baseline
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -46,7 +40,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-# Module constants — repo convention (see src/dataset_probe.py)
 SCHEMA_VERSION = "1.0.0"
 CHUNK_SIZE_SUBWORDS = 1024
 CHUNK_OVERLAP_SUBWORDS = 128
@@ -54,7 +47,6 @@ ENCODER_MODEL = "BAAI/bge-m3"
 VAL_SIZE = 2000
 TEST_SIZE = 45000
 
-# Default paths
 DEFAULT_SHARD_DIR = Path("data/raw/cl_federal_appellate_bulk")
 DEFAULT_LEPARD = Path("lepard_train_4000000_rev0194f95.jsonl")
 DEFAULT_CL_IDS = Path("data/processed/cl_ids.txt.gz")
@@ -96,7 +88,7 @@ def _iter_usable_gold(
     lepard_path: Path,
     cl_ids: set[int],
 ) -> Iterator[dict[str, Any]]:
-    """Stream LePaRD pairs, yielding only those where both endpoints ∈ CL."""
+    """Stream LePaRD pairs, yielding only those where both endpoints are in CL."""
     with lepard_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
@@ -117,6 +109,29 @@ def _annotate_source_court(
 # ---------- stratified split ----------
 
 
+def _largest_remainder(
+    budget: int,
+    weights: dict[str, float],
+    caps: dict[str, int],
+) -> dict[str, int]:
+    """Largest-remainder apportionment respecting per-stratum caps."""
+    if budget == 0 or not weights:
+        return dict.fromkeys(weights, 0)
+    wsum = sum(weights.values()) or 1.0
+    raw = {c: budget * (w / wsum) for c, w in weights.items()}
+    floor = {c: int(r) for c, r in raw.items()}
+    leftover = budget - sum(floor.values())
+    remainder = sorted(
+        ((raw[c] - floor[c], c) for c in raw),
+        reverse=True,
+    )
+    for i in range(leftover):
+        floor[remainder[i % len(remainder)][1]] += 1
+    for c in floor:
+        floor[c] = min(floor[c], caps[c])
+    return floor
+
+
 def _stratified_split(
     pairs: list[dict[str, Any]],
     *,
@@ -126,40 +141,66 @@ def _stratified_split(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Minority-preserving proportional stratified split by source_court.
 
-    Guarantees every stratum with ≥2 members appears in val ∪ test.
-    Proportional allocation within ±1 per stratum due to int rounding.
+    Guarantees every stratum with >=2 members appears in val or test.
+    Algorithm: reserve a minority floor (1 slot in test for each stratum
+    with >=2 members), then distribute remaining val/test budget
+    proportionally using largest-remainder apportionment. Final shuffle
+    is seed-deterministic.
     """
     rng = random.Random(seed)
     by_court: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for p in pairs:
-        by_court[p["source_court"]].append(p)
+    for pair in pairs:
+        by_court[pair["source_court"]].append(pair)
     for court in by_court:
         rng.shuffle(by_court[court])
 
     total = sum(len(v) for v in by_court.values())
+    if total == 0:
+        return [], []
+
+    strata = sorted(by_court.items())
+    val_alloc: dict[str, int] = dict.fromkeys(by_court, 0)
+    test_alloc: dict[str, int] = dict.fromkeys(by_court, 0)
+
+    # Minority floor: 1 slot in test for each stratum with >=2 members
+    for court, members in strata:
+        if len(members) >= 2 and test_size > 0:
+            test_alloc[court] = 1
+
+    weights = {c: float(len(by_court[c])) for c in by_court}
+
+    # Proportional val allocation, capped at stratum size
+    val_caps = {c: len(by_court[c]) for c in by_court}
+    add_val = _largest_remainder(val_size, weights, val_caps)
+    for c in val_alloc:
+        val_alloc[c] = add_val[c]
+
+    # Test caps respect val allocation; clamp minority floor to cap
+    test_caps = {c: len(by_court[c]) - val_alloc[c] for c in by_court}
+    for c in test_alloc:
+        test_alloc[c] = min(test_alloc[c], test_caps[c])
+
+    # Remaining test budget distributed proportionally
+    remaining_test = max(0, test_size - sum(test_alloc.values()))
+    test_caps_after_floor = {c: test_caps[c] - test_alloc[c] for c in test_alloc}
+    add_test = _largest_remainder(
+        remaining_test,
+        weights,
+        test_caps_after_floor,
+    )
+    for c in test_alloc:
+        test_alloc[c] += add_test[c]
+
     val: list[dict[str, Any]] = []
     test: list[dict[str, Any]] = []
-
-    # Proportional allocation with minority guarantee (≥1 per stratum in
-    # val+test combined when stratum has ≥2 members)
-    for court, members in sorted(by_court.items()):
-        n = len(members)
-        share = n / total if total else 0
-        v_n = int(round(val_size * share))
-        t_n = int(round(test_size * share))
-        # Minority guarantee: if stratum has ≥2, ensure ≥1 in combined
-        if n >= 2 and v_n + t_n == 0:
-            t_n = 1
-        v_n = min(v_n, n)
-        t_n = min(t_n, n - v_n)
+    for court, members in strata:
+        v_n = val_alloc[court]
+        t_n = test_alloc[court]
         val.extend(members[:v_n])
         test.extend(members[v_n : v_n + t_n])
 
-    # Trim/pad to exact sizes deterministically
     rng.shuffle(val)
     rng.shuffle(test)
-    val = val[:val_size]
-    test = test[:test_size]
     return val, test
 
 
@@ -251,8 +292,6 @@ def _git_sha() -> str:
 
 
 def _corpus_manifest_sha(shard_dir: Path) -> str:
-    import hashlib
-
     manifest = shard_dir / "manifest.json"
     if not manifest.exists():
         return "0" * 64
@@ -272,13 +311,15 @@ def _chunk_corpus(
 ) -> tuple[int, int]:
     """Stream CL shards, chunk every opinion, write corpus_chunks.jsonl.
 
-    Returns (n_chunks, n_opinions). Resumes from last checkpoint if resume=True.
+    Returns (n_chunks, n_opinions). Resumes from last checkpoint if
+    resume=True; idempotent: counts pre-existing chunks from prior runs.
     """
     completed = _load_checkpoint(ckpt_path) if resume else set()
     shards = sorted(shard_dir.glob("shard_*.jsonl"))
     mode = "a" if completed else "w"
     n_chunks = 0
     n_opinions = 0
+
     # Idempotency: count pre-existing chunks from prior resumed runs
     if completed and out_path.exists():
         seen_opinions: set[int] = set()
@@ -288,6 +329,7 @@ def _chunk_corpus(
                 n_chunks += 1
                 seen_opinions.add(r["opinion_id"])
         n_opinions = len(seen_opinions)
+
     with out_path.open(mode, encoding="utf-8") as fout:
         for shard in shards:
             if shard.name in completed:
@@ -366,7 +408,6 @@ def main(
     logger.info(f"  court_map_path : {court_map_path}")
     logger.info(f"  out_dir        : {out_dir}")
 
-    # --- Gold pair extraction ---
     logger.info("\n[1/3] Loading CL id universe + court map")
     cl_ids = _load_cl_ids(cl_ids_path)
     court_map = _load_court_map(court_map_path)
@@ -376,7 +417,6 @@ def main(
     logger.info("\n[2/3] Extracting usable gold pairs")
     raw_pairs = list(_iter_usable_gold(lepard_path, cl_ids))
     pairs = _annotate_source_court(raw_pairs, court_map)
-    # Deduplicate (LePaRD has exact-duplicate pairs)
     seen: set[tuple[int, int]] = set()
     deduped: list[dict[str, Any]] = []
     for p in pairs:
@@ -405,14 +445,13 @@ def main(
         encoding="utf-8",
     )
 
-    val_dist = defaultdict(int)
-    test_dist = defaultdict(int)
+    val_dist: dict[str, int] = defaultdict(int)
+    test_dist: dict[str, int] = defaultdict(int)
     for p in val:
         val_dist[p["source_court"]] += 1
     for p in test:
         test_dist[p["source_court"]] += 1
 
-    # --- Corpus chunking ---
     logger.info("\n[3/3] Chunking CL corpus")
     tok = _get_tokenizer()
     corpus_path = out_dir / "corpus_chunks.jsonl"
@@ -427,12 +466,9 @@ def main(
     logger.info(f"  chunks written  : {n_chunks:,}")
     logger.info(f"  opinions        : {n_opinions:,}")
 
-    # --- Summary ---
     # SHA256 roundtrip for provenance (matches figure_hashes in EDA suites)
-    import hashlib as _hl
-
     gold_pair_hashes = {
-        fname: _hl.sha256((out_dir / fname).read_bytes()).hexdigest()
+        fname: hashlib.sha256((out_dir / fname).read_bytes()).hexdigest()
         for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl")
     }
 
