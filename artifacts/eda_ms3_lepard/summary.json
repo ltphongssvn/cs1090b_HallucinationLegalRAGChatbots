@@ -1,0 +1,34 @@
+{
+  "both_in_cl": 47247,
+  "cl_unique_ids": 1465484,
+  "court_distribution": {
+    "ca1": 3247,
+    "ca10": 6689,
+    "ca11": 7513,
+    "ca2": 6602,
+    "ca3": 6050,
+    "ca4": 13516,
+    "ca5": 17031,
+    "ca6": 7148,
+    "ca7": 5728,
+    "ca8": 5781,
+    "ca9": 13847,
+    "cadc": 3444,
+    "cafc": 3689
+  },
+  "dest_only": 199284,
+  "figure_hashes": {
+    "court_distribution.png": "c5b70f73861770d0bad760433cce6363baf26d73faca8abc8ecb64bf9cedf5d1",
+    "id_overlap.png": "7af799d74f025acc02e429e816ee52573390fc72c3072c43bbef62f2030dc041",
+    "pair_funnel.png": "1b61893773c99810c54e75dc558541385914da70e098bea8be2549a8ca9bdb9f"
+  },
+  "git_sha": "30ab25bb302e",
+  "lepard_unique_ids": 662858,
+  "neither": 1316267,
+  "overlap_ids": 100285,
+  "schema_version": "1.0.0",
+  "source_only": 250120,
+  "total_rows": 4000000,
+  "unique_pairs": 1812918,
+  "usable_pct": 2.606130006983217
+}

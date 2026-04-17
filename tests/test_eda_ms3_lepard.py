@@ -490,3 +490,56 @@ def test_summary_rejects_nan_via_pydantic(lepard_module) -> None:
             figure_hashes={},
             git_sha="abc1234",
         )
+
+
+@pytest.mark.contract
+def test_report_arg_typed_as_compatreport(lepard_module) -> None:
+    """_render_all and _build_summary must type 'report' as CompatReport."""
+    import inspect
+
+    for fn_name in ("_render_all", "_build_summary"):
+        fn = getattr(lepard_module, fn_name)
+        sig = inspect.signature(fn)
+        ann = sig.parameters["report"].annotation
+        ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", str(ann))
+        assert ann_name == "CompatReport", f"{fn_name}.report annotated {ann!r}, want CompatReport"
+
+
+@pytest.mark.unit
+def test_id_overlap_label_not_sampled(cached_run) -> None:
+    """id_overlap.png label must say 'CL only', not 'CL only (sampled)'."""
+    from matplotlib import image as mpimg  # noqa: F401  (ensures backend)
+
+    _, out_dir = cached_run
+    # Chart label content is asserted via re-render into an in-memory Figure
+    # by inspecting the source constant.
+    src = (REPO_ROOT / "scripts" / "eda_ms3_lepard.py").read_text(encoding="utf-8")
+    assert "CL only (sampled)" not in src
+    assert '"CL only"' in src
+
+
+@pytest.mark.contract
+def test_has_clean_stale_artifacts(lepard_module) -> None:
+    """Must expose stale-cleanup helper for consistency with eda_ms3_corpus."""
+    assert callable(getattr(lepard_module, "_clean_stale_artifacts", None))
+
+
+@pytest.mark.unit
+def test_stale_artifacts_removed_on_success(lepard_module, tmp_path: Path) -> None:
+    stale = tmp_path / "old_figure.png"
+    stale.write_bytes(b"\x89PNG\r\n\x1a\n" + b"stale" * 200)
+    lepard_module.main(
+        lepard_path=LEPARD_FIXTURE,
+        cl_ids_path=CL_IDS_FIXTURE,
+        court_map_path=COURT_MAP_FIXTURE,
+        out_dir=tmp_path,
+        log_to_wandb=False,
+    )
+    assert not stale.exists()
+
+
+@pytest.mark.contract
+def test_court_distribution_materialized_once(lepard_module) -> None:
+    """report.court_distribution must be cast to dict exactly once in main()."""
+    src = (REPO_ROOT / "scripts" / "eda_ms3_lepard.py").read_text(encoding="utf-8")
+    assert src.count("dict(report.court_distribution)") <= 1

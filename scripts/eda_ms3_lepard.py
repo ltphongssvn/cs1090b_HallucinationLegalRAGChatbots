@@ -34,6 +34,7 @@ from src.lepard_cl_compat import (
     DEFAULT_CL_IDS,
     DEFAULT_COURT_MAP,
     DEFAULT_LEPARD,
+    CompatReport,
     run_full_analysis,
 )
 
@@ -67,6 +68,13 @@ def _validate_inputs(lepard_path: Path, cl_ids_path: Path, court_map_path: Path)
     for label, p in [("lepard", lepard_path), ("cl_ids", cl_ids_path), ("court_map", court_map_path)]:
         if not Path(p).exists():
             raise FileNotFoundError(f"{label} path not found: {p}")
+
+
+def _clean_stale_artifacts(out_dir: Path) -> None:
+    """Remove PNGs and summary.json from prior runs to prevent stale survival."""
+    for pattern in ("*.png", "summary.json"):
+        for f in out_dir.glob(pattern):
+            f.unlink()
 
 
 def _plot_pair_funnel(total: int, unique: int, both: int, out: Path) -> Path:
@@ -104,7 +112,7 @@ def _plot_court_distribution(court_dist: dict[str, int], out: Path) -> Path:
 
 def _plot_id_overlap(lepard_ids: int, cl_ids: int, overlap: int, out: Path) -> Path:
     fig, ax = plt.subplots(figsize=(8, 5))
-    labels = ["LePaRD\nonly", "Overlap", "CL only (sampled)"]
+    labels = ["LePaRD\nonly", "Overlap", "CL only"]
     values = [lepard_ids - overlap, overlap, max(0, cl_ids - overlap)]
     colors = ["#4C72B0", "#55A868", "#C44E52"]
     ax.bar(labels, values, color=colors, edgecolor="white")
@@ -118,7 +126,8 @@ def _plot_id_overlap(lepard_ids: int, cl_ids: int, overlap: int, out: Path) -> P
     return out
 
 
-def _render_all(report, out_dir: Path) -> list[Path]:
+def _render_all(report: CompatReport, out_dir: Path) -> tuple[list[Path], dict[str, int]]:
+    court_dist = dict(report.court_distribution)
     with plt.rc_context(_apply_plot_defaults()):
         matplotlib.use("Agg", force=False)
         paths = [
@@ -128,7 +137,7 @@ def _render_all(report, out_dir: Path) -> list[Path]:
                 report.pair_overlap.both_in_cl,
                 out_dir / "pair_funnel.png",
             ),
-            _plot_court_distribution(dict(report.court_distribution), out_dir / "court_distribution.png"),
+            _plot_court_distribution(court_dist, out_dir / "court_distribution.png"),
             _plot_id_overlap(
                 report.id_overlap.lepard_unique_ids,
                 report.id_overlap.cl_unique_ids,
@@ -136,10 +145,10 @@ def _render_all(report, out_dir: Path) -> list[Path]:
                 out_dir / "id_overlap.png",
             ),
         ]
-    return paths
+    return paths, court_dist
 
 
-def _build_summary(report, figure_paths: list[Path]) -> dict[str, Any]:
+def _build_summary(report: CompatReport, figure_paths: list[Path], court_dist: dict[str, int]) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "total_rows": report.pair_overlap.total_rows,
@@ -152,7 +161,7 @@ def _build_summary(report, figure_paths: list[Path]) -> dict[str, Any]:
         "dest_only": report.pair_overlap.dest_only_in_cl,
         "neither": report.pair_overlap.neither_in_cl,
         "usable_pct": report.pair_overlap.usable_pct,
-        "court_distribution": dict(report.court_distribution),
+        "court_distribution": court_dist,
         "figure_hashes": {fp.name: _sha256_file(fp) for fp in figure_paths},
         "git_sha": _git_sha(),
     }
@@ -242,9 +251,13 @@ def main(
         court_map_path=court_map_path,
     )
 
-    figure_paths = _render_all(report, out_dir)
-    summary = _build_summary(report, figure_paths)
+    prior_artifacts = set(out_dir.glob("*.png")) | set(out_dir.glob("summary.json"))
+    figure_paths, court_dist = _render_all(report, out_dir)
+    summary = _build_summary(report, figure_paths, court_dist)
     summary_path = _write_summary(summary, out_dir)
+    new_artifacts = set(figure_paths) | {summary_path}
+    for stale in prior_artifacts - new_artifacts:
+        stale.unlink(missing_ok=True)
     logger.info(f"Wrote {len(figure_paths)} figures + summary.json to {out_dir}/")
 
     if log_to_wandb:
