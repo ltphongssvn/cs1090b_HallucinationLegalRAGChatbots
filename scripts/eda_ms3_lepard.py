@@ -223,6 +223,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(
+    *,
     lepard_path: Path = DEFAULT_LEPARD,
     cl_ids_path: Path = DEFAULT_CL_IDS,
     court_map_path: Path = DEFAULT_COURT_MAP,

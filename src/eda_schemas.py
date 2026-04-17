@@ -52,5 +52,7 @@ class EdaLepardSummary(BaseModel):
     neither: int = Field(ge=0)
     usable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
     court_distribution: dict[str, int]
-    figure_hashes: dict[str, str]
+    figure_hashes: dict[str, str] = Field(
+        description="SHA256 hex of each emitted PNG (64 lowercase hex chars)",
+    )
     git_sha: str
