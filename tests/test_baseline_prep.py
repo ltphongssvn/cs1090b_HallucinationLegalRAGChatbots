@@ -441,3 +441,157 @@ class TestStratificationProperty:
         combined_courts = {p["source_court"] for p in val} | {p["source_court"] for p in test}
         # Every input court must appear somewhere in val ∪ test
         assert set(court_counts.keys()).issubset(combined_courts)
+
+
+# ---------- additional TDD tier (post-review hardening) ----------
+
+
+@pytest.mark.property
+class TestChunkerInvariants:
+    """Hypothesis-driven invariants on _chunk_text."""
+
+    @given(n_tokens=st.integers(min_value=1, max_value=5000))
+    @settings(max_examples=50, deadline=None)
+    def test_no_chunk_exceeds_window(
+        self,
+        baseline_module: Any,
+        n_tokens: int,
+    ) -> None:
+        """Every chunk must fit in CHUNK_SIZE_SUBWORDS window."""
+        tok = DummyTokenizer()
+        text = "w " * n_tokens
+        chunks = baseline_module._chunk_text(text, opinion_id=1, tok=tok)
+        for c in chunks:
+            encoded = tok.encode(c["text"])
+            assert len(encoded) <= baseline_module.CHUNK_SIZE_SUBWORDS
+
+    @given(n_tokens=st.integers(min_value=1025, max_value=5000))
+    @settings(max_examples=30, deadline=None)
+    def test_stride_equals_window_minus_overlap(
+        self,
+        baseline_module: Any,
+        n_tokens: int,
+    ) -> None:
+        """Multi-chunk outputs must advance by exactly stride = 1024 - 128 = 896."""
+        tok = DummyTokenizer()
+        text = "w " * n_tokens
+        chunks = baseline_module._chunk_text(text, opinion_id=1, tok=tok)
+        assert len(chunks) >= 2
+        expected_chunks = 1 + (n_tokens - baseline_module.CHUNK_SIZE_SUBWORDS + 895) // 896
+        # Allow ±1 for final-chunk boundary
+        assert abs(len(chunks) - expected_chunks) <= 1
+
+    @given(n_tokens=st.integers(min_value=1, max_value=3000))
+    @settings(max_examples=30, deadline=None)
+    def test_chunking_deterministic(
+        self,
+        baseline_module: Any,
+        n_tokens: int,
+    ) -> None:
+        """Same input → same chunks (bit-exact)."""
+        tok = DummyTokenizer()
+        text = "w " * n_tokens
+        c1 = baseline_module._chunk_text(text, opinion_id=7, tok=tok)
+        c2 = baseline_module._chunk_text(text, opinion_id=7, tok=tok)
+        assert c1 == c2
+
+
+@pytest.mark.unit
+class TestMainResumeIdempotency:
+    """Running main() twice with resume=True must not duplicate outputs."""
+
+    def test_second_run_produces_identical_summary(
+        self,
+        baseline_module: Any,
+        tmp_path: Path,
+        mini_shard: Path,
+        mini_lepard: Path,
+        mini_cl_ids: Path,
+        mini_court_map: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            baseline_module,
+            "_get_tokenizer",
+            lambda: DummyTokenizer(),
+        )
+        out_dir = tmp_path / "out"
+        kwargs = dict(
+            shard_dir=mini_shard,
+            lepard_path=mini_lepard,
+            cl_ids_path=mini_cl_ids,
+            court_map_path=mini_court_map,
+            out_dir=out_dir,
+            log_to_wandb=False,
+            resume=True,
+            seed=0,
+            val_size=2,
+            test_size=2,
+        )
+        s1 = baseline_module.main(**kwargs)
+        chunks_after_first = (out_dir / "corpus_chunks.jsonl").read_text()
+
+        s2 = baseline_module.main(**kwargs)
+        chunks_after_second = (out_dir / "corpus_chunks.jsonl").read_text()
+
+        # Idempotent: summary identical, corpus_chunks not duplicated
+        assert s1["corpus_chunks"] == s2["corpus_chunks"]
+        assert s1["n_opinions_chunked"] == s2["n_opinions_chunked"]
+        assert chunks_after_first == chunks_after_second
+
+
+@pytest.mark.unit
+class TestGoldPairHashRoundtrip:
+    """summary.json must record SHA256 of gold_pairs_*.jsonl for provenance.
+
+    Matches tests/test_eda_ms3_lepard.py:230 figure_hashes pattern.
+    """
+
+    def test_gold_pair_hashes_in_summary(
+        self,
+        baseline_module: Any,
+        tmp_path: Path,
+        mini_shard: Path,
+        mini_lepard: Path,
+        mini_cl_ids: Path,
+        mini_court_map: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import hashlib
+
+        monkeypatch.setattr(
+            baseline_module,
+            "_get_tokenizer",
+            lambda: DummyTokenizer(),
+        )
+        out_dir = tmp_path / "out"
+        baseline_module.main(
+            shard_dir=mini_shard,
+            lepard_path=mini_lepard,
+            cl_ids_path=mini_cl_ids,
+            court_map_path=mini_court_map,
+            out_dir=out_dir,
+            log_to_wandb=False,
+            resume=False,
+            seed=0,
+            val_size=2,
+            test_size=2,
+        )
+        summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        assert "gold_pair_hashes" in summary
+        for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl"):
+            recorded = summary["gold_pair_hashes"][fname]
+            actual = hashlib.sha256(
+                (out_dir / fname).read_bytes(),
+            ).hexdigest()
+            assert recorded == actual, f"{fname} hash mismatch"
+
+
+@pytest.mark.contract
+class TestSummarySchemaIncludesGoldPairHashes:
+    """BaselinePrepSummary must expose gold_pair_hashes field."""
+
+    def test_field_present(self) -> None:
+        from src.eda_schemas import BaselinePrepSummary
+
+        assert "gold_pair_hashes" in BaselinePrepSummary.model_fields
