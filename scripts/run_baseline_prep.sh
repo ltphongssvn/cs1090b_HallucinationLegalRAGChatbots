@@ -107,22 +107,15 @@ fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo
-    echo "=== DRY RUN: validating script import + CLI parse ==="
-    PYTHONPATH="$REPO_ROOT" uv run python -c "
-from scripts import baseline_prep
-ap = baseline_prep._build_arg_parser()
-args = ap.parse_args([
-    '--shard-dir', '$SHARD_DIR',
-    '--lepard-path', '$LEPARD',
-    '--cl-ids-path', '$CL_IDS',
-    '--court-map-path', '$COURT_MAP',
-    '--out-dir', '$OUT_DIR',
-    '--seed', '$SEED',
-])
-print(f'OK parsed args: {vars(args)}')
-print(f'OK constants: CHUNK={baseline_prep.CHUNK_SIZE_SUBWORDS} OVERLAP={baseline_prep.CHUNK_OVERLAP_SUBWORDS}')
-print(f'OK VAL_SIZE={baseline_prep.VAL_SIZE} TEST_SIZE={baseline_prep.TEST_SIZE}')
-"
+    echo "=== DRY RUN: delegating to scripts/baseline_prep.py --dry-run ==="
+    PYTHONPATH="$REPO_ROOT" uv run python scripts/baseline_prep.py \
+        --shard-dir "$SHARD_DIR" \
+        --lepard-path "$LEPARD" \
+        --cl-ids-path "$CL_IDS" \
+        --court-map-path "$COURT_MAP" \
+        --out-dir "$OUT_DIR" \
+        --seed "$SEED" \
+        --dry-run
     echo
     echo "DRY RUN complete — safe to launch full run with:"
     echo "  bash scripts/run_baseline_prep.sh"

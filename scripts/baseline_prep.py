@@ -514,11 +514,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-size", type=int, default=VAL_SIZE)
     ap.add_argument("--test-size", type=int, default=TEST_SIZE)
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Validate inputs + print fingerprint without running pipeline"
+    )
     return ap
 
 
 if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
+    if args.dry_run:
+        import sys as _sys
+
+        print("[baseline_prep] DRY RUN")
+        print(f"  schema_version : {SCHEMA_VERSION}")
+        print(f"  CHUNK_SIZE     : {CHUNK_SIZE_SUBWORDS}")
+        print(f"  CHUNK_OVERLAP  : {CHUNK_OVERLAP_SUBWORDS}")
+        print(f"  ENCODER_MODEL  : {ENCODER_MODEL}")
+        print(f"  VAL_SIZE       : {VAL_SIZE}")
+        print(f"  TEST_SIZE      : {TEST_SIZE}")
+        print(f"  python         : {_sys.version.split()[0]}")
+        print(f"  git_sha        : {_git_sha()}")
+        print(f"  args           : {vars(args)}")
+        _sys.exit(0)
     main(
         shard_dir=args.shard_dir,
         lepard_path=args.lepard_path,
