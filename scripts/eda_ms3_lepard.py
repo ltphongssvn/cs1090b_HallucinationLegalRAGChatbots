@@ -27,8 +27,9 @@ from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field  # noqa: F401
 
+from src.eda_schemas import EdaLepardSummary as SummaryModel
 from src.lepard_cl_compat import (
     DEFAULT_CL_IDS,
     DEFAULT_COURT_MAP,
@@ -41,25 +42,6 @@ logger.addHandler(logging.NullHandler())
 
 SCHEMA_VERSION = "1.0.0"
 DEFAULT_OUT_DIR = Path("logs/eda_ms3_lepard")
-
-
-class SummaryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: str
-    total_rows: int = Field(ge=0)
-    unique_pairs: int = Field(ge=0)
-    lepard_unique_ids: int = Field(ge=0)
-    cl_unique_ids: int = Field(ge=0)
-    overlap_ids: int = Field(ge=0)
-    both_in_cl: int = Field(ge=0)
-    source_only: int = Field(ge=0)
-    dest_only: int = Field(ge=0)
-    neither: int = Field(ge=0)
-    usable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
-    court_distribution: dict[str, int]
-    figure_hashes: dict[str, str]
-    git_sha: str
 
 
 def _apply_plot_defaults() -> dict[str, Any]:
