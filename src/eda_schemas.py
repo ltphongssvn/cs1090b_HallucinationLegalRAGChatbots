@@ -74,3 +74,7 @@ class BaselinePrepSummary(BaseModel):
     seed: int
     git_sha: str
     corpus_manifest_sha: str = Field(min_length=64, max_length=64)
+    gold_pair_hashes: dict[str, str] = Field(
+        default_factory=dict,
+        description="SHA256 hex of each gold_pairs_*.jsonl (64 lowercase hex chars)",
+    )

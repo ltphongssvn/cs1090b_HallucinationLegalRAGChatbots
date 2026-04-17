@@ -279,6 +279,15 @@ def _chunk_corpus(
     mode = "a" if completed else "w"
     n_chunks = 0
     n_opinions = 0
+    # Idempotency: count pre-existing chunks from prior resumed runs
+    if completed and out_path.exists():
+        seen_opinions: set[int] = set()
+        with out_path.open(encoding="utf-8") as fin:
+            for line in fin:
+                r = json.loads(line)
+                n_chunks += 1
+                seen_opinions.add(r["opinion_id"])
+        n_opinions = len(seen_opinions)
     with out_path.open(mode, encoding="utf-8") as fout:
         for shard in shards:
             if shard.name in completed:
@@ -419,6 +428,14 @@ def main(
     logger.info(f"  opinions        : {n_opinions:,}")
 
     # --- Summary ---
+    # SHA256 roundtrip for provenance (matches figure_hashes in EDA suites)
+    import hashlib as _hl
+
+    gold_pair_hashes = {
+        fname: _hl.sha256((out_dir / fname).read_bytes()).hexdigest()
+        for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl")
+    }
+
     summary_data = {
         "schema_version": SCHEMA_VERSION,
         "corpus_chunks": n_chunks,
@@ -432,6 +449,7 @@ def main(
         "seed": seed,
         "git_sha": _git_sha(),
         "corpus_manifest_sha": _corpus_manifest_sha(shard_dir),
+        "gold_pair_hashes": gold_pair_hashes,
     }
     validated = BaselinePrepSummary.model_validate(summary_data)
     summary_path = out_dir / "summary.json"
