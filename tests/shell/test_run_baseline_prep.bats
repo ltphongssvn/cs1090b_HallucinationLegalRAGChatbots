@@ -50,3 +50,32 @@ setup() {
     [ "$status" -eq 3 ]
     [[ "$output" == *"already running"* ]]
 }
+
+@test "unknown flag rejected with nonzero exit" {
+    run bash scripts/run_baseline_prep.sh --dryrun
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown"* ]] || [[ "$output" == *"FAIL"* ]]
+}
+
+@test "--no-resume forwarded to python dry-run" {
+    run bash scripts/run_baseline_prep.sh --dry-run --no-resume
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'resume': False"* ]]
+}
+
+@test "--resume default forwarded to python dry-run" {
+    run bash scripts/run_baseline_prep.sh --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'resume': True"* ]]
+}
+
+@test "dry-run prints hostname + UTC start in manifest preview" {
+    run bash scripts/run_baseline_prep.sh --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hostname"* ]]
+}
+
+@test "script sets PYTHONUNBUFFERED for live logs" {
+    run grep -E "PYTHONUNBUFFERED|python -u" scripts/run_baseline_prep.sh
+    [ "$status" -eq 0 ]
+}

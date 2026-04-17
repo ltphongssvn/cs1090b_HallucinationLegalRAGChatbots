@@ -50,6 +50,10 @@ for arg in "$@"; do
             grep '^#' "$0" | head -n 25
             exit 0
             ;;
+        *)
+            echo "FAIL: unknown flag: $arg" >&2
+            exit 5
+            ;;
     esac
 done
 
@@ -66,6 +70,8 @@ echo "  resume          : $RESUME_FLAG"
 echo "  dry_run         : $DRY_RUN"
 echo "  threads (OMP)   : $OMP_NUM_THREADS"
 echo "  threads (POLARS): $POLARS_MAX_THREADS"
+echo "  hostname        : $(hostname)"
+echo "  utc_start       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 
 for path in "$SHARD_DIR" "$LEPARD" "$CL_IDS" "$COURT_MAP"; do
@@ -115,6 +121,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         --court-map-path "$COURT_MAP" \
         --out-dir "$OUT_DIR" \
         --seed "$SEED" \
+        $RESUME_FLAG \
         --dry-run
     echo
     echo "DRY RUN complete — safe to launch full run with:"
@@ -136,6 +143,7 @@ echo "  log  : $LOG_FILE"
 echo "  pid  : $PID_FILE"
 
 nohup env \
+    PYTHONUNBUFFERED=1 \
     PYTHONPATH="$REPO_ROOT" \
     OMP_NUM_THREADS="$OMP_NUM_THREADS" \
     MKL_NUM_THREADS="$MKL_NUM_THREADS" \
