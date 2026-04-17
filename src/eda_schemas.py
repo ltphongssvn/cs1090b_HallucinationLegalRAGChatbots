@@ -56,3 +56,21 @@ class EdaLepardSummary(BaseModel):
         description="SHA256 hex of each emitted PNG (64 lowercase hex chars)",
     )
     git_sha: str
+
+
+class BaselinePrepSummary(BaseModel):
+    """Contract for data/processed/baseline/summary.json (baseline dataset prep)."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: str
+    corpus_chunks: int = Field(ge=0)
+    n_opinions_chunked: int = Field(ge=0)
+    gold_pairs_total: int = Field(ge=0)
+    gold_pairs_train: int = Field(ge=0)
+    gold_pairs_val: int = Field(ge=0)
+    gold_pairs_test: int = Field(ge=0)
+    val_court_distribution: dict[str, int]
+    test_court_distribution: dict[str, int]
+    seed: int
+    git_sha: str
+    corpus_manifest_sha: str = Field(min_length=64, max_length=64)
