@@ -164,6 +164,8 @@ nohup env \
 
 PID=$!
 echo "$PID" > "$PID_FILE"
+# Symlink binds monitor to this specific run's log (not newest-mtime heuristic)
+ln -sfn "$(basename "$LOG_FILE")" "logs/baseline_prep.current_log"
 LAUNCHED=1
 echo "OK launched: PID=$PID"
 

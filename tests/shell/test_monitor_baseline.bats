@@ -21,6 +21,7 @@ setup() {
 
 @test "missing log directory produces clear message" {
     tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/logs" "$tmpdir/data/processed/baseline"
     run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh"
     rm -rf "$tmpdir"
     [[ "$output" == *"no log"* ]] || [[ "$output" == *"No artifacts"* ]]
@@ -125,5 +126,25 @@ setup() {
     mkdir -p "$tmpdir/data/processed/baseline" "$tmpdir/logs" "$tmpdir/data/raw/cl_federal_appellate_bulk"
     run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh --strict"
     rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+}
+
+@test "monitor rejects unknown options" {
+    run bash scripts/monitor_baseline.sh --notaflag
+    [ "$status" -ne 0 ]
+}
+
+@test "monitor uses uv run --no-sync --offline (read-only, no env mutation)" {
+    run grep -cE "uv run --no-sync --offline" scripts/monitor_baseline.sh
+    [ "$output" -ge 2 ]
+}
+
+@test "runner writes current_log symlink for run-identity binding" {
+    run grep -E "current_log|ln -sfn" scripts/run_baseline_prep.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "monitor reads current log via symlink, not ls -t" {
+    run grep -E "baseline_prep.current_log" scripts/monitor_baseline.sh
     [ "$status" -eq 0 ]
 }

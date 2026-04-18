@@ -3,10 +3,14 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+# Honor caller's CWD so tests can run in tmpdir with their own data/ layout.
+# If CWD has no logs/ or data/processed/baseline/, fall back to REPO_ROOT.
+if [[ ! -d "logs" && ! -d "data/processed/baseline" ]]; then
+    cd "$REPO_ROOT"
+fi
 
-PID_FILE="logs/baseline_prep.pid"
-OUT_DIR="data/processed/baseline"
+PID_FILE="${PID_FILE:-logs/baseline_prep.pid}"
+OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 SHARD_DIR="${SHARD_DIR:-data/raw/cl_federal_appellate_bulk}"
 WC_SIZE_GUARD_GB="${WC_SIZE_GUARD_GB:-5}"
 
@@ -21,11 +25,20 @@ for arg in "$@"; do
             ;;
         --json)   JSON_MODE=1 ;;
         --strict) STRICT_MODE=1 ;;
+        *)
+            echo "FAIL: unknown option: $arg" >&2
+            exit 2
+            ;;
     esac
 done
 
 # --- Gather state ---
-LOG_FILE=$(ls -t logs/baseline_prep_*.log 2>/dev/null | head -1)
+# Prefer run-identity symlink; fall back to newest-log glob
+if [[ -L logs/baseline_prep.current_log ]]; then
+    LOG_FILE=$(readlink logs/baseline_prep.current_log)
+else
+    LOG_FILE=$(ls -t logs/baseline_prep_*.log 2>/dev/null | head -1)
+fi
 PROC_ETIME_SEC=0
 PROC_STATUS="not_running"
 PROC_PID=""
@@ -54,7 +67,7 @@ CORPUS="$OUT_DIR/corpus_chunks.jsonl"
 TOTAL_SHARDS=$(find "$SHARD_DIR" -maxdepth 1 -name 'shard_*.jsonl' 2>/dev/null | wc -l)
 SHARDS_DONE=0
 if [[ -f "$CKPT" ]]; then
-    SHARDS_DONE=$(PYTHONPATH="$REPO_ROOT" uv run python -c "
+    SHARDS_DONE=$(PYTHONPATH="$REPO_ROOT" uv run --no-sync --offline python -c "
 import json
 try:
     print(len(json.load(open('$CKPT'))['completed']))
@@ -74,7 +87,7 @@ SUMMARY_PRESENT=0
 SUMMARY_VALID="n/a"
 if [[ -f "$SUMMARY" ]]; then
     SUMMARY_PRESENT=1
-    SUMMARY_VALID=$(PYTHONPATH="$REPO_ROOT" uv run python -c "
+    SUMMARY_VALID=$(PYTHONPATH="$REPO_ROOT" uv run --no-sync --offline python -c "
 from src.eda_schemas import BaselinePrepSummary
 from pathlib import Path
 try:
@@ -97,7 +110,7 @@ fi
 
 # --- JSON mode ---
 if [[ "$JSON_MODE" -eq 1 ]]; then
-    PYTHONPATH="$REPO_ROOT" uv run python -c "
+    PYTHONPATH="$REPO_ROOT" uv run --no-sync --offline python -c "
 import json
 print(json.dumps({
     'timestamp_utc': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
