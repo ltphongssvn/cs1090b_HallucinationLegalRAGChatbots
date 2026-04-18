@@ -16,7 +16,7 @@ setup() {
 }
 
 @test "requests 128G memory" {
-    run grep -E "^#SBATCH --mem=90G" scripts/baseline_bm25.sbatch
+    run grep -E "^#SBATCH --mem=160G" scripts/baseline_bm25.sbatch
     [ "$status" -eq 0 ]
 }
 
