@@ -1040,3 +1040,13 @@ class TestEdgeCaseQueries:
         results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
         # Query set should dedupe to 1
         assert len(results) == 1
+
+
+@pytest.mark.contract
+class TestDryRunFlag:
+    """Runner delegates to Python --dry-run; must be in argparse contract."""
+
+    def test_dry_run_in_parser(self, bm25_module: Any) -> None:
+        parser = bm25_module._build_arg_parser()
+        actions = {a.dest: a for a in parser._actions}
+        assert "dry_run" in actions

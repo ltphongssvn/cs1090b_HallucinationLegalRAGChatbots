@@ -218,7 +218,7 @@ def main(
     query_texts = [q["query_text"] for q in queries]
     logger.info(f"  tokenizing {len(query_texts):,} queries")
     batched_tokens = bm25s.tokenize(query_texts, stopwords="en")
-    logger.info("  retrieving (n_threads=16, batched)")
+    logger.info("  retrieving (n_threads=48, batched)")
     all_indices, all_scores = retriever.retrieve(
         batched_tokens,
         k=retrieval_k,
