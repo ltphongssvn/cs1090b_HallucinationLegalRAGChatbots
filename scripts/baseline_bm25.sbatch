@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
-#SBATCH --mem=128G
+#SBATCH --mem=90G
 #SBATCH --time=02:00:00
 #SBATCH --requeue
 #SBATCH --output=logs/bm25_slurm_%j.log
