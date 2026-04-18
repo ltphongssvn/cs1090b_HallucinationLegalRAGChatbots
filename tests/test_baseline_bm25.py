@@ -37,8 +37,8 @@ class TestModuleConstants:
         assert isinstance(m.SCHEMA_VERSION, str)
         assert len(m.SCHEMA_VERSION.split(".")) == 3
         assert isinstance(m.TOP_K, int) and m.TOP_K >= 100
-        assert m.BM25_K1 == 1.5  # README bm25s baseline
-        assert m.BM25_B == 0.75
+        assert m.BM25_K1 == pytest.approx(1.5)  # README bm25s baseline
+        assert m.BM25_B == pytest.approx(0.75)
 
 
 @pytest.mark.contract
@@ -96,17 +96,37 @@ class TestArgparseCLI:
 @pytest.mark.contract
 class TestUsesBM25s:
     def test_bm25s_import(self) -> None:
-        """Must use repo-certified bm25s (not custom BM25 impl)."""
+        """Must use repo-certified bm25s via AST (not substring match)."""
         src = (REPO_ROOT / "scripts" / "baseline_bm25.py").read_text(encoding="utf-8")
-        assert "import bm25s" in src or "from bm25s" in src
+        tree = ast.parse(src)
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(a.name == "bm25s" for a in node.names):
+                    found = True
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "bm25s":
+                    found = True
+        assert found, "scripts/baseline_bm25.py must import bm25s"
 
 
 @pytest.mark.contract
 class TestUsesQuoteFieldAsQuery:
-    def test_quote_field_documented(self) -> None:
-        """Query text must come from LePaRD 'quote' field (not passage/destination_context)."""
+    def test_quote_used_as_dict_key(self) -> None:
+        """Query text must come from LePaRD 'quote' field, verified via AST as subscript or method-call arg."""
         src = (REPO_ROOT / "scripts" / "baseline_bm25.py").read_text(encoding="utf-8")
-        assert '"quote"' in src or "'quote'" in src
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            # Match row["quote"] or r.get("quote")
+            if isinstance(node, ast.Subscript):
+                idx = node.slice
+                if isinstance(idx, ast.Constant) and idx.value == "quote":
+                    return
+            if isinstance(node, ast.Call):
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and arg.value == "quote":
+                        return
+        raise AssertionError("'quote' must be used as a dict key/method arg in baseline_bm25.py")
 
 
 # ---------- unit tier ----------
@@ -358,7 +378,7 @@ class TestProducedSummaryValidates:
         validated = BaselineBM25Summary.model_validate_json(summary_path.read_bytes())
         assert validated.n_queries == 3
         assert validated.top_k == 5
-        assert validated.bm25_k1 == 1.5
+        assert validated.bm25_k1 == pytest.approx(1.5)
         assert len(validated.results_hash) == 64
 
 
@@ -487,3 +507,180 @@ class TestRetrievalInvariants:
             # Scores monotonically decreasing
             scores = [h["score"] for h in r["retrieved"]]
             assert scores == sorted(scores, reverse=True)
+
+
+# ---------- second hardening round ----------
+
+
+@pytest.mark.contract
+class TestAggregateChunkScoresExists:
+    """Pure function for chunk→opinion aggregation, separate from I/O orchestration."""
+
+    def test_function_exists(self, bm25_module: Any) -> None:
+        assert callable(getattr(bm25_module, "_aggregate_chunk_scores", None))
+
+    def test_signature(self, bm25_module: Any) -> None:
+        sig = inspect.signature(bm25_module._aggregate_chunk_scores)
+        expected = {"raw_hits", "top_k"}
+        assert expected.issubset(set(sig.parameters))
+
+
+@pytest.mark.unit
+class TestMaxPAggregation:
+    """README legal-retrieval default: MaxP (max chunk score per opinion), not SumP."""
+
+    def test_max_chunk_score_wins(self, bm25_module: Any) -> None:
+        # Opinion 1001 has chunks scoring [10.5, 8.2, 7.1] — opinion score = 10.5 (MaxP)
+        # Opinion 1002 has chunks scoring [9.0, 9.0]       — opinion score = 9.0
+        raw_hits = [
+            {"opinion_id": 1001, "chunk_index": 0, "score": 10.5},
+            {"opinion_id": 1001, "chunk_index": 1, "score": 8.2},
+            {"opinion_id": 1001, "chunk_index": 2, "score": 7.1},
+            {"opinion_id": 1002, "chunk_index": 0, "score": 9.0},
+            {"opinion_id": 1002, "chunk_index": 1, "score": 9.0},
+        ]
+        aggregated = bm25_module._aggregate_chunk_scores(raw_hits, top_k=10)
+        assert len(aggregated) == 2
+        by_oid = {h["opinion_id"]: h for h in aggregated}
+        assert by_oid[1001]["score"] == pytest.approx(10.5)
+        assert by_oid[1002]["score"] == pytest.approx(9.0)
+
+    def test_rejects_sump_behavior(self, bm25_module: Any) -> None:
+        """SumP would make 1001 = 25.8; MaxP keeps it at 10.5."""
+        raw_hits = [
+            {"opinion_id": 1001, "chunk_index": 0, "score": 10.5},
+            {"opinion_id": 1001, "chunk_index": 1, "score": 8.2},
+            {"opinion_id": 1001, "chunk_index": 2, "score": 7.1},
+        ]
+        aggregated = bm25_module._aggregate_chunk_scores(raw_hits, top_k=10)
+        assert aggregated[0]["score"] != pytest.approx(25.8), "MaxP, not SumP"
+        assert aggregated[0]["score"] == pytest.approx(10.5)
+
+
+@pytest.mark.unit
+class TestRetrievalAccuracyOnCuratedFixture:
+    """Guard against fake-algorithm regression: real BM25 must rank gold doc in top-1."""
+
+    def test_gold_doc_ranked_first_when_query_matches_only_gold(
+        self,
+        bm25_module: Any,
+        tmp_path: Path,
+    ) -> None:
+        # Curated fixture: gold doc has a near-exact token overlap with query;
+        # distractor docs are topically unrelated. Real BM25 must place gold @ rank 1.
+        corpus = tmp_path / "corpus.jsonl"
+        corpus.write_text(
+            "\n".join(
+                json.dumps(c)
+                for c in [
+                    {
+                        "opinion_id": 100,
+                        "chunk_index": 0,
+                        "text": "qualified immunity clearly established right constitutional violation",
+                    },
+                    {
+                        "opinion_id": 200,
+                        "chunk_index": 0,
+                        "text": "maritime jurisdiction admiralty shipping vessel cargo",
+                    },
+                    {"opinion_id": 300, "chunk_index": 0, "text": "copyright fair use transformative parody"},
+                    {"opinion_id": 400, "chunk_index": 0, "text": "bankruptcy chapter eleven reorganization creditor"},
+                ]
+            )
+            + "\n"
+        )
+        gold = tmp_path / "gold.jsonl"
+        gold.write_text(
+            json.dumps(
+                {
+                    "source_id": 9001,
+                    "dest_id": 100,
+                    "source_court": "ca5",
+                }
+            )
+            + "\n"
+        )
+        lepard = tmp_path / "lepard.jsonl"
+        lepard.write_text(
+            json.dumps(
+                {
+                    "source_id": 9001,
+                    "dest_id": 100,
+                    "quote": "qualified immunity clearly established constitutional",
+                }
+            )
+            + "\n"
+        )
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=corpus,
+            gold_pairs_path=gold,
+            lepard_path=lepard,
+            out_dir=out_dir,
+            top_k=4,
+            log_to_wandb=False,
+            seed=0,
+        )
+        results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
+        assert results[0]["retrieved"][0]["opinion_id"] == 100, (
+            "Gold opinion 100 must rank first for matching query — if this fails, BM25 is producing random/fake scores"
+        )
+
+
+# ---------- property tier on pure function ----------
+
+
+@pytest.mark.property
+class TestAggregateScoresInvariants:
+    """Hypothesis over _aggregate_chunk_scores pure function (no I/O)."""
+
+    @given(
+        n_chunks=st.integers(min_value=1, max_value=50),
+        n_opinions=st.integers(min_value=1, max_value=10),
+        top_k=st.integers(min_value=1, max_value=20),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    @settings(
+        max_examples=100,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_invariants(
+        self,
+        bm25_module: Any,
+        n_chunks: int,
+        n_opinions: int,
+        top_k: int,
+        seed: int,
+    ) -> None:
+        import random as _r
+
+        rng = _r.Random(seed)
+        raw_hits = [
+            {
+                "opinion_id": rng.randint(1, n_opinions),
+                "chunk_index": i,
+                "score": rng.uniform(0.0, 100.0),
+            }
+            for i in range(n_chunks)
+        ]
+        aggregated = bm25_module._aggregate_chunk_scores(raw_hits, top_k=top_k)
+
+        # Invariant 1: output length ≤ top_k
+        assert len(aggregated) <= top_k
+
+        # Invariant 2: no duplicate opinion_ids (MaxP aggregation)
+        oids = [h["opinion_id"] for h in aggregated]
+        assert len(oids) == len(set(oids))
+
+        # Invariant 3: scores monotonically decreasing
+        scores = [h["score"] for h in aggregated]
+        assert scores == sorted(scores, reverse=True)
+
+        # Invariant 4: every aggregated score equals the MAX of that opinion's raw chunks
+        raw_by_oid: dict[int, list[float]] = {}
+        for h in raw_hits:
+            raw_by_oid.setdefault(h["opinion_id"], []).append(h["score"])
+        for h in aggregated:
+            expected_max = max(raw_by_oid[h["opinion_id"]])
+            assert h["score"] == pytest.approx(expected_max)
