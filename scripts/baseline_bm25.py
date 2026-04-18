@@ -212,18 +212,33 @@ def main(
     results_path = out_dir / "bm25_results.jsonl"
     # Request extra chunks (top_k * 3) so aggregation to opinion-level yields >= top_k
     retrieval_k = min(top_k * RETRIEVAL_K_MULTIPLIER, len(chunks))
+    # Batch-tokenize all queries once, then retrieve with multi-threading.
+    # bm25s 0.3.2 n_threads parameter parallelizes per-query scoring across
+    # the batch; empirically ~10x faster than a Python per-query loop on 48-core AMD EPYC.
+    query_texts = [q["query_text"] for q in queries]
+    logger.info(f"  tokenizing {len(query_texts):,} queries")
+    batched_tokens = bm25s.tokenize(query_texts, stopwords="en")
+    logger.info("  retrieving (n_threads=16, batched)")
+    all_indices, all_scores = retriever.retrieve(
+        batched_tokens,
+        k=retrieval_k,
+        n_threads=16,
+        show_progress=True,
+    )
+    # all_indices shape: (n_queries, retrieval_k)
     with results_path.open("w", encoding="utf-8") as fout:
-        for q in queries:
-            query_tokens = bm25s.tokenize(q["query_text"], stopwords="en")
-            indices, scores = retriever.retrieve(query_tokens, k=retrieval_k)
-            # indices shape: (1, retrieval_k); scores: (1, retrieval_k)
+        for qi, q in enumerate(queries):
             raw_hits = [
                 {
                     "opinion_id": chunk_meta[int(idx)][0],
                     "chunk_index": chunk_meta[int(idx)][1],
                     "score": float(score),
                 }
-                for idx, score in zip(indices[0], scores[0], strict=False)
+                for idx, score in zip(
+                    all_indices[qi],
+                    all_scores[qi],
+                    strict=False,
+                )
             ]
             aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
             fout.write(
