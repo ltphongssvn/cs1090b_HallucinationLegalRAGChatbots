@@ -40,3 +40,34 @@ setup() {
     run grep -E "%mem|%MEM" scripts/monitor_baseline.sh
     [ "$status" -eq 0 ]
 }
+
+@test "tail depth >= 20 for diagnosis" {
+    run grep -E "tail -n (2[0-9]|[3-9][0-9]|[1-9][0-9]{2,})" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "ps output includes args/cmd for PID identity verification" {
+    run grep -E "ps -p.*args|ps -p.*cmd" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports checkpoint shard count" {
+    run grep -E "chunking_checkpoint|completed.*shards|checkpoint" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports summary.json presence" {
+    run grep -E "summary.json" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports gold_pairs file line counts" {
+    run grep -E "gold_pairs_val|gold_pairs_test|wc -l" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "sections are independent (uses ; or explicit blocks, not && chains)" {
+    # Ensure no && between major diagnostic sections
+    run bash -c 'grep -c "^.*&&.*tail\|^.*&&.*ps \|^.*&&.*ls " scripts/monitor_baseline.sh'
+    [ "$output" = "0" ]
+}
