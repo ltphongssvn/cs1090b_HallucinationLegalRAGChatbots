@@ -71,3 +71,28 @@ setup() {
     run bash -c 'grep -c "^.*&&.*tail\|^.*&&.*ps \|^.*&&.*ls " scripts/monitor_baseline.sh'
     [ "$output" = "0" ]
 }
+
+@test "no bare python3 — uses uv run python only" {
+    run grep -nE "^[^#]*python3 " scripts/monitor_baseline.sh
+    [ "$status" -ne 0 ]
+}
+
+@test "total shards computed dynamically, not hardcoded 159" {
+    run grep -E "/ 159|159 shards" scripts/monitor_baseline.sh
+    [ "$status" -ne 0 ]
+}
+
+@test "total shards discovered via find on shard_dir" {
+    run grep -E "find.*shard_\*.jsonl|TOTAL_SHARDS=" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports ETA or velocity from elapsed time + shards done" {
+    run grep -iE "eta|shards/min|velocity|elapsed" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "avoids wc -l on corpus file when size exceeds threshold" {
+    run grep -E "CORPUS_SIZE|du -b|stat -c|size guard" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
