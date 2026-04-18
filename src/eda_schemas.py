@@ -78,3 +78,21 @@ class BaselinePrepSummary(BaseModel):
         default_factory=dict,
         description="SHA256 hex of each gold_pairs_*.jsonl (64 lowercase hex chars)",
     )
+
+
+class BaselineBM25Summary(BaseModel):
+    """Contract for data/processed/baseline/bm25_summary.json."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: str
+    n_queries: int = Field(ge=0)
+    n_corpus_chunks: int = Field(ge=0)
+    n_unique_opinions: int = Field(ge=0)
+    top_k: int = Field(ge=1)
+    bm25_k1: float = Field(gt=0)
+    bm25_b: float = Field(ge=0, le=1)
+    index_build_seconds: float = Field(ge=0, allow_inf_nan=False)
+    retrieval_seconds: float = Field(ge=0, allow_inf_nan=False)
+    seed: int
+    git_sha: str
+    results_hash: str = Field(min_length=64, max_length=64)
