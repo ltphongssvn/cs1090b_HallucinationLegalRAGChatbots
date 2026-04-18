@@ -1,0 +1,46 @@
+{
+  "corpus_chunks": 5792804,
+  "corpus_manifest_sha": "b4377920365735583cad97734c32928a01018f64f7625c88680f537f620e56ed",
+  "git_sha": "824ca997c608",
+  "gold_pair_hashes": {
+    "gold_pairs_test.jsonl": "3017cce60c79a1a303ef9da1f80662f9d31e16302577b05d85973e5ef5e5648a",
+    "gold_pairs_val.jsonl": "28f0d2ff2002e16939b9a47cd4b360fbda36dd111d0a4a3ce71b027dd5613de1"
+  },
+  "gold_pairs_test": 45000,
+  "gold_pairs_total": 47247,
+  "gold_pairs_train": 0,
+  "gold_pairs_val": 2000,
+  "n_opinions_chunked": 1473576,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "test_court_distribution": {
+    "ca1": 1869,
+    "ca10": 2745,
+    "ca11": 2709,
+    "ca2": 3179,
+    "ca3": 3125,
+    "ca4": 5134,
+    "ca5": 9592,
+    "ca6": 3841,
+    "ca7": 2216,
+    "ca8": 2838,
+    "ca9": 5327,
+    "cadc": 1243,
+    "cafc": 1182
+  },
+  "val_court_distribution": {
+    "ca1": 83,
+    "ca10": 122,
+    "ca11": 120,
+    "ca2": 141,
+    "ca3": 139,
+    "ca4": 228,
+    "ca5": 426,
+    "ca6": 171,
+    "ca7": 99,
+    "ca8": 126,
+    "ca9": 237,
+    "cadc": 55,
+    "cafc": 53
+  }
+}

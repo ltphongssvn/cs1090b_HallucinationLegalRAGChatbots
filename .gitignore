@@ -36,12 +36,14 @@ src/repro.py
 .hypothesis/
 tests/shell/bats-core/
 
-# Data: ignore everything under data/ except .dvc pointers and nested .gitignore files
+# Data: ignore bulk data under data/ except .dvc pointers, nested .gitignore, and small JSON summaries
 data/**
 !data/
 !data/**/
 !data/**/*.dvc
 !data/**/.gitignore
+!data/**/summary.json
+!data/**/bm25_summary.json
 
 wandb/
 /lepard_train_4000000_rev0194f95.jsonl
