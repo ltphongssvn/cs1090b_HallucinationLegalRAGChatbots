@@ -96,3 +96,34 @@ setup() {
     run grep -E "CORPUS_SIZE|du -b|stat -c|size guard" scripts/monitor_baseline.sh
     [ "$status" -eq 0 ]
 }
+
+@test "--json mode emits valid JSON" {
+    run bash scripts/monitor_baseline.sh --json
+    [ "$status" -eq 0 ]
+    echo "$output" | uv run python -c "import json,sys; json.loads(sys.stdin.read())"
+}
+
+@test "--json includes shards_done, total_shards, summary_present" {
+    run bash scripts/monitor_baseline.sh --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"shards_done"* ]]
+    [[ "$output" == *"total_shards"* ]]
+    [[ "$output" == *"summary_present"* ]]
+}
+
+@test "exits non-zero when summary.json is INVALID" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data/processed/baseline" "$tmpdir/logs" "$tmpdir/data/raw/cl_federal_appellate_bulk"
+    echo "{}" > "$tmpdir/data/processed/baseline/summary.json"
+    run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh --strict"
+    rm -rf "$tmpdir"
+    [ "$status" -ne 0 ]
+}
+
+@test "--strict exits 0 when no summary yet (job still running is not an error)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data/processed/baseline" "$tmpdir/logs" "$tmpdir/data/raw/cl_federal_appellate_bulk"
+    run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh --strict"
+    rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+}
