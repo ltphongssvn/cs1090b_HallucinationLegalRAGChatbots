@@ -56,3 +56,31 @@ setup() {
     run grep -E "PYTHONUNBUFFERED" scripts/run_baseline_bm25.sh
     [ "$status" -eq 0 ]
 }
+
+@test ".env sourced before defaults (override works)" {
+    run grep -B1 "source .env" scripts/run_baseline_bm25.sh
+    # .env source must appear BEFORE N_THREADS/TOP_K defaults
+    env_line=$(grep -n "source .env" scripts/run_baseline_bm25.sh | head -1 | cut -d: -f1)
+    defaults_line=$(grep -n 'TOP_K="\${TOP_K:' scripts/run_baseline_bm25.sh | head -1 | cut -d: -f1)
+    [ "$env_line" -lt "$defaults_line" ]
+}
+
+@test "uses uv run --locked for reproducibility" {
+    run grep -E "uv run --locked" scripts/run_baseline_bm25.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "rejects non-integer TOP_K" {
+    run env TOP_K=abc bash scripts/run_baseline_bm25.sh --dry-run
+    [ "$status" -eq 2 ]
+}
+
+@test "rejects non-integer N_THREADS" {
+    run env N_THREADS=xyz bash scripts/run_baseline_bm25.sh --dry-run
+    [ "$status" -eq 2 ]
+}
+
+@test "writes launch manifest with git_sha + pid + paths" {
+    run grep -E "MANIFEST.*manifest.json|run_id.*bm25_" scripts/run_baseline_bm25.sh
+    [ "$status" -eq 0 ]
+}

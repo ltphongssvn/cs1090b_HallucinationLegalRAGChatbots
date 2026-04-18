@@ -2,7 +2,7 @@
 # Full-scale MS3 BM25 baseline runner.
 #
 # Uses 48 physical cores on AMD EPYC 7R13 (Harvard ODD).
-# bm25s uses Rust-native parallelism — OMP_NUM_THREADS + n_threads arg.
+# bm25s (NumPy/SciPy, parallelized via n_threads) + Polars thread pools
 #
 # Usage:
 #   bash scripts/run_baseline_bm25.sh              # full run (~15-30 min)
@@ -17,6 +17,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Source .env BEFORE resolving defaults so .env overrides work as expected
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
+
+mkdir -p logs
+
 CORPUS="${CORPUS:-data/processed/baseline/corpus_chunks.jsonl}"
 GOLD="${GOLD:-data/processed/baseline/gold_pairs_test.jsonl}"
 LEPARD="${LEPARD:-lepard_train_4000000_rev0194f95.jsonl}"
@@ -24,6 +34,17 @@ OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
 N_THREADS="${N_THREADS:-$(nproc --all 2>/dev/null || echo 48)}"
+
+# Integer validation
+for var in TOP_K SEED N_THREADS; do
+    val="${!var}"
+    case "$val" in
+        ''|*[!0-9]*)
+            echo "FAIL: $var must be non-negative integer (got: '$val')" >&2
+            exit 2
+            ;;
+    esac
+done
 
 # Thread allocation avoids oversubscription on 48-core AMD EPYC:
 #   RAYON=48 for bm25s (Rust) — primary compute
@@ -83,13 +104,6 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-    echo "OK .env sourced"
-fi
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
     echo "  [warn] WANDB_API_KEY not set — W&B logging will be skipped if --log-to-wandb passed"
 fi
@@ -97,7 +111,7 @@ fi
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo
     echo "=== DRY RUN ==="
-    PYTHONPATH="$REPO_ROOT" uv run python scripts/baseline_bm25.py \
+    PYTHONPATH="$REPO_ROOT" uv run --locked python scripts/baseline_bm25.py \
         --corpus-path "$CORPUS" --gold-pairs-path "$GOLD" \
         --lepard-path "$LEPARD" --out-dir "$OUT_DIR" \
         --top-k "$TOP_K" --seed "$SEED" --dry-run
@@ -105,7 +119,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
-mkdir -p logs
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="logs/bm25_run_${TIMESTAMP}.log"
 
@@ -138,6 +151,28 @@ setsid nohup env \
 PID=$!
 echo "$PID" > "$PID_FILE"
 ln -sfn "$(basename "$LOG_FILE")" "logs/bm25.current_log"
+
+# Launch manifest sidecar (provenance for reproducibility)
+GIT_SHA=$(git rev-parse HEAD 2>/dev/null | head -c 12 || echo unknown)
+MANIFEST="logs/bm25_run_${TIMESTAMP}.manifest.json"
+cat > "$MANIFEST" << MANIFEST_EOF
+{
+  "run_id": "bm25_${TIMESTAMP}_${GIT_SHA}",
+  "pid": $PID,
+  "log_file": "$LOG_FILE",
+  "corpus_path": "$CORPUS",
+  "gold_path": "$GOLD",
+  "lepard_path": "$LEPARD",
+  "out_dir": "$OUT_DIR",
+  "top_k": $TOP_K,
+  "seed": $SEED,
+  "n_threads": $N_THREADS,
+  "git_sha": "$GIT_SHA",
+  "hostname": "$(hostname)",
+  "utc_start": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+MANIFEST_EOF
+echo "OK manifest: $MANIFEST"
 echo "OK launched: PID=$PID"
 
 sleep 10
