@@ -31,6 +31,7 @@ SCHEMA_VERSION = "1.0.0"
 TOP_K = 100
 BM25_K1 = 1.5
 BM25_B = 0.75
+RETRIEVAL_K_MULTIPLIER = 3  # over-retrieve chunks before MaxP aggregation
 
 DEFAULT_CORPUS = Path("data/processed/baseline/corpus_chunks.jsonl")
 DEFAULT_GOLD = Path("data/processed/baseline/gold_pairs_test.jsonl")
@@ -73,11 +74,13 @@ def _load_queries(
             gold_keys.add((int(r["source_id"]), int(r["dest_id"])))
 
     queries: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int, int]] = set()
     with lepard_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
             key = (int(r["source_id"]), int(r["dest_id"]))
-            if key in gold_keys:
+            if key in gold_keys and key not in seen_keys:
+                seen_keys.add(key)
                 queries.append(
                     {
                         "source_id": key[0],
@@ -208,7 +211,7 @@ def main(
     t0 = time.perf_counter()
     results_path = out_dir / "bm25_results.jsonl"
     # Request extra chunks (top_k * 3) so aggregation to opinion-level yields >= top_k
-    retrieval_k = min(top_k * 3, len(chunks))
+    retrieval_k = min(top_k * RETRIEVAL_K_MULTIPLIER, len(chunks))
     with results_path.open("w", encoding="utf-8") as fout:
         for q in queries:
             query_tokens = bm25s.tokenize(q["query_text"], stopwords="en")

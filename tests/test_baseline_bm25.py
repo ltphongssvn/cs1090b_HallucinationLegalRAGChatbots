@@ -810,3 +810,233 @@ class TestSchemaBackwardCompat:
         validated = BaselineBM25Summary.model_validate(v1_payload)
         assert validated.schema_version == "1.0.0"
         assert validated.n_queries == 45000
+
+
+# ---------- fourth hardening round ----------
+
+
+@pytest.mark.unit
+class TestGoldActuallyRetrievable:
+    """Prove gold dest_id appears in retrieved opinion_ids (not just key exists)."""
+
+    def test_gold_in_topk_for_matching_query(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=mini_gold,
+            lepard_path=mini_lepard,
+            out_dir=out_dir,
+            top_k=5,
+            log_to_wandb=False,
+            seed=0,
+        )
+        results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
+        for r in results:
+            retrieved_ids = [h["opinion_id"] for h in r["retrieved"]]
+            assert r["dest_id"] in retrieved_ids, (
+                f"gold dest_id {r['dest_id']} not found in top-5 {retrieved_ids} for query source_id={r['source_id']}"
+            )
+
+
+@pytest.mark.unit
+class TestResultsHashIntegrity:
+    """results_hash in summary must equal sha256 of bm25_results.jsonl bytes."""
+
+    def test_hash_matches_file(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        import hashlib
+
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=mini_gold,
+            lepard_path=mini_lepard,
+            out_dir=out_dir,
+            top_k=5,
+            log_to_wandb=False,
+            seed=0,
+        )
+        recorded = json.loads((out_dir / "bm25_summary.json").read_text())["results_hash"]
+        actual = hashlib.sha256(
+            (out_dir / "bm25_results.jsonl").read_bytes(),
+        ).hexdigest()
+        assert recorded == actual, f"summary hash {recorded[:16]} != file hash {actual[:16]}"
+
+
+@pytest.mark.unit
+class TestTopKLargerThanCorpus:
+    """top_k > corpus_size must not crash (bm25s raises if k>num_docs unclipped)."""
+
+    def test_graceful_clamp(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        # mini_corpus has 5 chunks; request 1000
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=mini_gold,
+            lepard_path=mini_lepard,
+            out_dir=out_dir,
+            top_k=1000,
+            log_to_wandb=False,
+            seed=0,
+        )
+        results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
+        # Bounded by unique opinions (4) in mini_corpus
+        for r in results:
+            assert len(r["retrieved"]) <= 4
+
+
+@pytest.mark.contract
+class TestRetrievalKMultiplierDocumented:
+    """top_k * N chunk over-retrieval is a design choice — must be explicit."""
+
+    def test_multiplier_is_constant(self, bm25_module: Any) -> None:
+        """Ensure over-retrieval multiplier is a named constant, not a magic number."""
+        src = (REPO_ROOT / "scripts" / "baseline_bm25.py").read_text(encoding="utf-8")
+        assert "RETRIEVAL_K_MULTIPLIER" in src, (
+            "chunk over-retrieval amount must be a named constant for reproducibility"
+        )
+
+    def test_multiplier_value(self, bm25_module: Any) -> None:
+        assert bm25_module.RETRIEVAL_K_MULTIPLIER >= 2
+
+
+@pytest.mark.contract
+class TestResultLineSchema:
+    """Every bm25_results.jsonl line must conform to BaselineBM25ResultLine."""
+
+    def test_schema_exists(self) -> None:
+        from pydantic import BaseModel
+
+        from src.eda_schemas import BaselineBM25ResultLine
+
+        assert issubclass(BaselineBM25ResultLine, BaseModel)
+
+    def test_all_lines_validate(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        from src.eda_schemas import BaselineBM25ResultLine
+
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=mini_gold,
+            lepard_path=mini_lepard,
+            out_dir=out_dir,
+            top_k=5,
+            log_to_wandb=False,
+            seed=0,
+        )
+        for line in (out_dir / "bm25_results.jsonl").read_text().splitlines():
+            BaselineBM25ResultLine.model_validate_json(line)
+
+
+@pytest.mark.unit
+class TestEdgeCaseQueries:
+    def test_empty_quote_handled(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        tmp_path: Path,
+    ) -> None:
+        gold = tmp_path / "gold.jsonl"
+        gold.write_text(
+            json.dumps(
+                {
+                    "source_id": 9001,
+                    "dest_id": 1001,
+                    "source_court": "ca5",
+                }
+            )
+            + "\n"
+        )
+        lepard = tmp_path / "lepard.jsonl"
+        lepard.write_text(
+            json.dumps(
+                {
+                    "source_id": 9001,
+                    "dest_id": 1001,
+                    "quote": "",
+                }
+            )
+            + "\n"
+        )
+        out_dir = tmp_path / "out"
+        # Must not crash on empty query
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=gold,
+            lepard_path=lepard,
+            out_dir=out_dir,
+            top_k=5,
+            log_to_wandb=False,
+            seed=0,
+        )
+        results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
+        assert len(results) == 1
+
+    def test_duplicate_lepard_row_deduplicated(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        tmp_path: Path,
+    ) -> None:
+        gold = tmp_path / "gold.jsonl"
+        gold.write_text(
+            json.dumps(
+                {
+                    "source_id": 9001,
+                    "dest_id": 1001,
+                    "source_court": "ca5",
+                }
+            )
+            + "\n"
+        )
+        lepard = tmp_path / "lepard.jsonl"
+        # Same (source_id, dest_id) appears twice
+        lepard.write_text(
+            "\n".join(
+                [
+                    json.dumps({"source_id": 9001, "dest_id": 1001, "quote": "contract breach"}),
+                    json.dumps({"source_id": 9001, "dest_id": 1001, "quote": "contract breach"}),
+                ]
+            )
+            + "\n"
+        )
+        out_dir = tmp_path / "out"
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=gold,
+            lepard_path=lepard,
+            out_dir=out_dir,
+            top_k=5,
+            log_to_wandb=False,
+            seed=0,
+        )
+        results = [json.loads(line) for line in (out_dir / "bm25_results.jsonl").read_text().splitlines()]
+        # Query set should dedupe to 1
+        assert len(results) == 1

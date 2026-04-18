@@ -96,3 +96,12 @@ class BaselineBM25Summary(BaseModel):
     seed: int
     git_sha: str
     results_hash: str = Field(min_length=64, max_length=64)
+
+
+class BaselineBM25ResultLine(BaseModel):
+    """Contract for each line in data/processed/baseline/bm25_results.jsonl."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_id: int
+    dest_id: int
+    retrieved: list[dict[str, float | int]]
