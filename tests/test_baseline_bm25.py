@@ -684,3 +684,129 @@ class TestAggregateScoresInvariants:
         for h in aggregated:
             expected_max = max(raw_by_oid[h["opinion_id"]])
             assert h["score"] == pytest.approx(expected_max)
+
+
+# ---------- third hardening round ----------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "log_to_wandb,expected_calls",
+    [(False, 0), (True, 1)],
+    ids=["disabled", "enabled"],
+)
+class TestWandbBranchParametrized:
+    def test_call_count(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        log_to_wandb: bool,
+        expected_calls: int,
+    ) -> None:
+        calls: list[Any] = []
+        monkeypatch.setattr(
+            bm25_module,
+            "_log_to_wandb",
+            lambda *a, **kw: calls.append((a, kw)),
+        )
+        bm25_module.main(
+            corpus_path=mini_corpus,
+            gold_pairs_path=mini_gold,
+            lepard_path=mini_lepard,
+            out_dir=tmp_path / "out",
+            top_k=5,
+            log_to_wandb=log_to_wandb,
+            seed=0,
+        )
+        assert len(calls) == expected_calls
+
+
+@pytest.mark.unit
+class TestFailureModes:
+    def test_top_k_zero_rejected(
+        self,
+        bm25_module: Any,
+        mini_corpus: Path,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises((ValueError, AssertionError, Exception)):
+            bm25_module.main(
+                corpus_path=mini_corpus,
+                gold_pairs_path=mini_gold,
+                lepard_path=mini_lepard,
+                out_dir=tmp_path / "out",
+                top_k=0,
+                log_to_wandb=False,
+                seed=0,
+            )
+
+    def test_malformed_corpus_jsonl_raises(
+        self,
+        bm25_module: Any,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        bad_corpus = tmp_path / "bad.jsonl"
+        bad_corpus.write_text("not valid json\n{broken\n", encoding="utf-8")
+        with pytest.raises(json.JSONDecodeError):
+            bm25_module.main(
+                corpus_path=bad_corpus,
+                gold_pairs_path=mini_gold,
+                lepard_path=mini_lepard,
+                out_dir=tmp_path / "out",
+                top_k=5,
+                log_to_wandb=False,
+                seed=0,
+            )
+
+    def test_nonexistent_corpus_raises(
+        self,
+        bm25_module: Any,
+        mini_gold: Path,
+        mini_lepard: Path,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(FileNotFoundError):
+            bm25_module.main(
+                corpus_path=tmp_path / "does_not_exist.jsonl",
+                gold_pairs_path=mini_gold,
+                lepard_path=mini_lepard,
+                out_dir=tmp_path / "out",
+                top_k=5,
+                log_to_wandb=False,
+                seed=0,
+            )
+
+
+@pytest.mark.contract
+class TestSchemaBackwardCompat:
+    """v1.0.0 summary bytes must always validate, even after schema grows."""
+
+    def test_v1_0_0_frozen_payload_still_validates(self) -> None:
+        from src.eda_schemas import BaselineBM25Summary
+
+        # Frozen v1.0.0 payload — future schema additions must not break this
+        v1_payload = {
+            "schema_version": "1.0.0",
+            "n_queries": 45000,
+            "n_corpus_chunks": 5792804,
+            "n_unique_opinions": 1473576,
+            "top_k": 100,
+            "bm25_k1": 1.5,
+            "bm25_b": 0.75,
+            "index_build_seconds": 180.5,
+            "retrieval_seconds": 1200.3,
+            "seed": 0,
+            "git_sha": "abc123def456",
+            "results_hash": "f" * 64,
+        }
+        validated = BaselineBM25Summary.model_validate(v1_payload)
+        assert validated.schema_version == "1.0.0"
+        assert validated.n_queries == 45000
