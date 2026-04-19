@@ -9,7 +9,7 @@ Tests and scripts import from here to prevent schema drift.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class EdaCorpusSummary(BaseModel):
@@ -105,3 +105,53 @@ class BaselineBM25ResultLine(BaseModel):
     source_id: int
     dest_id: int
     retrieved: list[dict[str, float | int]]
+
+
+class BaselineBgeM3Summary(BaseModel):
+    """Contract for data/processed/baseline/bge_m3_summary.json."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    n_queries: int = Field(ge=0)
+    n_corpus_chunks: int = Field(ge=0)
+    n_unique_opinions: int = Field(ge=0)
+    top_k: int = Field(ge=1)
+    encoder_model: str
+    embedding_dim: int = Field(ge=1)
+    device: str
+    device_name: str
+    encode_batch_size: int = Field(ge=1)
+    similarity_metric: str = Field(pattern=r"^(cosine|dot|euclidean)$")
+    normalize_embeddings: bool
+    max_length: int = Field(ge=1)
+    dtype: str
+    encoder_load_seconds: float = Field(ge=0, allow_inf_nan=False)
+    index_build_seconds: float = Field(ge=0, allow_inf_nan=False)
+    query_encode_seconds: float = Field(ge=0, allow_inf_nan=False)
+    retrieval_seconds: float = Field(ge=0, allow_inf_nan=False)
+    seed: int
+    git_sha: str = Field(pattern=r"^[a-f0-9]{12}$")
+    results_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _unique_opinions_le_chunks(self) -> BaselineBgeM3Summary:
+        if self.n_unique_opinions > self.n_corpus_chunks:
+            raise ValueError(f"n_unique_opinions ({self.n_unique_opinions}) > n_corpus_chunks ({self.n_corpus_chunks})")
+        return self
+
+
+class RetrievalHit(BaseModel):
+    """Strict contract for a single opinion-level hit in retrieved list."""
+
+    model_config = ConfigDict(extra="forbid")
+    opinion_id: int
+    score: float = Field(ge=-1.0, le=2.0)  # cosine similarity range (normalized)
+
+
+class BaselineBgeM3ResultLine(BaseModel):
+    """Contract for each line in data/processed/baseline/bge_m3_results.jsonl."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_id: int
+    dest_id: int
+    retrieved: list[RetrievalHit]
