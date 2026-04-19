@@ -94,3 +94,23 @@ setup() {
     run grep -E "OMP_NUM_THREADS=[0-9]" scripts/baseline_bge_m3.sbatch
     [ "$status" -eq 0 ]
 }
+
+@test "input preflight checks all three paths" {
+    run grep -E 'for p in.*CORPUS_PATH.*GOLD_PATH.*LEPARD_PATH' scripts/baseline_bge_m3.sbatch
+    [ "$status" -eq 0 ]
+}
+
+@test "semantic idempotency verifies top_k + seed + batch_size + hash" {
+    run grep -E "expected_top_k.*expected_seed.*expected_ebs" scripts/baseline_bge_m3.sbatch
+    [ "$status" -eq 0 ]
+}
+
+@test "validates all result lines against BaselineBgeM3ResultLine" {
+    run grep -E "BaselineBgeM3ResultLine.model_validate_json" scripts/baseline_bge_m3.sbatch
+    [ "$status" -eq 0 ]
+}
+
+@test "checks all four artifacts exist non-empty post-run" {
+    run grep -E 'for f in.*SUMMARY.*RESULTS.*INDEX.*META' scripts/baseline_bge_m3.sbatch
+    [ "$status" -eq 0 ]
+}

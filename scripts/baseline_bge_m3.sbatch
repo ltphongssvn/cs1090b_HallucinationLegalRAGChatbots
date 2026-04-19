@@ -15,8 +15,7 @@ set -euo pipefail
 _fail_handler() {
     local ec=$?
     echo "=== FAILED utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ) exit=$ec"
-    # Deterministic Python errors (exit 1) should NOT requeue — cancel to avoid OOM loops
-    # Signal exits (128+N) or SLURM preemption can safely requeue
+    # Deterministic Python errors (exit 1-127) should NOT requeue — cancel to avoid OOM loops
     if [[ $ec -ge 1 && $ec -lt 128 ]]; then
         echo "=== deterministic failure — cancelling to prevent requeue loop ==="
         scancel --signal=TERM "$SLURM_JOB_ID" 2>/dev/null || true
@@ -68,21 +67,52 @@ echo "  git_sha           : $(git rev-parse --short=12 HEAD 2>/dev/null || echo 
 echo "  uv_version        : $(uv --version 2>&1 | head -1)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || echo "  (no nvidia-smi)"
 
-# Idempotency: skip if valid summary exists
+# --- Preflight: inputs exist before allocating encoder ---
+for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
+    if [[ ! -f "$p" ]]; then
+        echo "FAIL: missing input: $p" >&2
+        exit 2
+    fi
+done
+echo "OK preflight: all inputs present"
+
+# --- Semantic idempotency: verify config match + result-line schema + hash integrity ---
 SUMMARY="$OUT_DIR/bge_m3_summary.json"
-if [[ -f "$SUMMARY" ]]; then
-    if uv run --locked python -c "
-from src.eda_schemas import BaselineBgeM3Summary
+RESULTS="$OUT_DIR/bge_m3_results.jsonl"
+INDEX="$OUT_DIR/bge_m3_index.faiss"
+META="$OUT_DIR/bge_m3_index_meta.jsonl"
+if [[ -s "$SUMMARY" && -s "$RESULTS" && -s "$INDEX" && -s "$META" ]]; then
+    if uv run --locked python - "$SUMMARY" "$RESULTS" "$TOP_K" "$SEED" "$ENCODE_BATCH_SIZE" <<'PYEOF' 2>/dev/null
+import hashlib
+import json
+import sys
 from pathlib import Path
-BaselineBgeM3Summary.model_validate_json(Path('$SUMMARY').read_bytes())
-" 2>/dev/null; then
-        echo "  [idempotent] VALID summary exists at $SUMMARY — skipping"
+from src.eda_schemas import BaselineBgeM3Summary, BaselineBgeM3ResultLine
+
+summary_path, results_path, expected_top_k, expected_seed, expected_ebs = sys.argv[1:6]
+s = BaselineBgeM3Summary.model_validate_json(Path(summary_path).read_bytes())
+actual_hash = hashlib.sha256(Path(results_path).read_bytes()).hexdigest()
+assert s.results_hash == actual_hash, "results_hash mismatch"
+assert s.top_k == int(expected_top_k), f"top_k {s.top_k} != {expected_top_k}"
+assert s.seed == int(expected_seed), f"seed {s.seed} != {expected_seed}"
+assert s.encode_batch_size == int(expected_ebs), (
+    f"encode_batch_size {s.encode_batch_size} != {expected_ebs}"
+)
+# Sample first + last result lines (full validation would be O(n))
+lines = Path(results_path).read_text().splitlines()
+for ln in (lines[0], lines[-1]):
+    BaselineBgeM3ResultLine.model_validate_json(ln)
+PYEOF
+    then
+        echo "  [idempotent] complete VALID artifacts match config — skipping"
         echo "=== done utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
         exit 0
+    else
+        echo "  [idempotent] existing summary does not match current config — re-running"
     fi
 fi
 
-# Dry-run preflight
+# --- Dry-run preflight ---
 echo "=== preflight: dry-run ==="
 uv run --locked python scripts/baseline_bge_m3.py \
     --corpus-path "$CORPUS_PATH" \
@@ -111,13 +141,31 @@ uv run --locked python scripts/baseline_bge_m3.py \
     --encode-batch-size "$ENCODE_BATCH_SIZE" \
     --query-batch-size "$QUERY_BATCH_SIZE"
 
-# Final artifact + schema validation
-if uv run --locked python -c "
-from src.eda_schemas import BaselineBgeM3Summary
+# --- Full artifact + schema validation ---
+for f in "$SUMMARY" "$RESULTS" "$INDEX" "$META"; do
+    if [[ ! -s "$f" ]]; then
+        echo "=== artifact missing or empty: $f ==="
+        exit 11
+    fi
+done
+
+if uv run --locked python - "$SUMMARY" "$RESULTS" <<'PYEOF'
+import hashlib
+import sys
 from pathlib import Path
-BaselineBgeM3Summary.model_validate_json(Path('$OUT_DIR/bge_m3_summary.json').read_bytes())
-" 2>/dev/null; then
-    echo "=== summary schema VALID ==="
+from src.eda_schemas import BaselineBgeM3Summary, BaselineBgeM3ResultLine
+
+summary_path, results_path = sys.argv[1:3]
+s = BaselineBgeM3Summary.model_validate_json(Path(summary_path).read_bytes())
+actual_hash = hashlib.sha256(Path(results_path).read_bytes()).hexdigest()
+assert s.results_hash == actual_hash, f"hash mismatch {s.results_hash[:12]} vs {actual_hash[:12]}"
+# Validate every result line
+for i, ln in enumerate(Path(results_path).read_text().splitlines(), 1):
+    BaselineBgeM3ResultLine.model_validate_json(ln)
+print(f"OK: {i} result lines valid, hash matches summary")
+PYEOF
+then
+    echo "=== summary schema + hash + result lines VALID ==="
 else
     echo "=== summary schema INVALID ==="
     exit 10
