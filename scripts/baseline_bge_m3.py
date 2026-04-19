@@ -130,6 +130,29 @@ def _aggregate_chunk_scores(
     return ranked[:top_k]
 
 
+# ---------- sharding (pure function for multi-GPU distribution) ----------
+
+
+def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
+    """Largest-remainder shard allocation for worker `rank` of `world_size`.
+
+    Guarantees:
+        - sum of all (end - start) == n
+        - max(shard_size) - min(shard_size) <= 1
+        - shards are disjoint and contiguous
+        - returns (0, 0) for ranks with empty workload when world_size > n
+    """
+    if world_size < 1:
+        raise ValueError(f"world_size must be >= 1, got {world_size}")
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank {rank} out of range [0, {world_size})")
+    base, rem = divmod(n, world_size)
+    # First `rem` ranks get one extra item
+    start = rank * base + min(rank, rem)
+    end = start + base + (1 if rank < rem else 0)
+    return start, end
+
+
 # ---------- provenance ----------
 
 

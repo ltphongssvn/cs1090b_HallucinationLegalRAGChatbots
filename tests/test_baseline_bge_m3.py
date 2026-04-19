@@ -360,3 +360,103 @@ class TestWandbBranchParametrized:
         if log_to_wandb:
             bge_module._log_to_wandb({"x": 1}, Path("/tmp"))
         assert len(calls) == expected_calls
+
+
+# ---------- multi-GPU sharding contract ----------
+
+
+@pytest.mark.contract
+class TestShardingHelpers:
+    def test_shard_range_exists(self, bge_module: Any) -> None:
+        assert callable(getattr(bge_module, "_shard_range", None))
+
+    def test_shard_range_covers_all(self, bge_module: Any) -> None:
+        n = 1000
+        world_size = 4
+        covered: set[int] = set()
+        for rank in range(world_size):
+            start, end = bge_module._shard_range(n, rank, world_size)
+            covered.update(range(start, end))
+        assert covered == set(range(n))
+
+    def test_shard_range_disjoint(self, bge_module: Any) -> None:
+        n, world_size = 1000, 4
+        ranges = [bge_module._shard_range(n, r, world_size) for r in range(world_size)]
+        for i in range(len(ranges) - 1):
+            assert ranges[i][1] == ranges[i + 1][0]
+
+    def test_shard_range_handles_uneven(self, bge_module: Any) -> None:
+        # 103 / 4 = 25, 26, 26, 26 — largest-remainder
+        n, world_size = 103, 4
+        sizes = []
+        for r in range(world_size):
+            s, e = bge_module._shard_range(n, r, world_size)
+            sizes.append(e - s)
+        assert sum(sizes) == n
+        assert max(sizes) - min(sizes) <= 1
+
+
+@pytest.mark.unit
+class TestShardRangeBoundaries:
+    def test_rank_zero_starts_at_zero(self, bge_module: Any) -> None:
+        start, _ = bge_module._shard_range(1000, 0, 4)
+        assert start == 0
+
+    def test_last_rank_ends_at_n(self, bge_module: Any) -> None:
+        _, end = bge_module._shard_range(1000, 3, 4)
+        assert end == 1000
+
+    def test_single_worker_full_range(self, bge_module: Any) -> None:
+        start, end = bge_module._shard_range(500, 0, 1)
+        assert (start, end) == (0, 500)
+
+
+@pytest.mark.unit
+class TestShardRangeEdgeCases:
+    def test_world_size_greater_than_n(self, bge_module: Any) -> None:
+        # n=2, world_size=4 — ranks 0,1 get 1 item each; ranks 2,3 empty
+        sizes = [bge_module._shard_range(2, r, 4)[1] - bge_module._shard_range(2, r, 4)[0] for r in range(4)]
+        assert sum(sizes) == 2
+        assert sizes.count(0) == 2  # 2 empty shards
+        assert all(s >= 0 for s in sizes)
+
+    def test_n_zero(self, bge_module: Any) -> None:
+        for r in range(4):
+            assert bge_module._shard_range(0, r, 4) == (0, 0)
+
+    def test_invalid_rank_raises(self, bge_module: Any) -> None:
+        with pytest.raises((ValueError, AssertionError)):
+            bge_module._shard_range(100, 4, 4)  # rank=4 invalid when world_size=4
+
+    def test_invalid_world_size_raises(self, bge_module: Any) -> None:
+        with pytest.raises((ValueError, AssertionError)):
+            bge_module._shard_range(100, 0, 0)
+
+
+@pytest.mark.property
+class TestShardRangeFuzz:
+    @given(
+        n=st.integers(min_value=0, max_value=1_000_000),
+        world_size=st.integers(min_value=1, max_value=1024),
+    )
+    @settings(
+        max_examples=200,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_invariants(self, bge_module: Any, n: int, world_size: int) -> None:
+        ranges = [bge_module._shard_range(n, r, world_size) for r in range(world_size)]
+        sizes = [e - s for s, e in ranges]
+        # Coverage: sum of sizes = n
+        assert sum(sizes) == n
+        # Non-negative sizes
+        assert all(s >= 0 for s in sizes)
+        # Load balance: max - min <= 1 when n > 0
+        if n > 0:
+            assert max(sizes) - min(sizes) <= 1
+        # Disjoint + contiguous
+        for i in range(len(ranges) - 1):
+            assert ranges[i][1] == ranges[i + 1][0]
+        # First starts at 0, last ends at n
+        assert ranges[0][0] == 0
+        assert ranges[-1][1] == n
