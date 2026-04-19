@@ -653,8 +653,14 @@ class TestCheckpointRoundTrip:
     def test_load_nonexistent_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
         assert bge_module._load_checkpoint(tmp_path / "missing.json") is None
 
-    def test_load_rejects_mismatched_config(self, bge_module: Any, tmp_path: Path) -> None:
-        """Checkpoint config mismatch (different rank, world_size, encoder) must be ignored."""
+    def test_load_returns_structural_fields_for_caller_validation(self, bge_module: Any, tmp_path: Path) -> None:
+        """Loader returns complete dict; config-compatibility is caller's responsibility.
+
+        The loader answers "is this a well-formed checkpoint?" (structural check).
+        The caller (main()) answers "does this checkpoint match the current rank/
+        world_size/shard range/encoder?" (semantic check) — see main() for the full
+        validation chain. Splitting these concerns keeps the loader stateless.
+        """
         ckpt_path = tmp_path / "ckpt.json"
         bge_module._write_checkpoint(
             ckpt_path,
@@ -665,21 +671,10 @@ class TestCheckpointRoundTrip:
             shard_end=1000,
             encoder_model="BAAI/bge-m3",
         )
-        # Different world_size → should be discarded by caller
         ckpt = bge_module._load_checkpoint(ckpt_path)
         assert ckpt is not None
-        # Caller responsibility to validate — test structural fields exist
-        assert "world_size" in ckpt
-        assert "rank" in ckpt
-        assert "encoder_model" in ckpt
-
-
-@pytest.mark.unit
-class TestPartialIndexPath:
-    def test_partial_suffix_exists(self, bge_module: Any) -> None:
-        """Partial index + checkpoint paths must be distinct per-rank in multi-GPU mode."""
-        # Just verify constants exist; full integration tested via main()
-        assert isinstance(bge_module.CHECKPOINT_INTERVAL_BATCHES, int)
+        # Structural fields must all be present for the caller to make its decision
+        assert {"rank", "world_size", "encoder_model", "shard_start", "shard_end"} <= set(ckpt.keys())
 
 
 @pytest.mark.unit
