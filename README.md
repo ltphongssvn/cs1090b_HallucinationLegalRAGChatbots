@@ -2298,3 +2298,57 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ---
 
+
+
+
+---
+
+## Cell 13: BM25 Baseline Retrieval — Results & Interpretation
+
+### Output Summary
+
+| Metric | Value |
+|---|---|
+| Corpus chunks indexed | 7,813,273 |
+| Unique opinions | 1,465,484 |
+| Queries retrieved | 45,000 |
+| Top-k per query | 100 |
+| BM25 hyperparameters | k1=1.5, b=0.75 |
+| Index build time | 2,118.3s (35.3 min) |
+| Retrieval time | 1,891.7s (31.5 min) |
+| Per-query throughput | 23.8 qps |
+| `results_hash` | `926b4ebbdff68e13...` (SHA256 verified) |
+| Schema version | 1.0.0 |
+
+### Pipeline Health (All Green)
+
+- `n_corpus_chunks` matches Cell 12 output → corpus handoff intact
+- `n_queries = 45,000` → full test split retrieved, no loss in LePaRD × gold join
+- `results_hash` (summary) equals recomputed SHA256 of `bm25_results.jsonl` → no post-write corruption
+- Pydantic `BaselineBM25Summary` contract validates end-to-end
+
+### Performance Characteristics
+
+- **Index build (2,118s)**: single-threaded `bm25s` tokenization dominates; `n_threads` does not accelerate this phase (hard floor).
+- **Retrieval (1,892s)**: on 48 cores via `n_threads=48` batched retrieval, yields **23.8 qps**. Aggregate ≈ 185M chunk-scores/sec. Prior single-threaded attempts stalled at ~7.8 qps; the batching fix delivered the expected speedup.
+- **End-to-end (~67 min)**: cheap enough to re-run for schema or hyperparameter changes.
+
+### Project Implications
+
+1. **MS3 baseline is locked.** BM25 is the floor. Every neural retriever must beat this exact `results_hash` on Hit@k. If BGE-M3 or a fine-tuned model cannot exceed BM25, the project's core premise (neural retrieval helps in the legal domain) is falsified on this corpus.
+
+2. **Ablation budget ceiling.** One BM25 run = ~1 hour of `gpu` partition. Hyperparameter sweeps (k1, b, chunk size, stride) each cost ~1 hr. Budget 2–3 sweeps before MS4.
+
+3. **BGE-M3 throughput target.** Dense retrieval on 4× L4 GPUs with batched inference should exceed 200–500 qps. If BGE-M3 is slower than BM25 per query, batching is likely misconfigured.
+
+4. **Idempotency verified.** Cell 13 completed in 0.6s on re-run because `bm25_summary.json` existed and validated. TFs and collaborators re-running the notebook will not re-burn 67 min of cluster time — critical for the April 26 deadline.
+
+5. **Cell 15 evaluation unblocked.** `bm25_results.jsonl` (230 MB, DVC-tracked, hash-verified) is the ground input for Hit@k / MRR / NDCG@10. The 45K × top-100 shape means k ∈ {1, 5, 10, 100} are all directly measurable; no re-retrieval needed.
+
+6. **MS4 bottleneck identified.** The 35-min index build grows linearly with corpus size. Scaling to full LePaRD 4M pairs or a larger CourtListener snapshot will require cached, DVC-tracked BM25 indices (pickle or FAISS-style) to avoid rebuilding for every evaluation run.
+
+### Next Actionable
+
+Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs — the only remaining compute-heavy stage before Cell 15 metrics.
+
+---
