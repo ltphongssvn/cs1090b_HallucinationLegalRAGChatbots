@@ -18,14 +18,13 @@ Lazy loading: faiss, torch, sentence_transformers imported only inside main(),
 never at module top. This keeps --dry-run fast and test-friendly.
 
 Production hardening applied (2026 review):
-    - encoder.max_seq_length enforced to MAX_LENGTH to prevent CUDA OOM from
-      pathological long chunks (would otherwise allocate n² attention matrix).
-    - Streaming corpus encoding: never materialize full (N, 1024) float32 array
-      in RAM. Batches flow disk → encoder → index.add(), discarding embeddings
-      after FAISS absorbs them. Keeps RAM flat regardless of corpus size.
-    - Dynamic retrieval k-expansion: if one opinion dominates initial top-k
-      chunk retrieval (e.g. 300 chunks from opinion 1001), expand k per-query
-      until MaxP aggregation yields ≥ top_k unique opinions or index exhausted.
+    - encoder.max_seq_length enforced to MAX_LENGTH to prevent CUDA OOM.
+    - Streaming corpus encoding: never materialize full (N, 1024) float32 array.
+    - Dynamic retrieval k-expansion when one opinion dominates.
+    - Index reuse: if bge_m3_index.faiss + meta exist and meta row count matches
+      corpus, skip encode + index build (saves ~30 min on reruns).
+    - Seeds torch + numpy for determinism (BGE-M3 inference is deterministic
+      given fixed weights + batch composition on a fixed device).
 """
 
 from __future__ import annotations
@@ -173,6 +172,27 @@ def _device_name(device: str) -> str:
         return "cuda-unknown"
 
 
+def _seed_all(seed: int) -> None:
+    """Seed numpy + torch for deterministic encoding given fixed model + device."""
+    import random as _r
+
+    _r.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
 # ---------- W&B ----------
 
 
@@ -209,7 +229,8 @@ def main(
     seed: int = 0,
     encode_batch_size: int = ENCODE_BATCH_SIZE,
     query_batch_size: int = QUERY_BATCH_SIZE,
-) -> dict[str, Any]:
+) -> Any:
+    """Run BGE-M3 dense baseline; returns validated BaselineBgeM3Summary."""
     import faiss
     import numpy as np
     from sentence_transformers import SentenceTransformer
@@ -218,6 +239,7 @@ def main(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    _seed_all(seed)
     device = _detect_device()
     device_name = _device_name(device)
 
@@ -230,7 +252,7 @@ def main(
     logger.info(f"  out_dir        : {out_dir}")
     logger.info(f"  encoder        : {ENCODER_MODEL} (dim={EMBEDDING_DIM})")
 
-    # --- Load encoder with enforced max length (prevents OOM from long chunks) ---
+    # --- Load encoder with enforced max length ---
     logger.info("\n[1/5] Loading encoder")
     t0 = time.perf_counter()
     encoder = SentenceTransformer(ENCODER_MODEL, device=device)
@@ -239,9 +261,7 @@ def main(
     logger.info(f"  encoder loaded in: {encoder_load_seconds:.2f}s")
     logger.info(f"  max_seq_length   : {encoder.max_seq_length}")
 
-    # --- Stream corpus: collect meta, then encode in batches direct to FAISS ---
-    # Never materialize full (N, 1024) float32 array in RAM; at 7.8M chunks that
-    # would be 30GB of contiguous memory.
+    # --- Collect corpus metadata (required for both fresh build AND index reuse) ---
     logger.info("\n[2/5] Streaming corpus metadata")
     chunk_meta: list[tuple[int, int]] = []
     for c in _iter_corpus(corpus_path):
@@ -251,47 +271,65 @@ def main(
     logger.info(f"  chunks           : {n_chunks:,}")
     logger.info(f"  unique opinions  : {unique_opinions:,}")
 
-    # --- Build FAISS index via streaming batches ---
-    logger.info(f"\n[3/5] Encoding corpus + building FAISS index (batch={encode_batch_size})")
-    t0 = time.perf_counter()
-    index = faiss.IndexFlatIP(EMBEDDING_DIM)
-
-    def _iter_batches() -> Iterator[list[str]]:
-        batch: list[str] = []
-        for c in _iter_corpus(corpus_path):
-            batch.append(c["text"])
-            if len(batch) >= encode_batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
-
-    n_encoded = 0
-    for batch_texts in _iter_batches():
-        embs = encoder.encode(
-            batch_texts,
-            batch_size=encode_batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-            normalize_embeddings=NORMALIZE_EMBEDDINGS,
-        ).astype(np.float32)
-        index.add(embs)
-        n_encoded += len(batch_texts)
-        if n_encoded % (encode_batch_size * 100) == 0:
-            logger.info(f"    encoded {n_encoded:,} / {n_chunks:,}")
-
-    index_build_seconds = time.perf_counter() - t0
-    logger.info(f"  index size       : {index.ntotal:,}")
-    logger.info(f"  index build      : {index_build_seconds:.2f}s")
-
+    # --- Build or reuse FAISS index ---
     index_path = out_dir / "bge_m3_index.faiss"
-    faiss.write_index(index, str(index_path))
     meta_path = out_dir / "bge_m3_index_meta.jsonl"
-    with meta_path.open("w", encoding="utf-8") as f:
-        for oid, ci in chunk_meta:
-            f.write(json.dumps({"opinion_id": oid, "chunk_index": ci}) + "\n")
-    logger.info(f"  wrote index -> {index_path}")
-    logger.info(f"  wrote meta  -> {meta_path}")
+
+    reuse_index = False
+    if index_path.exists() and meta_path.exists():
+        # Validate meta row count matches corpus; cheap O(n) line count
+        with meta_path.open(encoding="utf-8") as f:
+            meta_line_count = sum(1 for _ in f)
+        if meta_line_count == n_chunks:
+            try:
+                index = faiss.read_index(str(index_path))
+                if index.ntotal == n_chunks and index.d == EMBEDDING_DIM:
+                    reuse_index = True
+                    logger.info(f"\n[3/5] Reusing FAISS index ({index.ntotal:,} vectors)")
+            except Exception as e:
+                logger.info(f"  could not load existing index: {e}")
+
+    if reuse_index:
+        index_build_seconds = 0.0
+    else:
+        logger.info(f"\n[3/5] Encoding corpus + building FAISS index (batch={encode_batch_size})")
+        t0 = time.perf_counter()
+        index = faiss.IndexFlatIP(EMBEDDING_DIM)
+
+        def _iter_batches() -> Iterator[list[str]]:
+            batch: list[str] = []
+            for c in _iter_corpus(corpus_path):
+                batch.append(c["text"])
+                if len(batch) >= encode_batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+        n_encoded = 0
+        for batch_texts in _iter_batches():
+            embs = encoder.encode(
+                batch_texts,
+                batch_size=encode_batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=NORMALIZE_EMBEDDINGS,
+            ).astype(np.float32)
+            index.add(embs)
+            n_encoded += len(batch_texts)
+            if n_encoded % (encode_batch_size * 100) == 0:
+                logger.info(f"    encoded {n_encoded:,} / {n_chunks:,}")
+
+        index_build_seconds = time.perf_counter() - t0
+        logger.info(f"  index size       : {index.ntotal:,}")
+        logger.info(f"  index build      : {index_build_seconds:.2f}s")
+
+        faiss.write_index(index, str(index_path))
+        with meta_path.open("w", encoding="utf-8") as f:
+            for oid, ci in chunk_meta:
+                f.write(json.dumps({"opinion_id": oid, "chunk_index": ci}) + "\n")
+        logger.info(f"  wrote index -> {index_path}")
+        logger.info(f"  wrote meta  -> {meta_path}")
 
     # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
@@ -317,7 +355,7 @@ def main(
     results_path = out_dir / "bge_m3_results.jsonl"
 
     def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
-        """Retrieve with k-expansion until MaxP yields >= top_k unique opinions."""
+        """Per-query k-expansion until MaxP yields >= top_k unique opinions."""
         current_k = initial_k
         while True:
             scores, indices = index.search(q_emb, current_k)
@@ -338,7 +376,6 @@ def main(
     with results_path.open("w", encoding="utf-8") as fout:
         for batch_start in range(0, len(queries), query_batch_size):
             batch_end = min(batch_start + query_batch_size, len(queries))
-            # Batched search for common case (no k-expansion needed)
             batch_q_emb = query_embeddings[batch_start:batch_end]
             scores_batch, indices_batch = index.search(batch_q_emb, initial_k)
             for qi_local, qi_global in enumerate(range(batch_start, batch_end)):
@@ -357,7 +394,6 @@ def main(
                     if idx != -1
                 ]
                 aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
-                # k-expansion fallback only when batch retrieval under-filled top_k
                 if len(aggregated) < top_k and initial_k < n_chunks:
                     aggregated = _retrieve_and_aggregate(query_embeddings[qi_global : qi_global + 1])
                 fout.write(
@@ -375,30 +411,29 @@ def main(
 
     # --- Summary ---
     results_hash = hashlib.sha256(results_path.read_bytes()).hexdigest()
-    summary_data = {
-        "schema_version": SCHEMA_VERSION,
-        "n_queries": len(queries),
-        "n_corpus_chunks": n_chunks,
-        "n_unique_opinions": unique_opinions,
-        "top_k": top_k,
-        "encoder_model": ENCODER_MODEL,
-        "embedding_dim": EMBEDDING_DIM,
-        "device": device,
-        "device_name": device_name,
-        "encode_batch_size": encode_batch_size,
-        "similarity_metric": SIMILARITY_METRIC,
-        "normalize_embeddings": NORMALIZE_EMBEDDINGS,
-        "max_length": MAX_LENGTH,
-        "dtype": DTYPE,
-        "encoder_load_seconds": round(encoder_load_seconds, 3),
-        "index_build_seconds": round(index_build_seconds, 3),
-        "query_encode_seconds": round(query_encode_seconds, 3),
-        "retrieval_seconds": round(retrieval_seconds, 3),
-        "seed": seed,
-        "git_sha": _git_sha(),
-        "results_hash": results_hash,
-    }
-    validated = BaselineBgeM3Summary.model_validate(summary_data)
+    validated = BaselineBgeM3Summary(
+        schema_version=SCHEMA_VERSION,
+        n_queries=len(queries),
+        n_corpus_chunks=n_chunks,
+        n_unique_opinions=unique_opinions,
+        top_k=top_k,
+        encoder_model=ENCODER_MODEL,
+        embedding_dim=EMBEDDING_DIM,
+        device=device,
+        device_name=device_name,
+        encode_batch_size=encode_batch_size,
+        similarity_metric=SIMILARITY_METRIC,
+        normalize_embeddings=NORMALIZE_EMBEDDINGS,
+        max_length=MAX_LENGTH,
+        dtype=DTYPE,
+        encoder_load_seconds=round(encoder_load_seconds, 3),
+        index_build_seconds=round(index_build_seconds, 3),
+        query_encode_seconds=round(query_encode_seconds, 3),
+        retrieval_seconds=round(retrieval_seconds, 3),
+        seed=seed,
+        git_sha=_git_sha(),
+        results_hash=results_hash,
+    )
     summary_path = out_dir / "bge_m3_summary.json"
     summary_path.write_text(
         json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
@@ -407,9 +442,9 @@ def main(
     logger.info(f"\nWrote bge_m3_summary.json -> {summary_path}")
 
     if log_to_wandb:
-        _log_to_wandb(summary_data, out_dir)
+        _log_to_wandb(validated.model_dump(), out_dir)
 
-    return summary_data
+    return validated
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
