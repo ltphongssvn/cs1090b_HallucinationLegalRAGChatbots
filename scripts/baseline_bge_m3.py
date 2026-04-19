@@ -125,11 +125,8 @@ def _aggregate_chunk_scores(
         s = h["score"]
         if oid not in best or s > best[oid]:
             best[oid] = s
-    ranked = sorted(
-        ({"opinion_id": oid, "score": sc} for oid, sc in best.items()),
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+    # Deterministic tie-break: descending score, then ascending opinion_id
+    ranked = [{"opinion_id": oid, "score": sc} for oid, sc in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))]
     return ranked[:top_k]
 
 
@@ -237,6 +234,17 @@ def main(
 
     from src.eda_schemas import BaselineBgeM3Summary
 
+    # Fail fast on invalid inputs BEFORE loading 2.27GB BGE-M3 model
+    if top_k < 1:
+        raise ValueError(f"top_k must be >= 1, got {top_k}")
+    if encode_batch_size < 1:
+        raise ValueError(f"encode_batch_size must be >= 1, got {encode_batch_size}")
+    if query_batch_size < 1:
+        raise ValueError(f"query_batch_size must be >= 1, got {query_batch_size}")
+    for path in (corpus_path, gold_pairs_path, lepard_path):
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"input missing: {path}")
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _seed_all(seed)
@@ -315,6 +323,8 @@ def main(
                 convert_to_numpy=True,
                 normalize_embeddings=NORMALIZE_EMBEDDINGS,
             ).astype(np.float32)
+            if embs.shape[1] != EMBEDDING_DIM:
+                raise ValueError(f"encoder output dim {embs.shape[1]} != expected {EMBEDDING_DIM}")
             index.add(embs)
             n_encoded += len(batch_texts)
             if n_encoded % (encode_batch_size * 100) == 0:
@@ -339,7 +349,7 @@ def main(
     t0 = time.perf_counter()
     query_embeddings = encoder.encode(
         query_texts,
-        batch_size=encode_batch_size,
+        batch_size=query_batch_size,
         show_progress_bar=True,
         convert_to_numpy=True,
         normalize_embeddings=NORMALIZE_EMBEDDINGS,
@@ -353,6 +363,7 @@ def main(
     t0 = time.perf_counter()
     initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
     results_path = out_dir / "bge_m3_results.jsonl"
+    results_tmp = results_path.with_suffix(".jsonl.tmp")
 
     def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
         """Per-query k-expansion until MaxP yields >= top_k unique opinions."""
@@ -373,7 +384,7 @@ def main(
                 return aggregated
             current_k = min(current_k * 2, n_chunks)
 
-    with results_path.open("w", encoding="utf-8") as fout:
+    with results_tmp.open("w", encoding="utf-8") as fout:
         for batch_start in range(0, len(queries), query_batch_size):
             batch_end = min(batch_start + query_batch_size, len(queries))
             batch_q_emb = query_embeddings[batch_start:batch_end]
@@ -402,10 +413,14 @@ def main(
                             "source_id": q["source_id"],
                             "dest_id": q["dest_id"],
                             "retrieved": aggregated,
-                        }
+                        },
+                        allow_nan=False,
                     )
                     + "\n"
                 )
+    import os
+
+    os.replace(results_tmp, results_path)
     retrieval_seconds = time.perf_counter() - t0
     logger.info(f"  retrieval done in: {retrieval_seconds:.2f}s")
 
