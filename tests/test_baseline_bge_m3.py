@@ -536,3 +536,80 @@ class TestMergeShardsHelper:
         assert len(lines) == 3
         source_ids = {json.loads(line)["source_id"] for line in lines}
         assert source_ids == {1, 2, 3}
+
+
+@pytest.mark.contract
+class TestCorpusSharding:
+    """Corpus-shard architecture: each rank indexes a corpus slice, searches all queries."""
+
+    def test_merge_combines_per_query_across_shards(self, bge_module: Any, tmp_path: Path) -> None:
+        # Rank 0 shard top hits for query (src=1, dst=10)
+        shard0 = tmp_path / "bge_m3_results.rank000.jsonl"
+        shard0.write_text(
+            json.dumps(
+                {
+                    "source_id": 1,
+                    "dest_id": 10,
+                    "retrieved": [
+                        {"opinion_id": 100, "score": 0.9},
+                        {"opinion_id": 101, "score": 0.7},
+                    ],
+                }
+            )
+            + "\n"
+        )
+        # Rank 1 shard top hits for same query
+        shard1 = tmp_path / "bge_m3_results.rank001.jsonl"
+        shard1.write_text(
+            json.dumps(
+                {
+                    "source_id": 1,
+                    "dest_id": 10,
+                    "retrieved": [
+                        {"opinion_id": 200, "score": 0.95},
+                        {"opinion_id": 201, "score": 0.6},
+                    ],
+                }
+            )
+            + "\n"
+        )
+        merged = tmp_path / "bge_m3_results.jsonl"
+        bge_module._merge_shard_results([shard0, shard1], merged, top_k=3)
+        lines = merged.read_text().splitlines()
+        assert len(lines) == 1
+        row = json.loads(lines[0])
+        assert row["source_id"] == 1
+        # Top-3 across all shards, sorted desc, MaxP aggregation
+        oids = [h["opinion_id"] for h in row["retrieved"]]
+        scores = [h["score"] for h in row["retrieved"]]
+        assert oids[0] == 200  # highest score 0.95
+        assert scores == sorted(scores, reverse=True)
+        assert len(row["retrieved"]) <= 3
+
+    def test_merge_top_k_cap(self, bge_module: Any, tmp_path: Path) -> None:
+        shard0 = tmp_path / "bge_m3_results.rank000.jsonl"
+        shard0.write_text(
+            json.dumps(
+                {
+                    "source_id": 1,
+                    "dest_id": 10,
+                    "retrieved": [{"opinion_id": i, "score": 1.0 - i * 0.01} for i in range(100)],
+                }
+            )
+            + "\n"
+        )
+        shard1 = tmp_path / "bge_m3_results.rank001.jsonl"
+        shard1.write_text(
+            json.dumps(
+                {
+                    "source_id": 1,
+                    "dest_id": 10,
+                    "retrieved": [{"opinion_id": 1000 + i, "score": 0.5 - i * 0.01} for i in range(100)],
+                }
+            )
+            + "\n"
+        )
+        merged = tmp_path / "bge_m3_results.jsonl"
+        bge_module._merge_shard_results([shard0, shard1], merged, top_k=50)
+        row = json.loads(merged.read_text().splitlines()[0])
+        assert len(row["retrieved"]) == 50
