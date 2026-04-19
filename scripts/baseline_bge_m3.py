@@ -16,6 +16,16 @@ Outputs (data/processed/baseline/):
 
 Lazy loading: faiss, torch, sentence_transformers imported only inside main(),
 never at module top. This keeps --dry-run fast and test-friendly.
+
+Production hardening applied (2026 review):
+    - encoder.max_seq_length enforced to MAX_LENGTH to prevent CUDA OOM from
+      pathological long chunks (would otherwise allocate n² attention matrix).
+    - Streaming corpus encoding: never materialize full (N, 1024) float32 array
+      in RAM. Batches flow disk → encoder → index.add(), discarding embeddings
+      after FAISS absorbs them. Keeps RAM flat regardless of corpus size.
+    - Dynamic retrieval k-expansion: if one opinion dominates initial top-k
+      chunk retrieval (e.g. 300 chunks from opinion 1001), expand k per-query
+      until MaxP aggregation yields ≥ top_k unique opinions or index exhausted.
 """
 
 from __future__ import annotations
@@ -220,38 +230,58 @@ def main(
     logger.info(f"  out_dir        : {out_dir}")
     logger.info(f"  encoder        : {ENCODER_MODEL} (dim={EMBEDDING_DIM})")
 
-    # --- Load encoder ---
+    # --- Load encoder with enforced max length (prevents OOM from long chunks) ---
     logger.info("\n[1/5] Loading encoder")
     t0 = time.perf_counter()
     encoder = SentenceTransformer(ENCODER_MODEL, device=device)
+    encoder.max_seq_length = MAX_LENGTH
     encoder_load_seconds = time.perf_counter() - t0
     logger.info(f"  encoder loaded in: {encoder_load_seconds:.2f}s")
+    logger.info(f"  max_seq_length   : {encoder.max_seq_length}")
 
-    # --- Load corpus chunks ---
-    logger.info("\n[2/5] Loading corpus chunks")
-    chunks: list[dict[str, Any]] = list(_iter_corpus(corpus_path))
-    chunk_texts = [c["text"] for c in chunks]
-    chunk_meta = [(c["opinion_id"], c["chunk_index"]) for c in chunks]
+    # --- Stream corpus: collect meta, then encode in batches direct to FAISS ---
+    # Never materialize full (N, 1024) float32 array in RAM; at 7.8M chunks that
+    # would be 30GB of contiguous memory.
+    logger.info("\n[2/5] Streaming corpus metadata")
+    chunk_meta: list[tuple[int, int]] = []
+    for c in _iter_corpus(corpus_path):
+        chunk_meta.append((c["opinion_id"], c["chunk_index"]))
+    n_chunks = len(chunk_meta)
     unique_opinions = len({m[0] for m in chunk_meta})
-    logger.info(f"  chunks           : {len(chunks):,}")
+    logger.info(f"  chunks           : {n_chunks:,}")
     logger.info(f"  unique opinions  : {unique_opinions:,}")
 
-    # --- Build FAISS index ---
+    # --- Build FAISS index via streaming batches ---
     logger.info(f"\n[3/5] Encoding corpus + building FAISS index (batch={encode_batch_size})")
     t0 = time.perf_counter()
-    corpus_embeddings = encoder.encode(
-        chunk_texts,
-        batch_size=encode_batch_size,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=NORMALIZE_EMBEDDINGS,
-    ).astype(np.float32)
-
-    # IndexFlatIP on unit-normalized vectors = cosine similarity
     index = faiss.IndexFlatIP(EMBEDDING_DIM)
-    index.add(corpus_embeddings)
+
+    def _iter_batches() -> Iterator[list[str]]:
+        batch: list[str] = []
+        for c in _iter_corpus(corpus_path):
+            batch.append(c["text"])
+            if len(batch) >= encode_batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    n_encoded = 0
+    for batch_texts in _iter_batches():
+        embs = encoder.encode(
+            batch_texts,
+            batch_size=encode_batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=NORMALIZE_EMBEDDINGS,
+        ).astype(np.float32)
+        index.add(embs)
+        n_encoded += len(batch_texts)
+        if n_encoded % (encode_batch_size * 100) == 0:
+            logger.info(f"    encoded {n_encoded:,} / {n_chunks:,}")
+
     index_build_seconds = time.perf_counter() - t0
-    logger.info(f"  embeddings shape : {corpus_embeddings.shape}")
+    logger.info(f"  index size       : {index.ntotal:,}")
     logger.info(f"  index build      : {index_build_seconds:.2f}s")
 
     index_path = out_dir / "bge_m3_index.faiss"
@@ -280,16 +310,37 @@ def main(
     logger.info(f"  query embeddings : {query_embeddings.shape}")
     logger.info(f"  encode time      : {query_encode_seconds:.2f}s")
 
-    # --- Retrieval ---
+    # --- Retrieval with dynamic k-expansion ---
     logger.info(f"\n[5/5] FAISS search top-{top_k} per query")
     t0 = time.perf_counter()
-    retrieval_k = min(top_k * RETRIEVAL_K_MULTIPLIER, len(chunks))
+    initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
     results_path = out_dir / "bge_m3_results.jsonl"
+
+    def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
+        """Retrieve with k-expansion until MaxP yields >= top_k unique opinions."""
+        current_k = initial_k
+        while True:
+            scores, indices = index.search(q_emb, current_k)
+            raw_hits = [
+                {
+                    "opinion_id": chunk_meta[int(idx)][0],
+                    "chunk_index": chunk_meta[int(idx)][1],
+                    "score": float(score),
+                }
+                for idx, score in zip(indices[0], scores[0], strict=False)
+                if idx != -1
+            ]
+            aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
+            if len(aggregated) >= top_k or current_k >= n_chunks:
+                return aggregated
+            current_k = min(current_k * 2, n_chunks)
+
     with results_path.open("w", encoding="utf-8") as fout:
         for batch_start in range(0, len(queries), query_batch_size):
             batch_end = min(batch_start + query_batch_size, len(queries))
+            # Batched search for common case (no k-expansion needed)
             batch_q_emb = query_embeddings[batch_start:batch_end]
-            scores_batch, indices_batch = index.search(batch_q_emb, retrieval_k)
+            scores_batch, indices_batch = index.search(batch_q_emb, initial_k)
             for qi_local, qi_global in enumerate(range(batch_start, batch_end)):
                 q = queries[qi_global]
                 raw_hits = [
@@ -306,6 +357,9 @@ def main(
                     if idx != -1
                 ]
                 aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
+                # k-expansion fallback only when batch retrieval under-filled top_k
+                if len(aggregated) < top_k and initial_k < n_chunks:
+                    aggregated = _retrieve_and_aggregate(query_embeddings[qi_global : qi_global + 1])
                 fout.write(
                     json.dumps(
                         {
@@ -324,7 +378,7 @@ def main(
     summary_data = {
         "schema_version": SCHEMA_VERSION,
         "n_queries": len(queries),
-        "n_corpus_chunks": len(chunks),
+        "n_corpus_chunks": n_chunks,
         "n_unique_opinions": unique_opinions,
         "top_k": top_k,
         "encoder_model": ENCODER_MODEL,
