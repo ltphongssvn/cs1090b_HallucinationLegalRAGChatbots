@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=160G
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=logs/bge_m3_multigpu_%j.log
 #SBATCH --error=logs/bge_m3_multigpu_%j.log
 
