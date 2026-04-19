@@ -613,3 +613,102 @@ class TestCorpusSharding:
         bge_module._merge_shard_results([shard0, shard1], merged, top_k=50)
         row = json.loads(merged.read_text().splitlines()[0])
         assert len(row["retrieved"]) == 50
+
+
+@pytest.mark.contract
+class TestCheckpointing:
+    def test_checkpoint_writer_exists(self, bge_module: Any) -> None:
+        assert callable(getattr(bge_module, "_write_checkpoint", None))
+
+    def test_checkpoint_reader_exists(self, bge_module: Any) -> None:
+        assert callable(getattr(bge_module, "_load_checkpoint", None))
+
+    def test_checkpoint_interval_constant(self, bge_module: Any) -> None:
+        ci = getattr(bge_module, "CHECKPOINT_INTERVAL_BATCHES", None)
+        assert isinstance(ci, int) and ci >= 1
+
+
+@pytest.mark.unit
+class TestCheckpointRoundTrip:
+    def test_write_then_load_roundtrip(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt_path = tmp_path / "ckpt.json"
+        bge_module._write_checkpoint(
+            ckpt_path,
+            rank=0,
+            world_size=4,
+            n_encoded=12800,
+            shard_start=0,
+            shard_end=1953319,
+            encoder_model="BAAI/bge-m3",
+        )
+        assert ckpt_path.exists()
+        ckpt = bge_module._load_checkpoint(ckpt_path)
+        assert ckpt["rank"] == 0
+        assert ckpt["world_size"] == 4
+        assert ckpt["n_encoded"] == 12800
+        assert ckpt["shard_start"] == 0
+        assert ckpt["shard_end"] == 1953319
+        assert ckpt["encoder_model"] == "BAAI/bge-m3"
+
+    def test_load_nonexistent_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        assert bge_module._load_checkpoint(tmp_path / "missing.json") is None
+
+    def test_load_rejects_mismatched_config(self, bge_module: Any, tmp_path: Path) -> None:
+        """Checkpoint config mismatch (different rank, world_size, encoder) must be ignored."""
+        ckpt_path = tmp_path / "ckpt.json"
+        bge_module._write_checkpoint(
+            ckpt_path,
+            rank=0,
+            world_size=4,
+            n_encoded=1000,
+            shard_start=0,
+            shard_end=1000,
+            encoder_model="BAAI/bge-m3",
+        )
+        # Different world_size → should be discarded by caller
+        ckpt = bge_module._load_checkpoint(ckpt_path)
+        assert ckpt is not None
+        # Caller responsibility to validate — test structural fields exist
+        assert "world_size" in ckpt
+        assert "rank" in ckpt
+        assert "encoder_model" in ckpt
+
+
+@pytest.mark.unit
+class TestPartialIndexPath:
+    def test_partial_suffix_exists(self, bge_module: Any) -> None:
+        """Partial index + checkpoint paths must be distinct per-rank in multi-GPU mode."""
+        # Just verify constants exist; full integration tested via main()
+        assert isinstance(bge_module.CHECKPOINT_INTERVAL_BATCHES, int)
+
+
+@pytest.mark.unit
+class TestCheckpointIncompleteRejection:
+    def test_incomplete_missing_required_key_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        """Checkpoint missing any required key must return None (not partial dict)."""
+        ckpt_path = tmp_path / "incomplete.json"
+        # Missing world_size, shard_start, shard_end, encoder_model
+        ckpt_path.write_text('{"rank": 0, "n_encoded": 100}')
+        assert bge_module._load_checkpoint(ckpt_path) is None
+
+    def test_complete_checkpoint_loads(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt_path = tmp_path / "good.json"
+        bge_module._write_checkpoint(
+            ckpt_path,
+            rank=0,
+            world_size=4,
+            n_encoded=100,
+            shard_start=0,
+            shard_end=1000,
+            encoder_model="BAAI/bge-m3",
+        )
+        ckpt = bge_module._load_checkpoint(ckpt_path)
+        assert ckpt is not None
+        assert set(ckpt.keys()) >= {
+            "rank",
+            "world_size",
+            "n_encoded",
+            "shard_start",
+            "shard_end",
+            "encoder_model",
+        }

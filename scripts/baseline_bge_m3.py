@@ -1,4 +1,4 @@
-"""MS3 BGE-M3 dense baseline retrieval (corpus-sharded multi-GPU).
+"""MS3 BGE-M3 dense baseline retrieval (corpus-sharded, resume-safe).
 
 Architecture (corpus sharding):
     - Each rank indexes a disjoint corpus slice [shard_start, shard_end)
@@ -13,6 +13,15 @@ Outputs (data/processed/baseline/):
     bge_m3_summary{.rank###}.json     — BaselineBgeM3Summary
     bge_m3_index{.rank###}.faiss      — FAISS IndexFlatIP
     bge_m3_index_meta{.rank###}.jsonl — parallel chunk_meta per index row
+    bge_m3_ckpt{.rank###}.json        — encoding progress (deleted on success)
+    bge_m3_index{.rank###}.partial.faiss — in-flight index (deleted on success)
+
+Resume semantics:
+    - Encoding phase flushes the partial FAISS index + checkpoint every
+      CHECKPOINT_INTERVAL_BATCHES batches (atomic: tempfile + os.replace).
+    - On restart, a compatible checkpoint (same rank, world_size, shard range,
+      encoder_model, dim, ntotal) triggers resume from the last recorded offset.
+    - Partial artifacts are deleted only after the final index + meta are written.
 
 Hardening:
     - Lazy imports (faiss, torch, sentence_transformers inside main)
@@ -46,6 +55,7 @@ EMBEDDING_DIM = 1024
 ENCODE_BATCH_SIZE = 64
 QUERY_BATCH_SIZE = 256
 RETRIEVAL_K_MULTIPLIER = 3
+CHECKPOINT_INTERVAL_BATCHES = 200  # flush partial FAISS index + meta every N batches
 MAX_LENGTH = 8192
 SIMILARITY_METRIC = "cosine"
 NORMALIZE_EMBEDDINGS = True
@@ -177,6 +187,60 @@ def _merge_shard_results(shard_paths: list[Path], merged_path: Path, *, top_k: i
             )
 
 
+# ---------- checkpointing (resume-safe corpus encoding) ----------
+
+
+def _write_checkpoint(
+    ckpt_path: Path,
+    *,
+    rank: int,
+    world_size: int,
+    n_encoded: int,
+    shard_start: int,
+    shard_end: int,
+    encoder_model: str,
+) -> None:
+    """Atomically persist encoding progress."""
+    tmp = ckpt_path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "rank": rank,
+                "world_size": world_size,
+                "n_encoded": n_encoded,
+                "shard_start": shard_start,
+                "shard_end": shard_end,
+                "encoder_model": encoder_model,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(tmp, ckpt_path)
+
+
+_CHECKPOINT_REQUIRED_KEYS = frozenset({"rank", "world_size", "n_encoded", "shard_start", "shard_end", "encoder_model"})
+
+
+def _load_checkpoint(ckpt_path: Path) -> dict[str, Any] | None:
+    """Load checkpoint JSON. Returns None if file missing, corrupt, or incomplete.
+
+    Structural incompleteness (missing required keys) is treated identically to a
+    corrupt file — caller starts fresh rather than continuing from an ambiguous state.
+    """
+    if not ckpt_path.exists():
+        return None
+    try:
+        data = json.loads(ckpt_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not _CHECKPOINT_REQUIRED_KEYS.issubset(data.keys()):
+        return None
+    return data
+
+
 # ---------- provenance ----------
 
 
@@ -268,7 +332,7 @@ def main(
     rank: int = 0,
     world_size: int = 1,
 ) -> Any:
-    """Run BGE-M3 dense baseline on corpus shard [rank/world_size]."""
+    """Run BGE-M3 dense baseline on corpus shard [rank/world_size] with resume."""
     import faiss
     import numpy as np
     from sentence_transformers import SentenceTransformer
@@ -300,6 +364,8 @@ def main(
     meta_path = out_dir / f"bge_m3_index_meta{rank_suffix}.jsonl"
     results_path = out_dir / f"bge_m3_results{rank_suffix}.jsonl"
     summary_path = out_dir / f"bge_m3_summary{rank_suffix}.json"
+    ckpt_path = out_dir / f"bge_m3_ckpt{rank_suffix}.json"
+    partial_index_path = out_dir / f"bge_m3_index{rank_suffix}.partial.faiss"
 
     logger.info("=" * 60)
     logger.info(f"MS3 BGE-M3 corpus-shard  (rank={rank}/{world_size}, device={device_name}, top_k={top_k})")
@@ -320,7 +386,6 @@ def main(
     logger.info(f"  corpus (total)   : {n_total:,}")
     logger.info(f"  shard range      : [{shard_start:,}, {shard_end:,})  ({shard_end - shard_start:,} chunks)")
 
-    # Collect shard metadata only
     chunk_meta: list[tuple[int, int]] = []
     for i, c in enumerate(_iter_corpus(corpus_path)):
         if shard_start <= i < shard_end:
@@ -331,8 +396,7 @@ def main(
     unique_opinions = len({m[0] for m in chunk_meta})
     logger.info(f"  shard opinions   : {unique_opinions:,}")
 
-    # --- Build FAISS index over shard ---
-    # Reuse only in single-GPU mode (per-rank indices not interchangeable)
+    # --- Build or reuse/resume FAISS index ---
     reuse_index = False
     if world_size == 1 and index_path.exists() and meta_path.exists():
         with meta_path.open(encoding="utf-8") as f:
@@ -349,14 +413,47 @@ def main(
     if reuse_index:
         index_build_seconds = 0.0
     else:
-        logger.info(f"\n[3/5] Encoding shard + building FAISS index (batch={encode_batch_size})")
+        logger.info(
+            f"\n[3/5] Encoding shard + building FAISS index "
+            f"(batch={encode_batch_size}, checkpoint every {CHECKPOINT_INTERVAL_BATCHES} batches)"
+        )
+
+        # Attempt resume
+        resume_from = 0
+        index: Any = None  # faiss index handle
+        ckpt = _load_checkpoint(ckpt_path)
+        if ckpt is not None and partial_index_path.exists():
+            if (
+                ckpt.get("rank") == rank
+                and ckpt.get("world_size") == world_size
+                and ckpt.get("shard_start") == shard_start
+                and ckpt.get("shard_end") == shard_end
+                and ckpt.get("encoder_model") == ENCODER_MODEL
+            ):
+                try:
+                    index = faiss.read_index(str(partial_index_path))
+                    if index.d == EMBEDDING_DIM and index.ntotal == ckpt["n_encoded"]:
+                        resume_from = int(ckpt["n_encoded"])
+                        logger.info(f"  RESUMING: {resume_from:,} chunks already encoded")
+                    else:
+                        logger.info("  partial index dim/count mismatch — restarting")
+                        index = faiss.IndexFlatIP(EMBEDDING_DIM)
+                except Exception as e:
+                    logger.info(f"  could not load partial index ({e}) — restarting")
+                    index = faiss.IndexFlatIP(EMBEDDING_DIM)
+            else:
+                logger.info("  checkpoint config mismatch — restarting")
+                index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        if index is None:
+            index = faiss.IndexFlatIP(EMBEDDING_DIM)
+
         t0 = time.perf_counter()
-        index = faiss.IndexFlatIP(EMBEDDING_DIM)
 
         def _iter_shard_batches() -> Iterator[list[str]]:
             batch: list[str] = []
+            absolute_start = shard_start + resume_from
             for i, c in enumerate(_iter_corpus(corpus_path)):
-                if i < shard_start:
+                if i < absolute_start:
                     continue
                 if i >= shard_end:
                     break
@@ -367,7 +464,8 @@ def main(
             if batch:
                 yield batch
 
-        n_encoded = 0
+        n_encoded = resume_from
+        batches_since_ckpt = 0
         for batch_texts in _iter_shard_batches():
             embs = encoder.encode(
                 batch_texts,
@@ -380,19 +478,39 @@ def main(
                 raise ValueError(f"encoder dim {embs.shape[1]} != expected {EMBEDDING_DIM}")
             index.add(embs)
             n_encoded += len(batch_texts)
-            if n_encoded % (encode_batch_size * 100) == 0:
+            batches_since_ckpt += 1
+
+            if batches_since_ckpt >= CHECKPOINT_INTERVAL_BATCHES:
+                faiss.write_index(index, str(partial_index_path))
+                _write_checkpoint(
+                    ckpt_path,
+                    rank=rank,
+                    world_size=world_size,
+                    n_encoded=n_encoded,
+                    shard_start=shard_start,
+                    shard_end=shard_end,
+                    encoder_model=ENCODER_MODEL,
+                )
+                logger.info(f"    checkpoint: encoded {n_encoded:,} / {n_chunks:,} — index flushed")
+                batches_since_ckpt = 0
+            elif n_encoded % (encode_batch_size * 100) == 0:
                 logger.info(f"    encoded {n_encoded:,} / {n_chunks:,}")
 
         index_build_seconds = time.perf_counter() - t0
         logger.info(f"  index size       : {index.ntotal:,}")
         logger.info(f"  index build      : {index_build_seconds:.2f}s")
 
+        # Final atomic write of index + meta; clean up partial artifacts
         faiss.write_index(index, str(index_path))
         with meta_path.open("w", encoding="utf-8") as f:
             for oid, ci in chunk_meta:
                 f.write(json.dumps({"opinion_id": oid, "chunk_index": ci}) + "\n")
+        if partial_index_path.exists():
+            partial_index_path.unlink()
+        if ckpt_path.exists():
+            ckpt_path.unlink()
 
-    # --- Load + encode ALL queries (every rank sees same query set) ---
+    # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
     queries = _load_queries(gold_pairs_path, lepard_path)
     logger.info(f"  queries          : {len(queries):,}")
@@ -408,7 +526,7 @@ def main(
     query_encode_seconds = time.perf_counter() - t0
     logger.info(f"  encode time      : {query_encode_seconds:.2f}s")
 
-    # --- Retrieval against local shard ---
+    # --- Retrieval with dynamic k-expansion ---
     logger.info(f"\n[5/5] FAISS search top-{top_k} per query (shard-local)")
     t0 = time.perf_counter()
     initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
