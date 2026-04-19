@@ -460,3 +460,26 @@ class TestShardRangeFuzz:
         # First starts at 0, last ends at n
         assert ranges[0][0] == 0
         assert ranges[-1][1] == n
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "n,world_size,expected_sizes",
+    [
+        (103, 4, [26, 26, 26, 25]),  # uneven — first 3 ranks get extra
+        (100, 4, [25, 25, 25, 25]),  # even
+        (1, 1, [1]),  # trivial
+        (100, 1, [100]),  # single worker takes all
+        (4, 4, [1, 1, 1, 1]),  # n == world_size
+        (2, 4, [1, 1, 0, 0]),  # world_size > n
+        (7, 3, [3, 2, 2]),  # largest-remainder
+    ],
+    ids=["uneven", "even", "trivial", "single", "equal", "overprovisioned", "lr-prime"],
+)
+class TestShardRangeGoldenTable:
+    def test_exact_sizes(self, bge_module: Any, n: int, world_size: int, expected_sizes: list[int]) -> None:
+        actual = [
+            bge_module._shard_range(n, r, world_size)[1] - bge_module._shard_range(n, r, world_size)[0]
+            for r in range(world_size)
+        ]
+        assert actual == expected_sizes
