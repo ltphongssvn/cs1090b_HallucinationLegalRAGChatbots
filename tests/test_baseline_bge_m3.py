@@ -630,24 +630,45 @@ class TestCheckpointing:
 
 @pytest.mark.unit
 class TestCheckpointRoundTrip:
-    def test_write_then_load_roundtrip(self, bge_module: Any, tmp_path: Path) -> None:
-        ckpt_path = tmp_path / "ckpt.json"
+    @pytest.mark.parametrize(
+        "rank,world_size,n_encoded,shard_start,shard_end",
+        [
+            (0, 1, 100, 0, 1000),  # single GPU
+            (0, 4, 12800, 0, 1953319),  # 4-GPU rank 0
+            (3, 4, 512, 1464989, 1953319),  # 4-GPU last rank
+            (7, 8, 0, 0, 0),  # 8-GPU empty shard (world_size > n)
+            (0, 2, 50000, 0, 500000),  # 2-GPU mid-progress
+        ],
+        ids=["single", "4gpu-r0", "4gpu-r3", "8gpu-empty", "2gpu"],
+    )
+    def test_write_then_load_roundtrip(
+        self,
+        bge_module: Any,
+        tmp_path: Path,
+        rank: int,
+        world_size: int,
+        n_encoded: int,
+        shard_start: int,
+        shard_end: int,
+    ) -> None:
+        ckpt_path = tmp_path / f"ckpt_r{rank}_ws{world_size}.json"
         bge_module._write_checkpoint(
             ckpt_path,
-            rank=0,
-            world_size=4,
-            n_encoded=12800,
-            shard_start=0,
-            shard_end=1953319,
+            rank=rank,
+            world_size=world_size,
+            n_encoded=n_encoded,
+            shard_start=shard_start,
+            shard_end=shard_end,
             encoder_model="BAAI/bge-m3",
         )
         assert ckpt_path.exists()
         ckpt = bge_module._load_checkpoint(ckpt_path)
-        assert ckpt["rank"] == 0
-        assert ckpt["world_size"] == 4
-        assert ckpt["n_encoded"] == 12800
-        assert ckpt["shard_start"] == 0
-        assert ckpt["shard_end"] == 1953319
+        assert ckpt is not None
+        assert ckpt["rank"] == rank
+        assert ckpt["world_size"] == world_size
+        assert ckpt["n_encoded"] == n_encoded
+        assert ckpt["shard_start"] == shard_start
+        assert ckpt["shard_end"] == shard_end
         assert ckpt["encoder_model"] == "BAAI/bge-m3"
 
     def test_load_nonexistent_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
