@@ -46,13 +46,12 @@ ENCODE_BATCH_SIZE="${ENCODE_BATCH_SIZE:-32}"
 QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-256}"
 WORLD_SIZE=4
 
-echo "=== SLURM BGE-M3 multi-GPU job ==="
-echo "  job_id            : $SLURM_JOB_ID"
-echo "  node              : $(hostname)"
-echo "  gpus              : ${SLURM_GPUS_ON_NODE:-unset}"
-echo "  world_size        : $WORLD_SIZE"
-echo "  utc_start         : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "  git_sha           : $(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+echo "=== SLURM BGE-M3 multi-GPU job (corpus-shard) ==="
+echo "  job_id     : $SLURM_JOB_ID"
+echo "  node       : $(hostname)"
+echo "  world_size : $WORLD_SIZE"
+echo "  utc_start  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  git_sha    : $(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
 for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
@@ -63,7 +62,7 @@ for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
 done
 echo "OK preflight"
 
-# Idempotency: skip if merged summary exists and valid
+# Idempotency
 SUMMARY="$OUT_DIR/bge_m3_summary.json"
 RESULTS="$OUT_DIR/bge_m3_results.jsonl"
 if [[ -s "$SUMMARY" && -s "$RESULTS" ]]; then
@@ -72,7 +71,7 @@ from src.eda_schemas import BaselineBgeM3Summary
 from pathlib import Path
 BaselineBgeM3Summary.model_validate_json(Path('$SUMMARY').read_bytes())
 " 2>/dev/null; then
-        echo "  [idempotent] VALID merged summary exists — skipping"
+        echo "  [idempotent] merged summary VALID — skipping"
         echo "=== done utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
         exit 0
     fi
@@ -83,8 +82,8 @@ nvidia-smi dmon -d 15 -s pumct > "logs/gpu_dmon_${SLURM_JOB_ID}.txt" 2>&1 &
 GPU_DMON_PID=$!
 trap "kill $GPU_DMON_PID 2>/dev/null || true" EXIT
 
-# Launch 4 workers in parallel, one per GPU
-echo "=== launching 4 parallel workers ==="
+# Launch 4 parallel workers, each on its own GPU with its own corpus shard
+echo "=== launching 4 corpus-shard workers ==="
 pids=()
 for rank in 0 1 2 3; do
     (
@@ -103,10 +102,9 @@ for rank in 0 1 2 3; do
             > "logs/bge_m3_rank${rank}_${SLURM_JOB_ID}.log" 2>&1
     ) &
     pids+=($!)
-    echo "  spawned rank $rank on GPU $rank (PID ${pids[-1]})"
+    echo "  rank $rank -> GPU $rank  (PID ${pids[-1]})"
 done
 
-# Wait for all workers; any failure propagates via set -e
 fail=0
 for pid in "${pids[@]}"; do
     if ! wait "$pid"; then
@@ -120,80 +118,72 @@ if [[ $fail -ne 0 ]]; then
 fi
 echo "=== all 4 workers completed ==="
 
-# Merge shard results + build unified summary
+# Merge per-rank results into unified top-k via cross-shard MaxP
 echo "=== merging shards ==="
 uv run --locked python -c "
-import json
 import hashlib
+import json
 from pathlib import Path
+from scripts.baseline_bge_m3 import (
+    _merge_shard_results, SCHEMA_VERSION, _git_sha,
+    ENCODER_MODEL, EMBEDDING_DIM, MAX_LENGTH, SIMILARITY_METRIC,
+    NORMALIZE_EMBEDDINGS, DTYPE,
+)
 from src.eda_schemas import BaselineBgeM3Summary
-from scripts.baseline_bge_m3 import _merge_shard_results, SCHEMA_VERSION, _git_sha
 
 out_dir = Path('$OUT_DIR')
 shard_paths = sorted(out_dir.glob('bge_m3_results.rank*.jsonl'))
 assert len(shard_paths) == $WORLD_SIZE, f'expected $WORLD_SIZE shards, got {len(shard_paths)}'
 merged = out_dir / 'bge_m3_results.jsonl'
-_merge_shard_results(shard_paths, merged)
-print(f'merged {len(shard_paths)} shards -> {merged}')
+_merge_shard_results(shard_paths, merged, top_k=$TOP_K)
 
-# Aggregate summary from rank-0's summary + recompute hash over merged file
-rank0_summary = json.loads((out_dir / 'bge_m3_summary.json').read_text()) if (out_dir / 'bge_m3_summary.json').exists() else {}
-# Each rank wrote its own bge_m3_summary.json — the last writer wins; take rank 0's timing
-# but recompute hash + n_queries over merged output.
-lines = merged.read_text().splitlines()
-n_queries_total = len(lines)
-results_hash = hashlib.sha256(merged.read_bytes()).hexdigest()
-
-# Pull one rank summary for metadata (any is fine since config is identical)
-# Use the first shard's per-rank summary file path pattern
-# We wrote summaries to bge_m3_summary.json during each rank — they clobber.
-# Reconstruct merged summary from known constants + aggregated stats.
-from scripts.baseline_bge_m3 import (
-    ENCODER_MODEL, EMBEDDING_DIM, MAX_LENGTH, SIMILARITY_METRIC,
-    NORMALIZE_EMBEDDINGS, DTYPE,
+# Aggregate summary: take one rank's timings + corpus totals + recomputed hash
+rank_summaries = sorted(out_dir.glob('bge_m3_summary.rank*.json'))
+rank0 = json.loads(rank_summaries[0].read_text())
+n_chunks_total = sum(
+    json.loads(p.read_text())['n_corpus_chunks'] for p in rank_summaries
 )
-import torch
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else device
+# Unique opinions across shards requires reading all meta files
+all_opinions: set[int] = set()
+for m in sorted(out_dir.glob('bge_m3_index_meta.rank*.jsonl')):
+    with m.open() as f:
+        for line in f:
+            all_opinions.add(json.loads(line)['opinion_id'])
 
-# Corpus stats recomputed cheaply
-n_chunks = sum(1 for _ in (out_dir / 'corpus_chunks.jsonl').open())
-unique_opinions = len({json.loads(line)['opinion_id'] for line in (out_dir / 'corpus_chunks.jsonl').open()})
+n_queries = sum(1 for _ in merged.open())
+results_hash = hashlib.sha256(merged.read_bytes()).hexdigest()
 
 merged_summary = {
     'schema_version': SCHEMA_VERSION,
-    'n_queries': n_queries_total,
-    'n_corpus_chunks': n_chunks,
-    'n_unique_opinions': unique_opinions,
+    'n_queries': n_queries,
+    'n_corpus_chunks': n_chunks_total,
+    'n_unique_opinions': len(all_opinions),
     'top_k': $TOP_K,
     'encoder_model': ENCODER_MODEL,
     'embedding_dim': EMBEDDING_DIM,
-    'device': device,
-    'device_name': device_name,
+    'device': rank0['device'],
+    'device_name': rank0['device_name'],
     'encode_batch_size': $ENCODE_BATCH_SIZE,
     'similarity_metric': SIMILARITY_METRIC,
     'normalize_embeddings': NORMALIZE_EMBEDDINGS,
     'max_length': MAX_LENGTH,
     'dtype': DTYPE,
-    'encoder_load_seconds': 0.0,
-    'index_build_seconds': 0.0,
-    'query_encode_seconds': 0.0,
-    'retrieval_seconds': 0.0,
+    'encoder_load_seconds': max(json.loads(p.read_text())['encoder_load_seconds'] for p in rank_summaries),
+    'index_build_seconds': max(json.loads(p.read_text())['index_build_seconds'] for p in rank_summaries),
+    'query_encode_seconds': max(json.loads(p.read_text())['query_encode_seconds'] for p in rank_summaries),
+    'retrieval_seconds': max(json.loads(p.read_text())['retrieval_seconds'] for p in rank_summaries),
     'seed': $SEED,
     'world_size': $WORLD_SIZE,
-    'shard_rank': -1,
+    'shard_rank': 0,
     'git_sha': _git_sha(),
     'results_hash': results_hash,
 }
-# shard_rank=-1 means 'merged'; but schema requires ge=0
-# Use shard_rank=0 as sentinel for merged
-merged_summary['shard_rank'] = 0
 validated = BaselineBgeM3Summary.model_validate(merged_summary)
 (out_dir / 'bge_m3_summary.json').write_text(
     json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
     encoding='utf-8',
 )
-print(f'merged summary written: n_queries={n_queries_total}, hash={results_hash[:16]}...')
+print(f'merged: n_queries={n_queries:,}  n_corpus_chunks={n_chunks_total:,}  hash={results_hash[:16]}')
 "
 
 echo "=== done utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
