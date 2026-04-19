@@ -1,30 +1,27 @@
-"""MS3 BGE-M3 dense baseline retrieval.
+"""MS3 BGE-M3 dense baseline retrieval (corpus-sharded multi-GPU).
 
-Embeds data/processed/baseline/corpus_chunks.jsonl with BAAI/bge-m3 (1024-dim
-dense vectors), retrieves top-k chunks per query via FAISS cosine similarity
-(IndexFlatIP on normalized vectors), and aggregates chunk scores to opinion-
-level via MaxP. Mirrors the BM25 baseline contract so Cell 15 can compare.
+Architecture (corpus sharding):
+    - Each rank indexes a disjoint corpus slice [shard_start, shard_end)
+    - Each rank searches ALL queries against its local shard
+    - Merge step combines hits per-query across shards via MaxP + top-k
 
-Query text: LePaRD 'quote' field, joined by (source_id, dest_id) from
-gold_pairs_test.jsonl → lepard_train_*.jsonl.
+Single-GPU mode (world_size=1): writes bge_m3_results.jsonl + bge_m3_index.faiss.
+Multi-GPU mode (world_size>1): writes per-rank files; merge handled externally.
 
 Outputs (data/processed/baseline/):
-    bge_m3_results.jsonl    — per-query: {source_id, dest_id, retrieved: [...]}
-    bge_m3_summary.json     — BaselineBgeM3Summary (Pydantic-validated)
-    bge_m3_index.faiss      — FAISS IndexFlatIP (inner product on normalized)
-    bge_m3_index_meta.jsonl — parallel chunk_meta per index row
+    bge_m3_results{.rank###}.jsonl    — per-query {source_id, dest_id, retrieved}
+    bge_m3_summary{.rank###}.json     — BaselineBgeM3Summary
+    bge_m3_index{.rank###}.faiss      — FAISS IndexFlatIP
+    bge_m3_index_meta{.rank###}.jsonl — parallel chunk_meta per index row
 
-Lazy loading: faiss, torch, sentence_transformers imported only inside main(),
-never at module top. This keeps --dry-run fast and test-friendly.
-
-Production hardening applied (2026 review):
-    - encoder.max_seq_length enforced to MAX_LENGTH to prevent CUDA OOM.
-    - Streaming corpus encoding: never materialize full (N, 1024) float32 array.
-    - Dynamic retrieval k-expansion when one opinion dominates.
-    - Index reuse: if bge_m3_index.faiss + meta exist and meta row count matches
-      corpus, skip encode + index build (saves ~30 min on reruns).
-    - Seeds torch + numpy for determinism (BGE-M3 inference is deterministic
-      given fixed weights + batch composition on a fixed device).
+Hardening:
+    - Lazy imports (faiss, torch, sentence_transformers inside main)
+    - Streaming corpus encoding (no full (N,1024) float32 materialization)
+    - encoder.max_seq_length = MAX_LENGTH (prevents CUDA OOM)
+    - Dynamic retrieval k-expansion when one opinion dominates
+    - Atomic result write (tempfile + os.replace)
+    - Deterministic tie-break in MaxP: (-score, opinion_id)
+    - Seed torch + numpy for determinism
 """
 
 from __future__ import annotations
@@ -33,9 +30,11 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -81,11 +80,7 @@ def _iter_corpus(path: Path) -> Iterator[dict[str, Any]]:
             yield json.loads(line)
 
 
-def _load_queries(
-    gold_path: Path,
-    lepard_path: Path,
-) -> list[dict[str, Any]]:
-    """Join gold pairs with LePaRD by (source_id, dest_id) to get quote text."""
+def _load_queries(gold_path: Path, lepard_path: Path) -> list[dict[str, Any]]:
     gold_keys: set[tuple[int, int]] = set()
     with gold_path.open(encoding="utf-8") as f:
         for line in f:
@@ -93,13 +88,13 @@ def _load_queries(
             gold_keys.add((int(r["source_id"]), int(r["dest_id"])))
 
     queries: list[dict[str, Any]] = []
-    seen_keys: set[tuple[int, int]] = set()
+    seen: set[tuple[int, int]] = set()
     with lepard_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
             key = (int(r["source_id"]), int(r["dest_id"]))
-            if key in gold_keys and key not in seen_keys:
-                seen_keys.add(key)
+            if key in gold_keys and key not in seen:
+                seen.add(key)
                 queries.append(
                     {
                         "source_id": key[0],
@@ -110,59 +105,76 @@ def _load_queries(
     return queries
 
 
-# ---------- aggregation (pure function for property testing) ----------
+# ---------- aggregation ----------
 
 
-def _aggregate_chunk_scores(
-    raw_hits: list[dict[str, Any]],
-    *,
-    top_k: int,
-) -> list[dict[str, Any]]:
-    """MaxP aggregation: max chunk score per opinion, sorted desc, clipped to top_k."""
+def _aggregate_chunk_scores(raw_hits: list[dict[str, Any]], *, top_k: int) -> list[dict[str, Any]]:
     best: dict[int, float] = {}
     for h in raw_hits:
         oid = h["opinion_id"]
         s = h["score"]
         if oid not in best or s > best[oid]:
             best[oid] = s
-    # Deterministic tie-break: descending score, then ascending opinion_id
     ranked = [{"opinion_id": oid, "score": sc} for oid, sc in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))]
     return ranked[:top_k]
 
 
-# ---------- sharding (pure function for multi-GPU distribution) ----------
+# ---------- sharding ----------
 
 
 def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
-    """Largest-remainder shard allocation for worker `rank` of `world_size`.
+    """Largest-remainder shard allocation.
 
     Guarantees:
-        - sum of all (end - start) == n
-        - max(shard_size) - min(shard_size) <= 1
-        - shards are disjoint and contiguous
-        - returns (0, 0) for ranks with empty workload when world_size > n
+        - sum of (end - start) across all ranks == n
+        - max(size) - min(size) <= 1
+        - disjoint + contiguous
+        - (0, 0) for ranks with empty workload when world_size > n
     """
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
     if rank < 0 or rank >= world_size:
         raise ValueError(f"rank {rank} out of range [0, {world_size})")
     base, rem = divmod(n, world_size)
-    # First `rem` ranks get one extra item
     start = rank * base + min(rank, rem)
     end = start + base + (1 if rank < rem else 0)
     return start, end
 
 
-def _merge_shard_results(shard_paths: list[Path], merged_path: Path) -> None:
-    """Concatenate per-rank result files into single ordered output.
+def _merge_shard_results(shard_paths: list[Path], merged_path: Path, *, top_k: int = TOP_K) -> None:
+    """Corpus-shard merge: combine per-query hits across shards via MaxP + top-k."""
+    per_query: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
+    key_order: list[tuple[int, int]] = []
+    seen_keys: set[tuple[int, int]] = set()
 
-    Preserves input order within each shard; shards are appended in path-sorted order.
-    """
+    for shard in sorted(shard_paths):
+        with shard.open(encoding="utf-8") as fin:
+            for line in fin:
+                row = json.loads(line)
+                key = (int(row["source_id"]), int(row["dest_id"]))
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    key_order.append(key)
+                for hit in row["retrieved"]:
+                    oid = int(hit["opinion_id"])
+                    sc = float(hit["score"])
+                    prev = per_query[key].get(oid)
+                    if prev is None or sc > prev:
+                        per_query[key][oid] = sc
+
     with merged_path.open("w", encoding="utf-8") as fout:
-        for shard in sorted(shard_paths):
-            with shard.open(encoding="utf-8") as fin:
-                for line in fin:
-                    fout.write(line)
+        for key in key_order:
+            scores = per_query[key]
+            ranked = [
+                {"opinion_id": oid, "score": sc} for oid, sc in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+            ][:top_k]
+            fout.write(
+                json.dumps(
+                    {"source_id": key[0], "dest_id": key[1], "retrieved": ranked},
+                    allow_nan=False,
+                )
+                + "\n"
+            )
 
 
 # ---------- provenance ----------
@@ -170,14 +182,7 @@ def _merge_shard_results(shard_paths: list[Path], merged_path: Path) -> None:
 
 def _git_sha() -> str:
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()[:12]
-        )
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()[:12]
     except Exception:
         return "unknown"
 
@@ -205,7 +210,6 @@ def _device_name(device: str) -> str:
 
 
 def _seed_all(seed: int) -> None:
-    """Seed numpy + torch for deterministic encoding given fixed model + device."""
     import random as _r
 
     _r.seed(seed)
@@ -264,14 +268,13 @@ def main(
     rank: int = 0,
     world_size: int = 1,
 ) -> Any:
-    """Run BGE-M3 dense baseline; returns validated BaselineBgeM3Summary."""
+    """Run BGE-M3 dense baseline on corpus shard [rank/world_size]."""
     import faiss
     import numpy as np
     from sentence_transformers import SentenceTransformer
 
     from src.eda_schemas import BaselineBgeM3Summary
 
-    # Fail fast on invalid inputs BEFORE loading 2.27GB BGE-M3 model
     if top_k < 1:
         raise ValueError(f"top_k must be >= 1, got {top_k}")
     if encode_batch_size < 1:
@@ -292,41 +295,46 @@ def main(
     device = _detect_device()
     device_name = _device_name(device)
 
-    logger.info("=" * 60)
-    logger.info(f"MS3 BGE-M3 dense baseline  (top_k={top_k}, seed={seed}, device={device_name})")
-    logger.info("=" * 60)
-    logger.info(f"  corpus_path    : {corpus_path}")
-    logger.info(f"  gold_pairs_path: {gold_pairs_path}")
-    logger.info(f"  lepard_path    : {lepard_path}")
-    logger.info(f"  out_dir        : {out_dir}")
-    logger.info(f"  encoder        : {ENCODER_MODEL} (dim={EMBEDDING_DIM})")
+    rank_suffix = f".rank{rank:03d}" if world_size > 1 else ""
+    index_path = out_dir / f"bge_m3_index{rank_suffix}.faiss"
+    meta_path = out_dir / f"bge_m3_index_meta{rank_suffix}.jsonl"
+    results_path = out_dir / f"bge_m3_results{rank_suffix}.jsonl"
+    summary_path = out_dir / f"bge_m3_summary{rank_suffix}.json"
 
-    # --- Load encoder with enforced max length ---
+    logger.info("=" * 60)
+    logger.info(f"MS3 BGE-M3 corpus-shard  (rank={rank}/{world_size}, device={device_name}, top_k={top_k})")
+    logger.info("=" * 60)
+
+    # --- Load encoder ---
     logger.info("\n[1/5] Loading encoder")
     t0 = time.perf_counter()
     encoder = SentenceTransformer(ENCODER_MODEL, device=device)
     encoder.max_seq_length = MAX_LENGTH
     encoder_load_seconds = time.perf_counter() - t0
     logger.info(f"  encoder loaded in: {encoder_load_seconds:.2f}s")
-    logger.info(f"  max_seq_length   : {encoder.max_seq_length}")
 
-    # --- Collect corpus metadata (required for both fresh build AND index reuse) ---
-    logger.info("\n[2/5] Streaming corpus metadata")
+    # --- Corpus shard range ---
+    logger.info("\n[2/5] Computing corpus shard range")
+    n_total = sum(1 for _ in _iter_corpus(corpus_path))
+    shard_start, shard_end = _shard_range(n_total, rank, world_size)
+    logger.info(f"  corpus (total)   : {n_total:,}")
+    logger.info(f"  shard range      : [{shard_start:,}, {shard_end:,})  ({shard_end - shard_start:,} chunks)")
+
+    # Collect shard metadata only
     chunk_meta: list[tuple[int, int]] = []
-    for c in _iter_corpus(corpus_path):
-        chunk_meta.append((c["opinion_id"], c["chunk_index"]))
+    for i, c in enumerate(_iter_corpus(corpus_path)):
+        if shard_start <= i < shard_end:
+            chunk_meta.append((c["opinion_id"], c["chunk_index"]))
+        elif i >= shard_end:
+            break
     n_chunks = len(chunk_meta)
     unique_opinions = len({m[0] for m in chunk_meta})
-    logger.info(f"  chunks           : {n_chunks:,}")
-    logger.info(f"  unique opinions  : {unique_opinions:,}")
+    logger.info(f"  shard opinions   : {unique_opinions:,}")
 
-    # --- Build or reuse FAISS index ---
-    index_path = out_dir / "bge_m3_index.faiss"
-    meta_path = out_dir / "bge_m3_index_meta.jsonl"
-
+    # --- Build FAISS index over shard ---
+    # Reuse only in single-GPU mode (per-rank indices not interchangeable)
     reuse_index = False
-    if index_path.exists() and meta_path.exists():
-        # Validate meta row count matches corpus; cheap O(n) line count
+    if world_size == 1 and index_path.exists() and meta_path.exists():
         with meta_path.open(encoding="utf-8") as f:
             meta_line_count = sum(1 for _ in f)
         if meta_line_count == n_chunks:
@@ -341,13 +349,17 @@ def main(
     if reuse_index:
         index_build_seconds = 0.0
     else:
-        logger.info(f"\n[3/5] Encoding corpus + building FAISS index (batch={encode_batch_size})")
+        logger.info(f"\n[3/5] Encoding shard + building FAISS index (batch={encode_batch_size})")
         t0 = time.perf_counter()
         index = faiss.IndexFlatIP(EMBEDDING_DIM)
 
-        def _iter_batches() -> Iterator[list[str]]:
+        def _iter_shard_batches() -> Iterator[list[str]]:
             batch: list[str] = []
-            for c in _iter_corpus(corpus_path):
+            for i, c in enumerate(_iter_corpus(corpus_path)):
+                if i < shard_start:
+                    continue
+                if i >= shard_end:
+                    break
                 batch.append(c["text"])
                 if len(batch) >= encode_batch_size:
                     yield batch
@@ -356,7 +368,7 @@ def main(
                 yield batch
 
         n_encoded = 0
-        for batch_texts in _iter_batches():
+        for batch_texts in _iter_shard_batches():
             embs = encoder.encode(
                 batch_texts,
                 batch_size=encode_batch_size,
@@ -365,7 +377,7 @@ def main(
                 normalize_embeddings=NORMALIZE_EMBEDDINGS,
             ).astype(np.float32)
             if embs.shape[1] != EMBEDDING_DIM:
-                raise ValueError(f"encoder output dim {embs.shape[1]} != expected {EMBEDDING_DIM}")
+                raise ValueError(f"encoder dim {embs.shape[1]} != expected {EMBEDDING_DIM}")
             index.add(embs)
             n_encoded += len(batch_texts)
             if n_encoded % (encode_batch_size * 100) == 0:
@@ -379,16 +391,11 @@ def main(
         with meta_path.open("w", encoding="utf-8") as f:
             for oid, ci in chunk_meta:
                 f.write(json.dumps({"opinion_id": oid, "chunk_index": ci}) + "\n")
-        logger.info(f"  wrote index -> {index_path}")
-        logger.info(f"  wrote meta  -> {meta_path}")
 
-    # --- Load + encode queries ---
+    # --- Load + encode ALL queries (every rank sees same query set) ---
     logger.info("\n[4/5] Loading + encoding queries")
-    all_queries = _load_queries(gold_pairs_path, lepard_path)
-    q_start, q_end = _shard_range(len(all_queries), rank, world_size)
-    queries = all_queries[q_start:q_end]
-    logger.info(f"  queries (total)  : {len(all_queries):,}")
-    logger.info(f"  queries (shard)  : {len(queries):,}  [rank {rank}/{world_size}, range {q_start}:{q_end}]")
+    queries = _load_queries(gold_pairs_path, lepard_path)
+    logger.info(f"  queries          : {len(queries):,}")
     query_texts = [q["query_text"] for q in queries]
     t0 = time.perf_counter()
     query_embeddings = encoder.encode(
@@ -399,21 +406,15 @@ def main(
         normalize_embeddings=NORMALIZE_EMBEDDINGS,
     ).astype(np.float32)
     query_encode_seconds = time.perf_counter() - t0
-    logger.info(f"  query embeddings : {query_embeddings.shape}")
     logger.info(f"  encode time      : {query_encode_seconds:.2f}s")
 
-    # --- Retrieval with dynamic k-expansion ---
-    logger.info(f"\n[5/5] FAISS search top-{top_k} per query")
+    # --- Retrieval against local shard ---
+    logger.info(f"\n[5/5] FAISS search top-{top_k} per query (shard-local)")
     t0 = time.perf_counter()
     initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
-    if world_size > 1:
-        results_path = out_dir / f"bge_m3_results.rank{rank:03d}.jsonl"
-    else:
-        results_path = out_dir / "bge_m3_results.jsonl"
     results_tmp = results_path.with_suffix(".jsonl.tmp")
 
     def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
-        """Per-query k-expansion until MaxP yields >= top_k unique opinions."""
         current_k = initial_k
         while True:
             scores, indices = index.search(q_emb, current_k)
@@ -465,7 +466,6 @@ def main(
                     )
                     + "\n"
                 )
-    import os
 
     os.replace(results_tmp, results_path)
     retrieval_seconds = time.perf_counter() - t0
@@ -498,12 +498,11 @@ def main(
         git_sha=_git_sha(),
         results_hash=results_hash,
     )
-    summary_path = out_dir / "bge_m3_summary.json"
     summary_path.write_text(
         json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
         encoding="utf-8",
     )
-    logger.info(f"\nWrote bge_m3_summary.json -> {summary_path}")
+    logger.info(f"\nWrote summary -> {summary_path}")
 
     if log_to_wandb:
         _log_to_wandb(validated.model_dump(), out_dir)
