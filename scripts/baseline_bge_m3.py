@@ -153,6 +153,18 @@ def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
     return start, end
 
 
+def _merge_shard_results(shard_paths: list[Path], merged_path: Path) -> None:
+    """Concatenate per-rank result files into single ordered output.
+
+    Preserves input order within each shard; shards are appended in path-sorted order.
+    """
+    with merged_path.open("w", encoding="utf-8") as fout:
+        for shard in sorted(shard_paths):
+            with shard.open(encoding="utf-8") as fin:
+                for line in fin:
+                    fout.write(line)
+
+
 # ---------- provenance ----------
 
 
@@ -249,6 +261,8 @@ def main(
     seed: int = 0,
     encode_batch_size: int = ENCODE_BATCH_SIZE,
     query_batch_size: int = QUERY_BATCH_SIZE,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Any:
     """Run BGE-M3 dense baseline; returns validated BaselineBgeM3Summary."""
     import faiss
@@ -264,6 +278,10 @@ def main(
         raise ValueError(f"encode_batch_size must be >= 1, got {encode_batch_size}")
     if query_batch_size < 1:
         raise ValueError(f"query_batch_size must be >= 1, got {query_batch_size}")
+    if world_size < 1:
+        raise ValueError(f"world_size must be >= 1, got {world_size}")
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank {rank} out of range [0, {world_size})")
     for path in (corpus_path, gold_pairs_path, lepard_path):
         if not Path(path).is_file():
             raise FileNotFoundError(f"input missing: {path}")
@@ -366,8 +384,11 @@ def main(
 
     # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
-    queries = _load_queries(gold_pairs_path, lepard_path)
-    logger.info(f"  queries          : {len(queries):,}")
+    all_queries = _load_queries(gold_pairs_path, lepard_path)
+    q_start, q_end = _shard_range(len(all_queries), rank, world_size)
+    queries = all_queries[q_start:q_end]
+    logger.info(f"  queries (total)  : {len(all_queries):,}")
+    logger.info(f"  queries (shard)  : {len(queries):,}  [rank {rank}/{world_size}, range {q_start}:{q_end}]")
     query_texts = [q["query_text"] for q in queries]
     t0 = time.perf_counter()
     query_embeddings = encoder.encode(
@@ -385,7 +406,10 @@ def main(
     logger.info(f"\n[5/5] FAISS search top-{top_k} per query")
     t0 = time.perf_counter()
     initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
-    results_path = out_dir / "bge_m3_results.jsonl"
+    if world_size > 1:
+        results_path = out_dir / f"bge_m3_results.rank{rank:03d}.jsonl"
+    else:
+        results_path = out_dir / "bge_m3_results.jsonl"
     results_tmp = results_path.with_suffix(".jsonl.tmp")
 
     def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
@@ -469,6 +493,8 @@ def main(
         query_encode_seconds=round(query_encode_seconds, 3),
         retrieval_seconds=round(retrieval_seconds, 3),
         seed=seed,
+        world_size=world_size,
+        shard_rank=rank,
         git_sha=_git_sha(),
         results_hash=results_hash,
     )
@@ -496,6 +522,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--query-batch-size", type=int, default=QUERY_BATCH_SIZE)
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rank", type=int, default=0, help="shard rank for multi-GPU")
+    ap.add_argument("--world-size", type=int, default=1, help="total shard count")
     ap.add_argument("--dry-run", action="store_true")
     return ap
 
@@ -520,4 +548,6 @@ if __name__ == "__main__":
         seed=args.seed,
         encode_batch_size=args.encode_batch_size,
         query_batch_size=args.query_batch_size,
+        rank=args.rank,
+        world_size=args.world_size,
     )

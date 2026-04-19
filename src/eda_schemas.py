@@ -125,6 +125,8 @@ class BaselineBgeM3Summary(BaseModel):
     normalize_embeddings: bool
     max_length: int = Field(ge=1)
     dtype: str
+    world_size: int = Field(ge=1)
+    shard_rank: int = Field(ge=0)
     encoder_load_seconds: float = Field(ge=0, allow_inf_nan=False)
     index_build_seconds: float = Field(ge=0, allow_inf_nan=False)
     query_encode_seconds: float = Field(ge=0, allow_inf_nan=False)

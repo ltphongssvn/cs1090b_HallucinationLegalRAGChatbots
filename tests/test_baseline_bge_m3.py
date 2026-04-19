@@ -202,6 +202,8 @@ class TestSchemaBackwardCompat:
             "query_encode_seconds": 120.0,
             "retrieval_seconds": 60.0,
             "seed": 0,
+            "world_size": 1,
+            "shard_rank": 0,
             "git_sha": "abc123def456",
             "results_hash": "f" * 64,
         }
@@ -483,3 +485,54 @@ class TestShardRangeGoldenTable:
             for r in range(world_size)
         ]
         assert actual == expected_sizes
+
+
+@pytest.mark.contract
+class TestShardCLIArgs:
+    def test_rank_and_world_size_in_parser(self, bge_module: Any) -> None:
+        parser = bge_module._build_arg_parser()
+        actions = {a.dest for a in parser._actions}
+        assert "rank" in actions
+        assert "world_size" in actions
+
+    def test_rank_default_zero(self, bge_module: Any) -> None:
+        parser = bge_module._build_arg_parser()
+        ns = parser.parse_args([])
+        assert ns.rank == 0
+        assert ns.world_size == 1
+
+
+@pytest.mark.contract
+class TestShardSchema:
+    def test_summary_has_shard_fields(self) -> None:
+        from src.eda_schemas import BaselineBgeM3Summary
+
+        fields = BaselineBgeM3Summary.model_fields
+        assert "world_size" in fields
+        assert "shard_rank" in fields
+
+
+@pytest.mark.contract
+class TestMergeShardsHelper:
+    def test_merge_function_exists(self, bge_module: Any) -> None:
+        assert callable(getattr(bge_module, "_merge_shard_results", None))
+
+    def test_merge_preserves_all_queries(self, bge_module: Any, tmp_path: Path) -> None:
+        # Create 2 shard files with disjoint queries
+        shard0 = tmp_path / "bge_m3_results.rank000.jsonl"
+        shard0.write_text(
+            json.dumps({"source_id": 1, "dest_id": 10, "retrieved": [{"opinion_id": 10, "score": 0.9}]})
+            + "\n"
+            + json.dumps({"source_id": 2, "dest_id": 20, "retrieved": [{"opinion_id": 20, "score": 0.8}]})
+            + "\n"
+        )
+        shard1 = tmp_path / "bge_m3_results.rank001.jsonl"
+        shard1.write_text(
+            json.dumps({"source_id": 3, "dest_id": 30, "retrieved": [{"opinion_id": 30, "score": 0.7}]}) + "\n"
+        )
+        merged = tmp_path / "bge_m3_results.jsonl"
+        bge_module._merge_shard_results([shard0, shard1], merged)
+        lines = merged.read_text().splitlines()
+        assert len(lines) == 3
+        source_ids = {json.loads(line)["source_id"] for line in lines}
+        assert source_ids == {1, 2, 3}
