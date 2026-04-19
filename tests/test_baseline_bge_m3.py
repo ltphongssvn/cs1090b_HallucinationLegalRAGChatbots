@@ -707,3 +707,44 @@ class TestCheckpointIncompleteRejection:
             "shard_end",
             "encoder_model",
         }
+
+
+@pytest.mark.contract
+class TestPerRankFilenames:
+    """Lock the rank-aware filename contract to prevent NFS write collisions."""
+
+    def test_all_per_rank_paths_include_rank_suffix(self) -> None:
+        """All artifact paths in main() must use rank_suffix in multi-GPU mode."""
+        import inspect
+
+        import scripts.baseline_bge_m3 as mod
+
+        src = inspect.getsource(mod.main)
+        # Every per-rank artifact path must be built from rank_suffix
+        for artifact in [
+            "index_path",
+            "meta_path",
+            "results_path",
+            "summary_path",
+            "ckpt_path",
+            "partial_index_path",
+        ]:
+            # Find the assignment line for this variable
+            matches = [line for line in src.splitlines() if line.strip().startswith(f"{artifact} = ")]
+            assert matches, f"no assignment found for {artifact}"
+            # Must reference rank_suffix, not a bare filename
+            assert any("rank_suffix" in line for line in matches), (
+                f"{artifact} assignment does not use rank_suffix: {matches}"
+            )
+
+    def test_rank_suffix_format_zero_padded_three_digits(self) -> None:
+        """rank_suffix uses {rank:03d} so sorted() orders shards correctly."""
+        import inspect
+
+        import scripts.baseline_bge_m3 as mod
+
+        src = inspect.getsource(mod.main)
+        assert "rank_suffix" in src
+        # Must be zero-padded 3 digits (rank000, rank001, ..., rank999)
+        # so lexicographic sort == numeric sort in merge step
+        assert "rank{rank:03d}" in src
