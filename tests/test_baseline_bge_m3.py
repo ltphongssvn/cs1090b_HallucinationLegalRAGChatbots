@@ -769,3 +769,85 @@ class TestPerRankFilenames:
         # Must be zero-padded 3 digits (rank000, rank001, ..., rank999)
         # so lexicographic sort == numeric sort in merge step
         assert "rank{rank:03d}" in src
+
+
+@pytest.mark.unit
+class TestCheckpointCorruption:
+    def test_invalid_json_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt = tmp_path / "corrupt.json"
+        ckpt.write_text("not json at all {[")
+        assert bge_module._load_checkpoint(ckpt) is None
+
+    def test_truncated_json_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt = tmp_path / "truncated.json"
+        ckpt.write_text('{"rank": 0, "world_size": 4, "n_enco')
+        assert bge_module._load_checkpoint(ckpt) is None
+
+    def test_empty_file_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt = tmp_path / "empty.json"
+        ckpt.write_text("")
+        assert bge_module._load_checkpoint(ckpt) is None
+
+    def test_non_dict_payload_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt = tmp_path / "list.json"
+        ckpt.write_text("[1, 2, 3]")
+        assert bge_module._load_checkpoint(ckpt) is None
+
+    def test_null_payload_returns_none(self, bge_module: Any, tmp_path: Path) -> None:
+        ckpt = tmp_path / "null.json"
+        ckpt.write_text("null")
+        assert bge_module._load_checkpoint(ckpt) is None
+
+
+@pytest.mark.unit
+class TestCheckpointAtomicity:
+    def test_write_does_not_leave_tmp_file(self, bge_module: Any, tmp_path: Path) -> None:
+        """After successful write, .json.tmp must not linger (os.replace renames)."""
+        ckpt = tmp_path / "ckpt.json"
+        bge_module._write_checkpoint(
+            ckpt,
+            rank=0,
+            world_size=4,
+            n_encoded=100,
+            shard_start=0,
+            shard_end=1000,
+            encoder_model="BAAI/bge-m3",
+        )
+        assert ckpt.exists()
+        tmp = ckpt.with_suffix(".json.tmp")
+        assert not tmp.exists(), f"stale tmp file: {tmp}"
+
+    def test_overwrite_preserves_atomicity(self, bge_module: Any, tmp_path: Path) -> None:
+        """Writing over existing checkpoint is atomic (no partial state visible)."""
+        ckpt = tmp_path / "ckpt.json"
+        bge_module._write_checkpoint(
+            ckpt,
+            rank=0,
+            world_size=4,
+            n_encoded=100,
+            shard_start=0,
+            shard_end=1000,
+            encoder_model="BAAI/bge-m3",
+        )
+        bge_module._write_checkpoint(
+            ckpt,
+            rank=0,
+            world_size=4,
+            n_encoded=500,  # updated progress
+            shard_start=0,
+            shard_end=1000,
+            encoder_model="BAAI/bge-m3",
+        )
+        loaded = bge_module._load_checkpoint(ckpt)
+        assert loaded is not None
+        assert loaded["n_encoded"] == 500  # new value, not partially merged
+
+    def test_uses_os_replace_for_atomicity(self) -> None:
+        """Lock the implementation contract: atomic rename via os.replace."""
+        import inspect
+
+        import scripts.baseline_bge_m3 as mod
+
+        src = inspect.getsource(mod._write_checkpoint)
+        assert "os.replace" in src, "atomic rename required; got non-atomic write"
+        assert ".json.tmp" in src, "tempfile pattern required"
