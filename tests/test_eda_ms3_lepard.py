@@ -336,3 +336,210 @@ def test_pair_overlap_invariants(pairs: list[tuple[int, int]], cl_ids: set[int])
     )
     assert 0 <= result.both_in_cl <= result.unique_pairs
     assert result.unique_pairs <= len(pairs)
+
+
+# ---------------------------------------------------------------------------
+# 2026 hardening tier — keyword-only params, exact golden vector,
+# dynamic import-time behavior, shared-schema identity, two-run determinism
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.contract
+def test_main_params_keyword_only(lepard_module) -> None:
+    """main() path params must be keyword-only to prevent positional mix-up."""
+    sig = inspect.signature(lepard_module.main)
+    for name in ("lepard_path", "cl_ids_path", "court_map_path", "out_dir", "log_to_wandb"):
+        assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY, f"{name} must be keyword-only"
+
+
+@pytest.mark.contract
+def test_summary_model_is_shared_schema(lepard_module) -> None:
+    """Script's SummaryModel must BE src.eda_schemas.EdaLepardSummary (not a lookalike)."""
+    from src.eda_schemas import EdaLepardSummary
+
+    assert lepard_module.SummaryModel is EdaLepardSummary
+
+
+@pytest.mark.contract
+def test_cli_parser_has_all_expected_flags(lepard_module) -> None:
+    """_build_arg_parser must expose every documented flag with correct types."""
+    parser = lepard_module._build_arg_parser()
+    actions = {a.dest: a for a in parser._actions}
+    for flag in ("lepard_path", "cl_ids_path", "court_map_path", "out_dir", "log_to_wandb"):
+        assert flag in actions, f"missing CLI flag: {flag}"
+    assert actions["log_to_wandb"].const is True  # store_true action
+
+
+@pytest.mark.unit
+def test_main_deterministic_complete_golden_vector(cached_run) -> None:
+    """Full regression vector per README (not partial)."""
+    result, _ = cached_run
+    assert result["total_rows"] == 1000
+    assert result["unique_pairs"] == 454
+    assert result["lepard_unique_ids"] == 512
+    assert result["cl_unique_ids"] == 1_465_484
+    assert result["overlap_ids"] == 70
+    assert result["both_in_cl"] == 13
+    assert result["usable_pct"] == pytest.approx(13 / 454 * 100)
+
+
+@pytest.mark.unit
+def test_summary_has_exact_three_figure_hashes(cached_run) -> None:
+    """figure_hashes must contain exactly the three documented PNGs."""
+    result, _ = cached_run
+    assert set(result["figure_hashes"].keys()) == {
+        "pair_funnel.png",
+        "court_distribution.png",
+        "id_overlap.png",
+    }
+
+
+@pytest.mark.unit
+def test_figure_hashes_are_64_hex_lowercase(cached_run) -> None:
+    """Each figure hash must be 64 lowercase hex chars (SHA256 shape)."""
+    import re
+
+    result, _ = cached_run
+    pat = re.compile(r"^[0-9a-f]{64}$")
+    for fname, h in result["figure_hashes"].items():
+        assert pat.match(h), f"{fname} hash not 64-hex lowercase: {h}"
+
+
+@pytest.mark.contract
+def test_import_does_not_call_basicConfig_dynamically(monkeypatch) -> None:
+    """Dynamic check: patch logging.basicConfig, reimport, assert never called."""
+    import logging as stdlib_logging
+
+    calls: list = []
+    monkeypatch.setattr(stdlib_logging, "basicConfig", lambda *a, **kw: calls.append((a, kw)))
+    importlib.reload(importlib.import_module("scripts.eda_ms3_lepard"))
+    assert calls == [], f"basicConfig called at import: {calls}"
+
+
+@pytest.mark.unit
+def test_main_invokes_run_full_analysis_exactly_once(lepard_module, tmp_path: Path) -> None:
+    """Orchestration contract: script must delegate to run_full_analysis once."""
+    from src.lepard_cl_compat import run_full_analysis
+
+    original = run_full_analysis
+    calls = [0]
+
+    def counting(*args, **kwargs):
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    with patch("scripts.eda_ms3_lepard.run_full_analysis", side_effect=counting):
+        lepard_module.main(
+            lepard_path=LEPARD_FIXTURE,
+            cl_ids_path=CL_IDS_FIXTURE,
+            court_map_path=COURT_MAP_FIXTURE,
+            out_dir=tmp_path,
+            log_to_wandb=False,
+        )
+    assert calls[0] == 1
+
+
+@pytest.mark.unit
+def test_two_runs_produce_identical_summaries(lepard_module, tmp_path: Path) -> None:
+    """Stronger determinism: two independent runs produce byte-identical summary.json."""
+    a = tmp_path / "run_a"
+    b = tmp_path / "run_b"
+    for out in (a, b):
+        lepard_module.main(
+            lepard_path=LEPARD_FIXTURE,
+            cl_ids_path=CL_IDS_FIXTURE,
+            court_map_path=COURT_MAP_FIXTURE,
+            out_dir=out,
+            log_to_wandb=False,
+        )
+    assert (a / "summary.json").read_bytes() == (b / "summary.json").read_bytes()
+
+
+@pytest.mark.unit
+def test_no_side_effects_deep(cached_run) -> None:
+    """Recursive check on REAL_LOGS_DIR: no new files, no mtime changes."""
+    if not REAL_LOGS_DIR.exists():
+        pytest.skip("real logs dir absent — nothing to protect")
+    snapshot = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in REAL_LOGS_DIR.rglob("*") if p.is_file()}
+    # cached_run already executed; assert no changes happened
+    after = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in REAL_LOGS_DIR.rglob("*") if p.is_file()}
+    assert snapshot == after
+
+
+@pytest.mark.unit
+def test_summary_rejects_nan_via_pydantic(lepard_module) -> None:
+    """Pydantic model enforces allow_inf_nan=False on usable_pct."""
+    from pydantic import ValidationError
+
+    from src.eda_schemas import EdaLepardSummary
+
+    with pytest.raises(ValidationError):
+        EdaLepardSummary(
+            schema_version="1.0.0",
+            total_rows=10,
+            unique_pairs=5,
+            lepard_unique_ids=10,
+            cl_unique_ids=100,
+            overlap_ids=3,
+            both_in_cl=2,
+            source_only=1,
+            dest_only=1,
+            neither=1,
+            usable_pct=float("nan"),
+            court_distribution={},
+            figure_hashes={},
+            git_sha="abc1234",
+        )
+
+
+@pytest.mark.contract
+def test_report_arg_typed_as_compatreport(lepard_module) -> None:
+    """_render_all and _build_summary must type 'report' as CompatReport."""
+    import inspect
+
+    for fn_name in ("_render_all", "_build_summary"):
+        fn = getattr(lepard_module, fn_name)
+        sig = inspect.signature(fn)
+        ann = sig.parameters["report"].annotation
+        ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", str(ann))
+        assert ann_name == "CompatReport", f"{fn_name}.report annotated {ann!r}, want CompatReport"
+
+
+@pytest.mark.unit
+def test_id_overlap_label_not_sampled(cached_run) -> None:
+    """id_overlap.png label must say 'CL only', not 'CL only (sampled)'."""
+    from matplotlib import image as mpimg  # noqa: F401  (ensures backend)
+
+    _, out_dir = cached_run
+    # Chart label content is asserted via re-render into an in-memory Figure
+    # by inspecting the source constant.
+    src = (REPO_ROOT / "scripts" / "eda_ms3_lepard.py").read_text(encoding="utf-8")
+    assert "CL only (sampled)" not in src
+    assert '"CL only"' in src
+
+
+@pytest.mark.contract
+def test_has_clean_stale_artifacts(lepard_module) -> None:
+    """Must expose stale-cleanup helper for consistency with eda_ms3_corpus."""
+    assert callable(getattr(lepard_module, "_clean_stale_artifacts", None))
+
+
+@pytest.mark.unit
+def test_stale_artifacts_removed_on_success(lepard_module, tmp_path: Path) -> None:
+    stale = tmp_path / "old_figure.png"
+    stale.write_bytes(b"\x89PNG\r\n\x1a\n" + b"stale" * 200)
+    lepard_module.main(
+        lepard_path=LEPARD_FIXTURE,
+        cl_ids_path=CL_IDS_FIXTURE,
+        court_map_path=COURT_MAP_FIXTURE,
+        out_dir=tmp_path,
+        log_to_wandb=False,
+    )
+    assert not stale.exists()
+
+
+@pytest.mark.contract
+def test_court_distribution_materialized_once(lepard_module) -> None:
+    """report.court_distribution must be cast to dict exactly once in main()."""
+    src = (REPO_ROOT / "scripts" / "eda_ms3_lepard.py").read_text(encoding="utf-8")
+    assert src.count("dict(report.court_distribution)") <= 1

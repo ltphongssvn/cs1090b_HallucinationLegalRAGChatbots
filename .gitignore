@@ -6,33 +6,46 @@ __pycache__/
 htmlcov/
 coverage.xml
 .pytest_cache/
+
 # Virtual environment
 .venv/
+
 # Environment / secrets
 .env
 .env.*
 !.env.template
 !.env.example
+
 # Logs and manifests (runtime-generated)
 logs/
 *.log
+
 # Jupyter
 .ipynb_checkpoints/
-# *.ipynb  -- tracked notebooks allowed
+
 # NLP model cache
 .cache/
+
 # OS
 .DS_Store
 Thumbs.db
 # IDE
 .windsurf/
+
 # uv
 .python-version
 src/repro.py
 .hypothesis/
 tests/shell/bats-core/
-data/
+
+# Data: ignore bulk data under data/ except .dvc pointers, nested .gitignore, and small JSON summaries
+data/**
+!data/
+!data/**/
 !data/**/*.dvc
 !data/**/.gitignore
+!data/**/summary.json
+!data/**/bm25_summary.json
+
 wandb/
 /lepard_train_4000000_rev0194f95.jsonl
