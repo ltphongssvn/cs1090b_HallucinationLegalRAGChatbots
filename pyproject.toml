@@ -37,7 +37,6 @@ dependencies = [
   "polars>=1.39.3",
   "pydantic>=2.12.5",
   "boto3>=1.42.70",
-  "gcsfs>=2024.2.0",
 ]
 [dependency-groups]
 dev = [
@@ -83,7 +82,7 @@ ignore = ["E501"]
 [tool.mypy]
 ignore_missing_imports = false
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm", "gcsfs", "google.colab"]
+module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm"]
 ignore_missing_imports = true
 [tool.coverage.run]
 source = ["src"]
