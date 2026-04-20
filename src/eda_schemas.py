@@ -157,3 +157,35 @@ class BaselineBgeM3ResultLine(BaseModel):
     source_id: int
     dest_id: int
     retrieved: list[RetrievalHit]
+
+
+class BaselineEvalSummary(BaseModel):
+    """MS3 retrieval evaluation output — Hit@k, MRR, NDCG for BM25 + BGE-M3."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+    n_queries: int = Field(ge=1)
+    k_values: list[int] = Field(min_length=1)
+    ndcg_k: int = Field(ge=1)
+
+    # BM25 metrics
+    bm25_hit_at_k: dict[str, float]
+    bm25_mrr: float = Field(ge=0.0, le=1.0)
+    bm25_ndcg_at_10: float = Field(ge=0.0, le=1.0)
+    bm25_results_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    # BGE-M3 metrics
+    bge_m3_hit_at_k: dict[str, float]
+    bge_m3_mrr: float = Field(ge=0.0, le=1.0)
+    bge_m3_ndcg_at_10: float = Field(ge=0.0, le=1.0)
+    bge_m3_results_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    # Paired comparison
+    bge_m3_wins: int = Field(ge=0)
+    bm25_wins: int = Field(ge=0)
+    ties: int = Field(ge=0)
+
+    # Provenance
+    git_sha: str = Field(pattern=r"^[a-f0-9]{12}$")
+    seed: int = Field(ge=0)

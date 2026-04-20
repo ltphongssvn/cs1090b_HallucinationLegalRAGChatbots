@@ -2298,12 +2298,70 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ---
 
+## Cell 12 Interpretation: MS3 Baseline Prep
 
+Cell 12 orchestrates the **MS3 baseline data preparation pipeline** that chunks the CourtListener federal appellate corpus and extracts LePaRD gold pairs for retrieval evaluation. It is structured as a dry-run preflight followed by an idempotency-guarded execution, ensuring teammates can re-run the notebook safely without duplicating expensive work.
 
+### Execution Flow
+
+The cell runs four sequential steps:
+
+1. **Environment resolution** - Locates `bash` at `/usr/bin/bash`, prepends `~/.local/bin` to `PATH`, and confirms `uv` is reachable. This guarantees the shell environment is deterministic before delegating to the prep script.
+
+2. **Dry-run preflight** - Invokes `scripts/run_baseline_prep.sh --dry-run`, which delegates to `scripts/baseline_prep.py --dry-run`. The preflight verifies all 159 CourtListener shards are present, LePaRD (5.4GB) is accessible, and key constants (schema v1.0.0, CHUNK_SIZE=1024, CHUNK_OVERLAP=128, BGE-M3 encoder target, TEST_SIZE=45,000, VAL_SIZE=2,000) are correctly loaded. No data is modified.
+
+3. **Idempotency skip** - Detects that a valid `summary.json` from a prior run already exists and skips re-execution. This guard prevents wasted compute on re-chunking 1.47M opinions when the artifacts are already current. The pipeline re-runs in 4.7 seconds (validation only) instead of multiple hours.
+
+4. **Final summary validation + headline extraction** - Loads the existing `summary.json`, confirms it passes Pydantic schema validation, and prints the MS3 headline findings for slide-deck consumption.
+
+### Canonical Dataset Numbers
+
+| Metric                  | Value         | Meaning                                                                 |
+|-------------------------|---------------|-------------------------------------------------------------------------|
+| `corpus_chunks`         | **7,813,273** | All legal opinions chunked into 1024-token passages with 128-token overlap |
+| `n_opinions_chunked`    | **1,465,484** | Unique federal appellate opinions in the corpus                          |
+| `gold_pairs_total`      | 47,000        | (quote → cited-opinion) ground-truth pairs from LePaRD                   |
+| `gold_pairs_test`       | 45,000        | Test queries for BM25/BGE-M3 retrieval evaluation                        |
+| `gold_pairs_val`        | 2,000         | Validation queries for hyperparameter tuning                             |
+| `gold_pairs_train`      | 0             | No train split at MS3 stage (retrieval baseline is zero-shot)            |
+| Courts represented      | 13 / 13       | All federal circuits (CA1–CA11, CA-DC, CA-FC) present in both test and val |
+| Test top-3 circuits     | CA5 (9,592), CA9 (5,327), CA4 (5,134) | Largest geographic circuits dominate naturally |
+
+### Provenance & Reproducibility
+
+The summary captures full lineage so any teammate can verify the exact same pipeline produced the same artifacts:
+
+- `git_sha`: `66461a0a37bf` - commit that generated the summary
+- `corpus_manifest_sha`: `7e5cbae116380bba...` - SHA-256 of the full 7.8M-chunk JSONL
+- `gold_pair_hashes`:
+  - `gold_pairs_test.jsonl` → `3017cce60c79a1a3...`
+  - `gold_pairs_val.jsonl` → `28f0d2ff2002e169...`
+- `schema_version`: `1.0.0`
+- `seed`: `0`
+
+### Pipeline Health Signals
+
+**Positive:**
+- **Idempotency works** - Re-executing Cell 12 costs 4.7 seconds, not hours. Teammates can safely re-run the full notebook without re-chunking the corpus.
+- **Cross-artifact consistency** - The summary's `corpus_chunks` (7,813,273) matches the BM25 baseline's `n_corpus_chunks`, confirming both retrieval baselines will operate on identical data for a fair comparison.
+- **Gold-pair coverage verified** - 0% of test queries reference missing corpus opinions; all 45,000 `dest_id` values resolve to opinions in the indexed corpus.
+- **Schema validation passes** - Pydantic locks the summary shape, preventing silent drift across runs.
+
+### Project Implications for MS3 and Beyond
+
+**For the MS3 TF presentation (Friday Apr 24, 4PM ET):**
+- Headline numbers (7.8M chunks / 1.47M opinions / 45K queries / 13 circuits) become the "Dataset" slide
+- The court distribution (CA5/CA9/CA4 dominant) motivates a representativeness visualization
+- `git_sha` + `corpus_manifest_sha` on the slides demonstrate reproducibility-grade engineering that TFs value
+
+**For the final project:**
+- **Sparse citation signal**: 47K gold pairs against 1.47M opinions means each opinion is cited by ~0.032 queries on average. Most opinions are never referenced in the LePaRD sample - realistic for long-tail legal citation retrieval.
+- **Training signal capacity**: The 5–10× corpus-to-query ratio provides sufficient training data if the final project adds supervised fine-tuning of a reranker or contrastive encoder on top of these baselines.
+- **Fair baseline comparison locked in**: BM25 (sparse) and BGE-M3 (dense) both index the full 7.8M chunks and retrieve against the same 45K query set with identical MaxP opinion-level aggregation. The only variable is the retrieval mechanism itself - which is exactly what the MS3 baseline comparison aims to isolate.
 
 ---
 
-## Cell 13: BM25 Baseline Retrieval — Results & Interpretation
+## Cell 13: BM25 Baseline Retrieval - Results & Interpretation
 
 ### Output Summary
 
@@ -2341,7 +2399,7 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 3. **BGE-M3 throughput target.** Dense retrieval on 4× L4 GPUs with batched inference should exceed 200–500 qps. If BGE-M3 is slower than BM25 per query, batching is likely misconfigured.
 
-4. **Idempotency verified.** Cell 13 completed in 0.6s on re-run because `bm25_summary.json` existed and validated. TFs and collaborators re-running the notebook will not re-burn 67 min of cluster time — critical for the April 26 deadline.
+4. **Idempotency verified.** Cell 13 completed in 0.6s on re-run because `bm25_summary.json` existed and validated. TFs and collaborators re-running the notebook will not re-burn 67 min of cluster time - critical for the April 26 deadline.
 
 5. **Cell 15 evaluation unblocked.** `bm25_results.jsonl` (230 MB, DVC-tracked, hash-verified) is the ground input for Hit@k / MRR / NDCG@10. The 45K × top-100 shape means k ∈ {1, 5, 10, 100} are all directly measurable; no re-retrieval needed.
 
@@ -2349,6 +2407,6 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ### Next Actionable
 
-Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs — the only remaining compute-heavy stage before Cell 15 metrics.
+Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs - the only remaining compute-heavy stage before Cell 15 metrics.
 
 ---
