@@ -90,8 +90,8 @@ def _download_via_aws_cli(
                 str(local_path),
                 "--no-sign-request",
             ],
-            capture_output=True,
-            text=True,
+            # Show progress: don't capture output so AWS CLI progress bar is visible
+            capture_output=False,
             timeout=_AWS_CLI_TIMEOUT_SECONDS,
         )
         return result.returncode == 0
