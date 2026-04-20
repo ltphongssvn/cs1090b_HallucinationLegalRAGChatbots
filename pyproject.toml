@@ -82,7 +82,7 @@ ignore = ["E501"]
 [tool.mypy]
 ignore_missing_imports = false
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm"]
+module = ["pyarrow", "pyarrow.parquet", "datasets", "datasets.*", "tqdm", "gcsfs", "google.colab"]
 ignore_missing_imports = true
 [tool.coverage.run]
 source = ["src"]

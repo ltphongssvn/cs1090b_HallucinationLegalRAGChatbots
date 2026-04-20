@@ -24,6 +24,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+# IDE
+.windsurf/
 # uv
 .python-version
 src/repro.py
