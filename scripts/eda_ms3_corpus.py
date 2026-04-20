@@ -29,7 +29,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field  # noqa: F401  (kept for downstream)
+
+from src.eda_schemas import EdaCorpusSummary as SummaryModel
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -50,29 +52,6 @@ POLARS_SCHEMA: dict[str, pl.DataType] = {
 }
 
 CANONICAL_CIRCUITS = [f"ca{i}" for i in range(1, 12)] + ["cadc", "cafc"]
-
-
-class SummaryModel(BaseModel):
-    """Pydantic runtime contract for summary.json (fail-loud on NaN/None)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: str
-    n_total: int = Field(ge=0)
-    n_after_filter: int = Field(ge=0)
-    n_short_lt_100: int = Field(ge=0)
-    text_length_mean: float = Field(ge=0, allow_inf_nan=False)
-    text_length_median: float = Field(ge=0, allow_inf_nan=False)
-    text_length_mean_filtered: float = Field(ge=0, allow_inf_nan=False)
-    text_length_median_filtered: float = Field(ge=0, allow_inf_nan=False)
-    filter_threshold: int
-    circuit_counts: dict[str, int]
-    circuit_order: list[str]
-    chart_ranges: dict[str, list[int]]
-    chart_overflow_counts: dict[str, int]
-    corpus_manifest_sha: str = Field(min_length=64, max_length=64)
-    figure_hashes: dict[str, str]
-    git_sha: str
 
 
 class SummaryDict(TypedDict):

@@ -2,7 +2,7 @@
 ### A Comparative Study of Retrieval Architectures: From Non-Neural Baselines to Transformer-Based Deep Learning
 [![CI](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml/badge.svg)](https://github.com/ltphongssvn/cs1090b_HallucinationLegalRAGChatbots/actions/workflows/ci.yml)
 - **Author:** Alex Oort Alonso, Allan Korir, PHONG LE, and Brit Biddle
-- **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science — Harvard University
+- **Course:** COMPSCI 1090B: Data Science 2: Advanced Topics in Data Science - Harvard University
 - **Cluster node:** 4× NVIDIA L4/A10G (23,034 MiB each) | SLURM job allocation: 1× NVIDIA L4/A10G visible to PyTorch via `CUDA_VISIBLE_DEVICES` | PyTorch build: torch 2.0.1+cu117 (node driver: CUDA 12.8) | Python 3.11.9
 > - Compute nodes physically contain 4× NVIDIA L4/A10G GPUs. The allocated GPU count is resolved at
 > setup time from `CUDA_VISIBLE_DEVICES` (if exported) or `nvidia-smi` visible count, written to
@@ -12,7 +12,7 @@
 > `torch.cuda.device_count() == TARGET_GPU_COUNT`.
 >
 > - All code uses `.to("cuda")` or
-> `.to("cuda:0")` — never a hardcoded physical ordinal — since SLURM remaps the allocated GPU
+> `.to("cuda:0")` - never a hardcoded physical ordinal - since SLURM remaps the allocated GPU
 > to index 0 regardless of physical slot. All experiments are designed and validated under this
 > single-GPU constraint.
 >
@@ -26,7 +26,7 @@
 | PyTorch                  | 2.0.1+cu117                                                                                                                                           |
 | transformers             | 4.41.2 (pinned)                                                                                                                                            |
 | sentence-transformers    | 3.1.1                                                                                                                                                 |
-| Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling — confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json)                             |
+| Dense retrieval baseline | BAAI/bge-m3 (single-vector dense, CLS pooling - confirmed in repo smoke tests and BAAI's published 1_Pooling/config.json)                             |
 | Reranker                 | BAAI/bge-reranker-v2-m3 (sentence-transformers CrossEncoder path smoke-tested in this repo; GPU default, CPU fallback; max_length=1024, batch_size=4) |
 | Sparse retrieval         | bm25s                                                                                                                                                 |
 | Vector search            | faiss-cpu 1.13.2                                                                                                                                      |
@@ -74,12 +74,12 @@
   * `torch.cuda.get_device_capability()[0] >= 8`
   * `torch.cuda.is_bf16_supported()`
 * These checks ensure the environment matches the repo's certified GPU and library assumptions before execution starts.
-* `TARGET_GPU_COUNT` is written to `.env` by `setup.sh` (resolved from `CUDA_VISIBLE_DEVICES` count, else `nvidia-smi` visible count). It reflects the **actual GPU allocation** — 1 when `CUDA_VISIBLE_DEVICES=0` is exported, up to 4 on an unmasked node. `run_preflight_checks` enforces exact match against `torch.cuda.device_count()`.
+* `TARGET_GPU_COUNT` is written to `.env` by `setup.sh` (resolved from `CUDA_VISIBLE_DEVICES` count, else `nvidia-smi` visible count). It reflects the **actual GPU allocation** - 1 when `CUDA_VISIBLE_DEVICES=0` is exported, up to 4 on an unmasked node. `run_preflight_checks` enforces exact match against `torch.cuda.device_count()`.
 * During preflight, `setup.sh` validates that:
   * `torch.cuda.device_count() == 1`
 * This ensures the runtime environment matches the expected **single-GPU execution setup**.
 * Per-model fallback to fp16/fp32 remains available if a path fails smoke tests.
-* For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization targeting remaining float32 matmul/convolution paths on L4; in a bfloat16-heavy pipeline its impact is limited but it is retained as an opt-in inference optimization — this can trade some FP32 numerical precision for speed and is not a semantic guarantee.
+* For the NLI phase, `torch.backends.cuda.matmul.allow_tf32 = True` is set as a repo-level performance optimization targeting remaining float32 matmul/convolution paths on L4; in a bfloat16-heavy pipeline its impact is limited but it is retained as an opt-in inference optimization - this can trade some FP32 numerical precision for speed and is not a semantic guarantee.
 * The `allow_tf32` setting is logged in **W&B** for each phase. This provides **transparency** about whether TF32 acceleration was enabled during that phase.
 * As a **repo-level cleanup safeguard**, both the **DataLoader** and its **iterator** are explicitly deleted between phases.
 * This deletion happens **before** calling:
@@ -116,12 +116,12 @@ enforces `torch.cuda.device_count() == 1`. To switch back to all visible GPUs, `
 | Generation| API-based LLM gpt-5.4-nano| ~14–15GB + KV cache| Load (bfloat16) → apply chat template → assert max(prompt_tokens) < 32768 → generate (do_sample=False) → log prompt token count (API-based LLM gpt-5.4-nano tokenizer) + completion token count → save → unload → empty_cache |
 | NLI eval| DeBERTa-v3-large-mnli-fever-anli-ling-wanli| ~3GB + activations (overflow sliding windows; DataCollatorWithPadding pad_to_multiple_of=8; pin_memory=True) | Load (bfloat16) → classify per atomic claim → del dataloader → unload → empty_cache|
 | Citation| SQLite| 0GB| CPU only (read-only; check_same_thread=False)|
-| Corpus scan| Polars scan_ndjson| 0GB GPU (CPU-only)| **Mandatory** exact full-corpus scan — always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention|
+| Corpus scan| Polars scan_ndjson| 0GB GPU (CPU-only)| **Mandatory** exact full-corpus scan - always uses `_full_scan_with_polars()` for all 1.46M opinions; no GPU memory contention|
 Projected peak per phase is expected to remain within the 23.7GB budget; actual peaks logged in W&B.
 ---# Methodology Strengths
-**1 — Automated Hallucination Measurement (No Human Annotation Bottleneck)**
+**1 - Automated Hallucination Measurement (No Human Annotation Bottleneck)**
 - **Tier A:**
-  - LePaRD 4M+ expert-annotated citation pairs — gold-standard retrieval ground truth
+  - LePaRD 4M+ expert-annotated citation pairs - gold-standard retrieval ground truth
 - **Tier B:**
   - `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` classifies each atomic claim independently against individual retrieved chunks. DeBERTa-v3-large has a strict 512-token position limit (`max_position_embeddings=512`; `tokenizer.model_max_length=512` enforced).
   - The NLI tokenizer uses `use_fast=False` as the repo-certified path based on local smoke tests over legal citation text. In this pinned repo environment, overflow-window generation (`return_overflowing_tokens=True, max_length=512, stride=64`) has been regression-tested for this exact model/version combination; public tokenizer docs describe overflow helpers primarily on fast tokenizers, so this behavior is treated as repo-certified rather than generally assumed.
@@ -148,20 +148,20 @@ Projected peak per phase is expected to remain within the 23.7GB budget; actual 
     - (2) keyword/regex on citation anchor;
     - (3) sliding-window fallback only if anchor extraction fails.
   - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
-**2 — Clean Experimental Design**
+**2 - Clean Experimental Design**
 - `API-based LLM gpt-5.4-nano` held **constant** across all architectures with greedy decoding (`do_sample=False`; `temperature` omitted to suppress warnings in `transformers 4.41.2 (pinned)`).
 - All prompts formatted with `tokenizer.apply_chat_template(...)` before tokenization.
 - A runtime assertion `assert max(prompt_tokens) < 32768` fires loudly before generation if context exceeds API-based LLM gpt-5.4-nano's hard limit.
 - Prompt token count (API-based LLM gpt-5.4-nano tokenizer) and completion token count logged per query. Observed differences are attributable to the retrieval setup.
-**3 — Grounded in a Real Failure Case**
+**3 - Grounded in a Real Failure Case**
 - Targets *Mata v. Avianca Airlines* (2023). Narrow, testable, motivated by documented consequence.
-**4 — Production-Grade Reproducibility Already Operational**
+**4 - Production-Grade Reproducibility Already Operational**
 - `src/repro.configure()` + `uv.lock` + DVC + manifest checksums + tests passing.
 - `src/environment.py` asserts exact library versions and GPU configuration at startup.
 - `HF_TOKEN` is required by this repo on the shared cluster for authenticated Hub access and to reduce resolver/rate-limit failures; loaded via `dotenv` in `src/environment.py`.
 ---
 ## Addressing TF Reviewer Comments and Instructor Notes
-### Comment 1 — Feasibility of Hallucination Measurement
+### Comment 1 - Feasibility of Hallucination Measurement
 The evaluation is organized into **three tiers** to keep hallucination measurement feasible, automated, and scalable.
 #### Tier A
 Retrieval Grounding
@@ -189,7 +189,7 @@ Retrieval Grounding
 |-------------------|----------------------------------------|---------------------------------------------|-------------------------------------------------|
 | **Entailment**    | Any window supports the claim          | any(entail) → Entailment                    | Faithfulness metric + confidence score          |
 | **Contradiction** | No entailment, any window contradicts  | no entail + any(contradict) → Contradiction | Contradiction rate (normalized + per 1K tokens) |
-| **Neutral**       | No entailment or contradiction         | else → Neutral                              | Evidence-gap — **not hallucination by default** |
+| **Neutral**       | No entailment or contradiction         | else → Neutral                              | Evidence-gap - **not hallucination by default** |
 * The **window index** that triggered each label is logged.
 * **NLI confidence scores** are recorded for diagnostics only.
 * These confidence scores are **not treated as calibrated probabilities**.
@@ -208,7 +208,7 @@ Retrieval Grounding
   * **(2) Keyword / regex matching**
   * **(3) Sliding-window fallback**
 - **Tier C verifies citation existence and local evidence support, not full legal reasoning correctness.**
-### Comment 2 — Embedding Model Training
+### Comment 2 - Embedding Model Training
 | Architecture                     | Base Model                                | Training                     | Key Hyperparameters                                                                              |
 |----------------------------------|-------------------------------------------|------------------------------|--------------------------------------------------------------------------------------------------|
 | BM25                             | None                                      | None                         | k1=1.5, b=0.75                                                                                   |
@@ -217,9 +217,9 @@ Retrieval Grounding
 | Legal-BERT (optional)            | Legal-BERT (12GB legal text)              | MultipleNegativesRankingLoss | lr=2e-5, warmup=10%, batch=32, epochs=3                                                          |
 ---
 ## Self-Audit Findings and Corrections
-### Revision 1 — Domain Gap
+### Revision 1 - Domain Gap
 - Claims scoped to federal appellate opinions.
-### Revision 2 — Hallucination Metric Definition
+### Revision 2 - Hallucination Metric Definition
 * **Contradiction rate** is reported in two normalized forms:
   * by **claim count**
   * per **1,000 tokens**
@@ -229,7 +229,7 @@ Retrieval Grounding
 * **Window-level logits** are aggregated at the **chunk level**.
 * **NLI scores** are treated as **diagnostic indicators only**, not calibrated probabilities.
 * **Neutral** is **not automatically counted as hallucination**.
-### Revision 3 — Citation Existence vs. Citation Correctness
+### Revision 3 - Citation Existence vs. Citation Correctness
 * **Tier C** assigns and logs a unique citation hash for every citation lookup.
 * If the citation resolves to `NULL`, it is labeled **Hard Citation Hallucination**.
 * If the citation is found but the cited passage does **not** provide local NLI support for the claimed proposition, it is labeled **CitationFound_NoLocalSupport**.
@@ -238,7 +238,7 @@ Retrieval Grounding
   * **(1) Hybrid reranker**
   * **(2) Keyword / regex matching**
   * **(3) Sliding-window fallback**
-### Revision 4 — Architecture Alignment
+### Revision 4 - Architecture Alignment
 * The retrieval systems are organized along a spectrum:
   * **BM25** → lexical baseline
   * **BGE-M3** → dense retriever
@@ -247,11 +247,11 @@ Retrieval Grounding
 * This keeps the comparison fair by ensuring both methods operate on the same chunked inputs.
 * The **1024-subword chunk budget** is a **controlled experimental design choice**.
 * It is **not** a hard limitation of **BGE-M3** itself.
-### Revision 5 — Scientific Claim Precision
+### Revision 5 - Scientific Claim Precision
 Scoped to federal appellate opinions.
-### Revision 6 — Outdated Architectures
-CNN/BiLSTM replaced — see Architecture Classification.
-### Revision 7 — Chunking Accuracy
+### Revision 6 - Outdated Architectures
+CNN/BiLSTM replaced - see Architecture Classification.
+### Revision 7 - Chunking Accuracy
 * **spaCy tokens are not the same as BPE subword tokens.**
 * `nlp.max_length` is set high enough to process full federal appellate opinions safely.
 * Chunks are built using:
@@ -273,7 +273,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * Optional ablation:
   * test **64-subword overlap**
   * on a **10% subset**
-### Revision 8 — LLM Generator
+### Revision 8 - LLM Generator
 * The generator model is **`API-based LLM gpt-5.4-nano`**.
 * It has been **smoke-tested in this repository** under **`transformers 4.41.2 (pinned)`**.
 * All prompts are formatted using:
@@ -284,7 +284,7 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * A **runtime assertion** checks prompt length before generation starts.
 * This ensures the pipeline fails loudly if the prompt exceeds the allowed context size.
 * The model has **no built-in moderation layer**.
-### Revision 9 — VRAM / KV Cache Risk
+### Revision 9 - VRAM / KV Cache Risk
 * All experiments run on a **single SLURM-allocated GPU** with **23.7GB VRAM**.
 * All models use **bfloat16** as the primary dtype.
 * The environment asserts the following before execution:
@@ -313,10 +313,10 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * The **projected peak memory usage** is expected to remain within the **23.7GB VRAM budget**.
 * **Polars** (`polars 1.39.3`) is a **mandatory hard dependency** in `src/dataset_probe.py`.
   * It is **CPU-only** and causes **zero GPU memory contention**.
-  * It is imported at **module top level** — not lazily, not optionally.
+  * It is imported at **module top level** - not lazily, not optionally.
   * It always performs the exact full-corpus scan via `pl.scan_ndjson` per shard.
   * It is not loaded during training, retrieval, generation, or NLI phases.
-### Revision 10 — Tier C API Rate Limits
+### Revision 10 - Tier C API Rate Limits
 * Tier C does **not** rely on live API calls at evaluation time.
 * API rate-limit risk is avoided by using a **local SQLite index** instead.
 * The SQLite connection is configured with:
@@ -326,8 +326,8 @@ CNN/BiLSTM replaced — see Architecture Classification.
 * Result:
   * no live API dependency
   * no rate-limit bottleneck during large evaluation runs
-### Revision 11 — Training Cost vs Timeline
-Explicit compute caps set up front — see Revised Feasibility Statement.
+### Revision 11 - Training Cost vs Timeline
+Explicit compute caps set up front - see Revised Feasibility Statement.
 ---
 ## Research Question
 * The central research question is:
@@ -410,14 +410,14 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * explicit **DataLoader deletion**
     * `torch.cuda.empty_cache()`
     * `gc.collect()`
-  * **Phase 1 — Dense retrieval with BGE-M3**
+  * **Phase 1 - Dense retrieval with BGE-M3**
     * Load **BGE-M3** in **bfloat16**
     * Log **pooling flags** to W&B
     * Retrieve **top-50** passages using **1024-subword chunks**
     * Log **embedding norm distribution**
     * Save results
     * Unload model
-  * **Phase 2 — Reranking with bge-reranker-v2-m3**
+  * **Phase 2 - Reranking with bge-reranker-v2-m3**
     * Load **`bge-reranker-v2-m3`** in **bfloat16**
     * Use:
       * **CrossEncoder**
@@ -433,7 +433,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
     * Serialize scores and ranks
     * Return the **top-10** results
     * Unload model
-  * **Phase 3 — Generation with API-based LLM gpt-5.4-nano**
+  * **Phase 3 - Generation with API-based LLM gpt-5.4-nano**
     * Load **`API-based LLM gpt-5.4-nano`** in **bfloat16**
     * Apply the **chat template**
     * Assert:
@@ -445,7 +445,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
       * completion token count
     * Save outputs
     * Unload model
-  * **Phase 4 — NLI evaluation with DeBERTa-v3**
+  * **Phase 4 - NLI evaluation with DeBERTa-v3**
     * Load **DeBERTa-v3 NLI** in **bfloat16**
     * Use:
       * `use_fast=False`
@@ -470,7 +470,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
       * claim counts
     * Delete DataLoader
     * Unload model
-  * **Phase 5 — Citation checking with SQLite**
+  * **Phase 5 - Citation checking with SQLite**
     * Use **SQLite** with:
       * `check_same_thread=False`
       * read-only mode
@@ -511,7 +511,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | ID | Architecture | Type | Role |
 |----|-------------|------|------|
 | (a) | BM25 | Non-neural baseline | Reference floor |
-| (b) | BGE-M3 (BAAI/bge-m3, CLS pooling per BAAI config) | Modern dense retriever — CLS pooling per published BAAI config | Primary dense baseline — 1024-subword chunks (design choice) |
+| (b) | BGE-M3 (BAAI/bge-m3, CLS pooling per BAAI config) | Modern dense retriever - CLS pooling per published BAAI config | Primary dense baseline - 1024-subword chunks (design choice) |
 | (c) | Hybrid: BM25+BGE-M3+bge-reranker-v2-m3 | Transformer + lexical + CrossEncoder reranker | **Expected strongest** |
 | (d) | Legal-BERT Bi-Encoder | Domain-specific Transformer | Optional domain-reference model |
 * **Sparse retrieval** uses **`bm25s`**, `bm25s` is indexed over the **same pre-chunked payloads** embedded by **BGE-M3**. "pre-chunked payloads" means the retrieval-ready text chunks created ahead of time from legal opinions and reused identically by BM25 and BGE-M3 so the architecture comparison stays fair and reproducible.**
@@ -566,8 +566,8 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ## Current Pipeline Status
 | Stage | Status | What exists | What remains |
 |-------|--------|-------------|--------------|
-| Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | — |
-| CourtListener download | ✅ Complete | 1,456,611 opinions · 159 shards · 7.6GB | — |
+| Environment bootstrap | ✅ Complete | Tests passing, coverage verified, manifest generated | - |
+| CourtListener download | ✅ Complete | 1,456,611 opinions · 159 shards · 7.6GB | - |
 | DVC + S3 | ✅ Complete | Remote configured | `dvc push` data shards |
 | CourtListener RAG prep | ✅ Complete | JSONL with 23-field schema; dataset_probe.py v2.5.11 with mandatory Polars full-corpus scan, ProbeConfig (defines corpus evaluation for downstream legal RAG), module-level constants, contract test suite (303 tests), GateResult+ProbeReport typed contracts, STAGE3_REQUIRED_FIELDS (17 fields), GATE_REGISTRY, stratify_by minority-group-preserving stratified subsampling | Tokenizer-aware chunking (1024 subwords) + SQLite citation index |
 | LePaRD acquisition | ⏳ **Priority 1** | `src/dataset_loader.py` ready | Download + DVC (cap at 500K–1M) |
@@ -577,7 +577,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | Experiment tracking | ✅ Operational | `src/wandb_logger.py` (218 lines): `setup_wandb_auth`, `load_artifact`, `log_run_start`, `log_dataset_stats`, `log_quality_signals`; `src/dataset_probe.py::_log_report_to_wandb()` with single `wandb.log` call + Artifact upload; `--log-to-wandb` CLI flag; 4 W&B isolation contract tests enforced; 50+ offline runs on disk (entity `phl690-harvard-extension-schol`, project `cs1090b`); `wandb=0.25.1` pinned in uv.lock | Per-phase VRAM logging integration deferred to Stage 6 evaluation |
 ---
 ## DL System Stack
-### Stage 1 — Raw Data Acquisition
+### Stage 1 - Raw Data Acquisition
 * **CourtListener federal appellate subset (✅)**
   * Contains **1,456,611 opinions**
   * Stored as **23-field JSONL** records
@@ -611,7 +611,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `cs1090b-hallucinationlegalragchatbots`
 * The bucket region is:
   * `us-east-2`
-### Stage 2 — Raw Artifact Registration
+### Stage 2 - Raw Artifact Registration
 * An **immutable manifest** is generated for the dataset and pipeline state.
 * The manifest records:
   * **159 shard checksums**
@@ -620,7 +620,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * the **`uv.lock` SHA256** value
 * **Contract tests** validate the manifest on **every pipeline run**.
 * An **SBOM** is also generated, covering **357 software components**.
-### Stage 3 — Preprocessing + Tokenizer-Aware Chunking
+### Stage 3 - Preprocessing + Tokenizer-Aware Chunking
 * Data is processed through a **streaming CSV pipeline**.
 * Preprocessing includes:
   * **HTML stripping**
@@ -656,13 +656,13 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
   * `data/raw/cl_federal_appellate_bulk`
   * via `src/extract.py`
 * **Dataset readiness probing** (`src/dataset_probe.py` v2.5.11) runs before chunking:
-  * **Polars is a mandatory hard dependency** — `import polars as pl` at module top level.
+  * **Polars is a mandatory hard dependency** - `import polars as pl` at module top level.
   * `run_probe()` **always** calls `_full_scan_with_polars()`.
-  * All probe behaviour is governed by **`ProbeConfig`** — the frozen dataclass that defines how the probe evaluates the CourtListener corpus for downstream legal RAG research.
-  * **Contract tests** in `tests/test_dataset_probe.py` ensure the probe's formal structure and behavior remain intact — see Contract Test Suite below.
+  * All probe behaviour is governed by **`ProbeConfig`** - the frozen dataclass that defines how the probe evaluates the CourtListener corpus for downstream legal RAG research.
+  * **Contract tests** in `tests/test_dataset_probe.py` ensure the probe's formal structure and behavior remain intact - see Contract Test Suite below.
   * `run_probe()` returns a **typed `ProbeReport(BaseModel)`**.
 
-#### Contract Test Suite — `tests/test_dataset_probe.py`
+#### Contract Test Suite - `tests/test_dataset_probe.py`
 
 ##### Purpose
 * `tests/test_dataset_probe.py` is the **single authoritative contract test file** for `src/dataset_probe.py`.
@@ -673,39 +673,39 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 ##### Contract test categories and what they protect
 
 **Constants contracts (`TestModuleLevelConstants`, `TestProbeVersion`)**
-* Assert that `PROVISIONAL_MIN_TEXT_LENGTH == 1500`, `CHUNK_SIZE_SUBWORDS == 1024`, `CHUNK_OVERLAP_SUBWORDS == 128`, `ENCODER_MODEL == "BAAI/bge-m3"`, `SPACY_MODEL == "en_core_web_sm"`, `MIN_SENTENCE_COUNT == 20` — all as integer or string literals with no type annotations.
-* Assert that the source file contains these literal assignments (e.g., `"CHUNK_SIZE_SUBWORDS = 1024" in source`) — preventing silent drift where a constant changes value without the test catching it.
-* Assert `PROBE_VERSION` is a string of length ≥ 3 — the instrument version recorded in every `ProbeReport`.
+* Assert that `PROVISIONAL_MIN_TEXT_LENGTH == 1500`, `CHUNK_SIZE_SUBWORDS == 1024`, `CHUNK_OVERLAP_SUBWORDS == 128`, `ENCODER_MODEL == "BAAI/bge-m3"`, `SPACY_MODEL == "en_core_web_sm"`, `MIN_SENTENCE_COUNT == 20` - all as integer or string literals with no type annotations.
+* Assert that the source file contains these literal assignments (e.g., `"CHUNK_SIZE_SUBWORDS = 1024" in source`) - preventing silent drift where a constant changes value without the test catching it.
+* Assert `PROBE_VERSION` is a string of length ≥ 3 - the instrument version recorded in every `ProbeReport`.
 
 **`ProbeConfig` contracts (`TestProbeConfig`, `TestA11ChunkCountFormula`)**
-* Assert `ProbeConfig()` is **frozen** — mutating a field raises `AttributeError` or `TypeError`.
-* Assert `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — the critical invariant that `ProbeConfig` defaults must equal module constants.
-* Assert `_probe_config_to_dict(ProbeConfig())` is JSON-serializable — guarantees the config snapshot in `provenance["probe_config"]` can always be written to disk and W&B.
-* Assert `ProbeConfig()` has `a11_generative_model` field — the secondary API-based LLM gpt-5.4-nano tokenizer check.
-* Assert all new `ProbeConfig` fields appear in `report["provenance"]["probe_config"]` — confirms the config snapshot is complete in every `ProbeReport`.
-* Assert the A11 chunk count formula (`stride = chunk_size - overlap; n_chunks = max(1, ceil((total - overlap) / stride))`) matches `CHUNK_SIZE_SUBWORDS=1024` and `CHUNK_OVERLAP_SUBWORDS=128` — regression test against chunking formula drift.
+* Assert `ProbeConfig()` is **frozen** - mutating a field raises `AttributeError` or `TypeError`.
+* Assert `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` - the critical invariant that `ProbeConfig` defaults must equal module constants.
+* Assert `_probe_config_to_dict(ProbeConfig())` is JSON-serializable - guarantees the config snapshot in `provenance["probe_config"]` can always be written to disk and W&B.
+* Assert `ProbeConfig()` has `a11_generative_model` field - the secondary API-based LLM gpt-5.4-nano tokenizer check.
+* Assert all new `ProbeConfig` fields appear in `report["provenance"]["probe_config"]` - confirms the config snapshot is complete in every `ProbeReport`.
+* Assert the A11 chunk count formula (`stride = chunk_size - overlap; n_chunks = max(1, ceil((total - overlap) / stride))`) matches `CHUNK_SIZE_SUBWORDS=1024` and `CHUNK_OVERLAP_SUBWORDS=128` - regression test against chunking formula drift.
 
 **`GateResult` contracts (`TestGateResultModel`)**
 * Assert `GateResult` is importable and is a Pydantic `BaseModel`.
 * Assert `GateResult` has required fields `gate` and `severity`.
 * Assert `GateResult.model_dump()` is JSON-serializable.
-* Assert `GateResult` is **frozen** — mutation raises `FrozenInstanceError`.
+* Assert `GateResult` is **frozen** - mutation raises `FrozenInstanceError`.
 
 **`ProbeReport` contracts (`TestProbeReportModel`)**
 * Assert `ProbeReport` is importable and is a Pydantic `BaseModel`.
-* Assert `run_probe()` returns a `ProbeReport` instance — not a raw dict.
+* Assert `run_probe()` returns a `ProbeReport` instance - not a raw dict.
 * Assert `report["gates"]` works via `__getitem__` (backward-compatible dict-style access).
 * Assert `"gates" in report` works via `__contains__`.
 * Assert `report.gates` attribute access works natively.
 * Assert `report.summary` has `all_passed` key.
-* Assert `json.dumps(report.model_dump())` succeeds — full JSON serializability.
+* Assert `json.dumps(report.model_dump())` succeeds - full JSON serializability.
 
 **`GATE_REGISTRY` contracts (`TestGateRegistry`)**
 * Assert registry is non-empty and iterable.
 * Assert all 7 core gates are present: A7, A8, A9, A11, A12, A13, B6.
 * Assert every entry has `"name"`, `"fn"` (callable), and `"severity"` keys.
 * Assert A7, A8, A11, A12, A13 are `"blocking"`; A9 and B6 are `"advisory"`.
-* Assert every non-tokenizer, non-spaCy gate function is callable with `(records, cfg)` and returns a dict with a `"gate"` key — live execution contract.
+* Assert every non-tokenizer, non-spaCy gate function is callable with `(records, cfg)` and returns a dict with a `"gate"` key - live execution contract.
 
 **`STAGE3_REQUIRED_FIELDS` contracts (`TestStage3RequiredFields`)**
 * Assert `STAGE3_REQUIRED_FIELDS` is a `frozenset` and is exported.
@@ -719,9 +719,9 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 * Assert `report["subset_n"] <= subset` after stratified subsampling.
 
 **W&B isolation contracts (`TestLogReportToWandbIsolation`, `TestRunProbeNoLogToWandbParam`, `TestRunProbeNoInlineWandb`, `TestLogReportToWandbSingleCall`)**
-* Assert `run_probe()` signature does not include a `log_to_wandb` parameter — telemetry must stay in `main()`.
-* Assert `_log_report_to_wandb` is not called anywhere inside `run_probe()` — verified by inspecting the source AST.
-* Assert `wandb.log` is called **exactly once** per `_log_report_to_wandb` invocation — the single consolidated log call contract.
+* Assert `run_probe()` signature does not include a `log_to_wandb` parameter - telemetry must stay in `main()`.
+* Assert `_log_report_to_wandb` is not called anywhere inside `run_probe()` - verified by inspecting the source AST.
+* Assert `wandb.log` is called **exactly once** per `_log_report_to_wandb` invocation - the single consolidated log call contract.
 
 **Lazy import contracts (`TestLazyImportBehavior`, `TestImportStyle`)**
 * Assert `spacy` is NOT imported at module top level (lazy import pattern).
@@ -736,7 +736,7 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 **Schema helper contracts (`TestValidateSchemaHelpers`, `TestValidateSchemaDocumentedFields`, `TestValidateSchemaTextLengthConsistency`)**
 * Assert each composable helper (`_check_presence`, `_check_types_and_ranges`, `_check_vocabulary`, `_check_consistency`, `_check_documented_coverage`) returns dicts with expected keys.
 * Assert `validate_schema()` `pass=True` when all required fields present and valid.
-* Assert consistency check uses OR logic — absolute tolerance OR relative tolerance.
+* Assert consistency check uses OR logic - absolute tolerance OR relative tolerance.
 
 **Property-based tests (`TestPercentileProperty`, `TestGateA8Property`)**
 * Use `hypothesis` to assert `_percentile()` satisfies monotonicity and boundary conditions over arbitrary sorted lists.
@@ -748,17 +748,17 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 | `pytest>=9.0.2` | ✅ line 43 | ✅ lockfile-pinned |
 | `pytest-cov>=7.0.0` | ✅ line 44 | ✅ lockfile-pinned |
 | `hypothesis>=6.151.9` | ✅ line 41 | ✅ lockfile-pinned |
-| `pydantic>=2.12.5` — `GateResult` + `ProbeReport` contract assertions | ✅ line 37 | ✅ 49 locked entries |
-| `polars>=1.39.3` — full-scan contract assertions | ✅ line 36 | ✅ 16 locked entries |
-| Python stdlib `dataclasses` — `ProbeConfig` frozen assertion | N/A | ✅ Python 3.11.9 |
+| `pydantic>=2.12.5` - `GateResult` + `ProbeReport` contract assertions | ✅ line 37 | ✅ 49 locked entries |
+| `polars>=1.39.3` - full-scan contract assertions | ✅ line 36 | ✅ 16 locked entries |
+| Python stdlib `dataclasses` - `ProbeConfig` frozen assertion | N/A | ✅ Python 3.11.9 |
 
-#### `ProbeConfig` — Defines How the Probe Evaluates the Corpus for Downstream Legal RAG
+#### `ProbeConfig` - Defines How the Probe Evaluates the Corpus for Downstream Legal RAG
 
 ##### What `ProbeConfig` is
-* `ProbeConfig` is a **frozen dataclass** (`@dataclasses.dataclass(frozen=True)`) — the single source of truth for how `src/dataset_probe.py` evaluates the CourtListener corpus.
-* Every gate threshold, subsample size, model name, quality signal pattern, and stratification strategy are controlled by `ProbeConfig` fields — no gate uses hardcoded values.
+* `ProbeConfig` is a **frozen dataclass** (`@dataclasses.dataclass(frozen=True)`) - the single source of truth for how `src/dataset_probe.py` evaluates the CourtListener corpus.
+* Every gate threshold, subsample size, model name, quality signal pattern, and stratification strategy are controlled by `ProbeConfig` fields - no gate uses hardcoded values.
 * **Frozen** means: once constructed, values cannot change. Every probe run is a reproducible measurement.
-* `_probe_config_to_dict(cfg)` serializes to a JSON-safe dict (frozensets → sorted lists, tuples → lists, None preserved) — recorded in `provenance["probe_config"]` and passed to `wandb.init(config=...)`.
+* `_probe_config_to_dict(cfg)` serializes to a JSON-safe dict (frozensets → sorted lists, tuples → lists, None preserved) - recorded in `provenance["probe_config"]` and passed to `wandb.init(config=...)`.
 
 ##### The six evaluation dimensions `ProbeConfig` controls
 
@@ -774,15 +774,15 @@ Explicit compute caps set up front — see Revised Feasibility Statement.
 Plus: schema consistency (`text_length_consistency_tolerance=200`, `text_length_relative_tolerance=0.05`) and stratified sampling (`stratify_by: str | None = None`).
 
 ##### `ProbeConfig` contracts enforced by test suite
-* `ProbeConfig()` is frozen — mutation raises exception (`TestProbeConfig.test_is_frozen`)
-* `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` — defaults equal module constants (`TestProbeConfig.test_default_min_text_length`)
+* `ProbeConfig()` is frozen - mutation raises exception (`TestProbeConfig.test_is_frozen`)
+* `ProbeConfig().min_text_length == PROVISIONAL_MIN_TEXT_LENGTH` - defaults equal module constants (`TestProbeConfig.test_default_min_text_length`)
 * `_probe_config_to_dict(ProbeConfig())` is JSON-serializable (`TestProbeConfig.test_is_json_serializable`)
 * All new fields appear in `report["provenance"]["probe_config"]` (`TestProbeConfig.test_all_new_fields_in_provenance`)
 
-#### Module-Level Constants — Controlled Measurement Infrastructure
+#### Module-Level Constants - Controlled Measurement Infrastructure
 | Constant | Value | Module constant → `ProbeConfig` field invariant |
 |----------|-------|------------------------------------------------|
-| `PROBE_VERSION` | `"2.5.11"` | N/A — instrument version |
+| `PROBE_VERSION` | `"2.5.11"` | N/A - instrument version |
 | `PROVISIONAL_MIN_TEXT_LENGTH` | `1500` | = `ProbeConfig().min_text_length` |
 | `CHUNK_SIZE_SUBWORDS` | `1024` | = `ProbeConfig().chunk_size_subwords` |
 | `CHUNK_OVERLAP_SUBWORDS` | `128` | = `ProbeConfig().chunk_overlap_subwords` |
@@ -795,17 +795,17 @@ Plus: schema consistency (`text_length_consistency_tolerance=200`, `text_length_
 | `STAGE3_REQUIRED_FIELDS` | 17-field frozenset | Stage 3 readiness gate |
 | `GATE_REGISTRY` | 7-entry ordered list | Self-describing gate manifest |
 
-#### `stratify_by` — Minority-Group-Preserving Stratified Subsampling
-* `ProbeConfig.stratify_by: str | None = None` — tells the probe which record attribute to use for proportional post-scan stratified subsampling.
-* Called **after** `_full_scan_with_polars()` — guarantees every stratum gets **at least 1 record**.
+#### `stratify_by` - Minority-Group-Preserving Stratified Subsampling
+* `ProbeConfig.stratify_by: str | None = None` - tells the probe which record attribute to use for proportional post-scan stratified subsampling.
+* Called **after** `_full_scan_with_polars()` - guarantees every stratum gets **at least 1 record**.
 * `shard_audit["stratified_by"]` records provenance. Uses Python stdlib `random.Random`.
 
 #### Mandatory Exact Full-Corpus Scan
-* `import polars as pl` at module top level — no fallback.
-* `run_probe()` defaults `full_scan=True` — always scans all 1,456,611 opinions via `pl.scan_ndjson()` per shard.
+* `import polars as pl` at module top level - no fallback.
+* `run_probe()` defaults `full_scan=True` - always scans all 1,456,611 opinions via `pl.scan_ndjson()` per shard.
 * `provenance["full_scan"]=True` and `provenance["polars_version"]` always recorded.
 
-#### Stage 3 Readiness Gate — `STAGE3_REQUIRED_FIELDS` (17 fields)
+#### Stage 3 Readiness Gate - `STAGE3_REQUIRED_FIELDS` (17 fields)
 | Field | Stage 3 Role |
 |-------|-------------|
 | `id` | Primary key for chunk metadata and SQLite citation index |
@@ -827,21 +827,21 @@ Plus: schema consistency (`text_length_consistency_tolerance=200`, `text_length_
 | `source` | Provenance field for DVC artifact lineage |
 
 #### Typed Contracts
-* `GateResult(BaseModel)`: `extra=allow, frozen=True` — immutable; fields `gate: str`, `severity: str`.
-* `ProbeReport(BaseModel)`: `extra=allow, frozen=False` — `__getitem__`/`__contains__` backward compat; `model_dump()` carries full `ProbeConfig` snapshot.
-* **pydantic>=2.12.5** — pyproject.toml line 37; 49 locked entries in uv.lock.
+* `GateResult(BaseModel)`: `extra=allow, frozen=True` - immutable; fields `gate: str`, `severity: str`.
+* `ProbeReport(BaseModel)`: `extra=allow, frozen=False` - `__getitem__`/`__contains__` backward compat; `model_dump()` carries full `ProbeConfig` snapshot.
+* **pydantic>=2.12.5** - pyproject.toml line 37; 49 locked entries in uv.lock.
 
 #### Lazy Loading
 | Dependency | Import strategy | Triggered by |
 |------------|----------------|-------------|
 | `polars` | **Hard import at module top** | Always |
-| `spacy` | Lazy — `_load_spacy_nlp()` | Gate A13 only |
+| `spacy` | Lazy - `_load_spacy_nlp()` | Gate A13 only |
 | `transformers.AutoTokenizer` | Lazy | Gate A11 only |
 | `wandb` | Optional `try/except ImportError` | `--log-to-wandb` in `main()` only |
 
 #### W&B Telemetry Contract
-* `_log_report_to_wandb()` is **exclusively a `main()` concern** — enforced by `TestLogReportToWandbIsolation`.
-* `wandb.log` called **exactly once** per invocation — enforced by `TestLogReportToWandbSingleCall`.
+* `_log_report_to_wandb()` is **exclusively a `main()` concern** - enforced by `TestLogReportToWandbIsolation`.
+* `wandb.log` called **exactly once** per invocation - enforced by `TestLogReportToWandbSingleCall`.
 * `ProbeConfig` snapshot passed to `wandb.init(config=...)`.
 
 #### W&B Metrics Logged Per Phase
@@ -898,7 +898,7 @@ When integrated, the full logger tracks:
 * **Completion token counts**
 * **Gradient norms**
 * **Dataset probe gate results** (A7–A13, B6) including parse error counts and full_scan provenance
-### Stage 4 — Index Generation *(not started)*
+### Stage 4 - Index Generation *(not started)*
 * **BM25 (`bm25s`)** is indexed over the **pre-chunked payloads from Stage 3**, not over raw text.
 * The **FAISS dense index** uses two modes:
   * **Flat index** for capped / validation runs
@@ -930,12 +930,12 @@ When integrated, the full logger tracks:
   * serializing **ranks**
 * The reranker returns the **top 10** results after reranking.
 * A **SQLite citation index** is also maintained for citation-related lookup tasks.
-### Stage 5 — Model Training *(not started)*
+### Stage 5 - Model Training *(not started)*
 * Training is **capped at 500K–1M pairs**.
 * **Early stopping** is used to avoid unnecessary training once performance stops improving.
 * **Gradient accumulation** is used to support effective larger-batch training under GPU memory constraints.
 * **GPU hours** are logged to **Weights & Biases (W&B)**.
-### Stage 6 — Evaluation *(not started)*
+### Stage 6 - Evaluation *(not started)*
 * All models use **bfloat16** as the primary dtype.
 * `environment.py` asserts the following at startup:
   * `transformers.__version__ == "4.39.3"`
@@ -1000,11 +1000,11 @@ When integrated, the full logger tracks:
   * Hard Citation Hallucination rate
   * CitationFound_NoLocalSupport rate
 * The projected peak VRAM usage remains within the **23.7GB** budget.
-### Stage 7 — Experiment Tracking *(not started)*
+### Stage 7 - Experiment Tracking *(not started)*
 * `src/wandb_logger.py` is **implemented and ready**.
-* **W&B run initialization is still pending** — integration fires once LePaRD training begins.
+* **W&B run initialization is still pending** - integration fires once LePaRD training begins.
 * `wandb` is declared as **`wandb>=0.16`** in `pyproject.toml` and fully pinned in `uv.lock` (13 locked entries).
-* In `src/dataset_probe.py`, `wandb` is imported inside a **`try/except ImportError`** block — degrades gracefully with `wandb = None` if unavailable.
+* In `src/dataset_probe.py`, `wandb` is imported inside a **`try/except ImportError`** block - degrades gracefully with `wandb = None` if unavailable.
 * In `src/wandb_logger.py`, all W&B calls use **lazy imports inside each function**.
 ---
 ## Datasets
@@ -1038,7 +1038,7 @@ jupyter lab notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 ```
 cs1090b_HallucinationLegalRAGChatbots/
 ├── src/
-│   ├── repro.py                 # GITIGNORED — generated by setup.sh
+│   ├── repro.py                 # GITIGNORED - generated by setup.sh
 │   ├── environment.py           # Runtime assertions: transformers version, bf16 support, capability ≥ 8.0, TARGET_GPU_COUNT=1; loads HF_TOKEN
 │   ├── config.py                # PipelineConfig
 │   ├── pipeline.py              # Stage orchestration
@@ -1054,7 +1054,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   ├── validation.py            # Pipeline contract validation
 │   ├── split.py                 # Train/val/test split
 │   ├── dataset_config.py        # Hydra DatasetConfig; num_workers configurable (default 2)
-│   ├── dataset_loader.py        # HuggingFace / artifact loader — ready for LePaRD
+│   ├── dataset_loader.py        # HuggingFace / artifact loader - ready for LePaRD
 │   ├── dataset_probe.py         # Dataset readiness probe v2.5.11: ProbeConfig frozen dataclass (6 evaluation dimensions, 27 fields, injectable, JSON-serializable); module constants as controlled measurement infrastructure; mandatory Polars hard import; _full_scan_with_polars() always called; GateResult(BaseModel) frozen=True + ProbeReport(BaseModel) frozen=False (pydantic>=2.12.5); STAGE3_REQUIRED_FIELDS (17 fields); GATE_REGISTRY 7-entry manifest; stratify_by minority-group-preserving post-scan subsampling; lazy-loaded spaCy + AutoTokenizer; 5 composable schema sub-helpers; wandb optional try/except; --log-to-wandb exclusively in main()
 │   ├── lightning_datamodule.py  # PyTorch DataModule; repo-certified overflow windowing; tokenized in __getitem__; DataCollatorWithPadding
 │   ├── model_loader.py          # Safetensors model loader; CLS pooling assertion + W&B logging for BGE-M3
@@ -1065,14 +1065,14 @@ cs1090b_HallucinationLegalRAGChatbots/
 │   └── timer.py                 # cell_timer
 ├── notebooks/cs1090b_HallucinationLegalRAGChatbots.ipynb
 ├── tests/
-│   └── test_dataset_probe.py    # Single authoritative contract test file — 60+ named test classes, 303 tests; contracts: module constants, ProbeConfig frozen+serializable, GateResult frozen, ProbeReport typed+backward-compat, GATE_REGISTRY callable, STAGE3_REQUIRED_FIELDS subset+readiness, stratified sampling, W&B isolation (no log_to_wandb in run_probe), single wandb.log call, lazy imports, full-scan provenance, schema helpers, property-based (hypothesis)
+│   └── test_dataset_probe.py    # Single authoritative contract test file - 60+ named test classes, 303 tests; contracts: module constants, ProbeConfig frozen+serializable, GateResult frozen, ProbeReport typed+backward-compat, GATE_REGISTRY callable, STAGE3_REQUIRED_FIELDS subset+readiness, stratified sampling, W&B isolation (no log_to_wandb in run_probe), single wandb.log call, lazy imports, full-scan provenance, schema helpers, property-based (hypothesis)
 ├── configs/                     # Hydra YAML
 ├── scripts/                     # setup.sh helpers
-├── data/                        # GITIGNORED — DVC → S3 us-east-2
+├── data/                        # GITIGNORED - DVC → S3 us-east-2
 │   └── raw/
 │       ├── cl_bulk/             # ~57GB raw CSVs
 │       └── cl_federal_appellate_bulk/  # 159 shards ~7.6GB
-├── logs/                        # GITIGNORED — runtime artifacts
+├── logs/                        # GITIGNORED - runtime artifacts
 ├── .dvc/                        # S3: cs1090b-hallucinationlegalragchatbots
 ├── setup.sh
 ├── pyproject.toml               # requires-python = ">=3.11,<3.12"
@@ -1087,15 +1087,15 @@ cs1090b_HallucinationLegalRAGChatbots/
 | Deep learning           | PyTorch                                                                                              | 2.0.1+cu117 (node driver: CUDA 12.8) |
 | Transformers            | HuggingFace transformers                                                                             | 4.41.2 (pinned) (version-asserted at startup) |
 | Sentence embeddings     | sentence-transformers                                                                                | 3.1.1 |
-| Dense retrieval         | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace — ~2.27GB (bfloat16) |
-| CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo — bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
-| BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 — indexed over pre-chunked payloads (not raw text) |
-| Vector search           | faiss-cpu                                                                                            | 1.13.2 — Flat for eval; IVF (index.train() + assert index.is_trained; Hit@k vs nprobe logged; nprobe/nlist logged) for final corpus |
+| Dense retrieval         | BAAI/bge-m3 (CLS pooling per BAAI published config; runtime assertion + pooling flags logged to W&B) | HuggingFace - ~2.27GB (bfloat16) |
+| CrossEncoder reranker   | BAAI/bge-reranker-v2-m3                                                                              | sentence-transformers CrossEncoder path smoke-tested in this repo - bfloat16; GPU ~2GB, CPU fallback; max_length=1024, batch_size=4; score distributions (min/mean/max/entropy) logged; scores serialized; top-50→top-10 |
+| BM25 retrieval          | bm25s                                                                                                | 0.3.2.post1 - indexed over pre-chunked payloads (not raw text) |
+| Vector search           | faiss-cpu                                                                                            | 1.13.2 - Flat for eval; IVF (index.train() + assert index.is_trained; Hit@k vs nprobe logged; nprobe/nlist logged) for final corpus |
 | LLM generator           | API-based LLM gpt-5.4-nano                                                                   | smoke-tested in repo; bfloat16; chat template applied; do_sample=False; prompt length assertion; prompt/completion token counts logged |
 | Tokenizer dependency    | sentencepiece                                                                                        | 0.2.1 |
 | NLI classifier          | MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli                                             | smoke-tested in repo; bfloat16; use_fast=False (repo-certified); model_max_length=512; overflow windowing repo-certified; window count distribution logged; DataCollatorWithPadding pad_to_multiple_of=8; `allow_tf32=True` (opt-in; targets remaining float32 paths; state logged); pin_memory=True; window-level logits aggregated per chunk; citation hash logged |
-| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported — only loaded when gate A13 runs) |
-| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap — design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count |
+| NLP sentence boundaries | spaCy + en_core_web_sm                                                                               | 3.8.11 / 3.8.0 (stripped, nlp.max_length set for long opinions; lazily imported - only loaded when gate A13 runs) |
+| Chunking tokenizer      | AutoTokenizer (transformers)                                                                         | 1024-subword chunks, 128 overlap - design choice (512 for Legal-BERT); lazily imported in gate_a11_tokenizer_chunk_count |
 | Contract test suite     | pytest + hypothesis                                                                                  | pytest>=9.0.2 (pyproject.toml line 43); hypothesis>=6.151.9 (line 41); pytest-cov>=7.0.0 (line 44); lockfile-pinned; 303 tests in tests/test_dataset_probe.py across 60+ named test classes; covers: module constants literals, ProbeConfig frozen+serializable+defaults-equal-constants, GateResult frozen Pydantic, ProbeReport typed+backward-compat, GATE_REGISTRY callable+severity, STAGE3_REQUIRED_FIELDS subset+readiness, stratified sampling, W&B isolation (no log_to_wandb in run_probe signature), single wandb.log call, lazy imports (spaCy/AutoTokenizer not at top level; polars IS at top level), full-scan provenance, schema helpers, property-based percentile+A8 monotonicity |
 | Corpus evaluation config | Python stdlib dataclasses                                                                           | ProbeConfig @dataclasses.dataclass(frozen=True); 27 fields across 6 evaluation dimensions; defaults must equal module constants (enforced by TestProbeConfig + TestModuleLevelConstants); injectable; _probe_config_to_dict JSON-serializable; provenance["probe_config"] + wandb.init(config=...) |
 | Measurement instrument constants | Python stdlib (module-level literals + frozensets)                                        | PROBE_VERSION="2.5.11"; PROVISIONAL_MIN_TEXT_LENGTH=1500; CHUNK_SIZE_SUBWORDS=1024; CHUNK_OVERLAP_SUBWORDS=128; ENCODER_MODEL; SPACY_MODEL; MIN_SENTENCE_COUNT=20; frozensets; GATE_REGISTRY; no type annotations |
@@ -1103,7 +1103,7 @@ cs1090b_HallucinationLegalRAGChatbots/
 | Stage 3 readiness gate  | Python stdlib (frozenset)                                                                            | STAGE3_REQUIRED_FIELDS: 17 fields; stage3_pass + stage3_missing_counts in validate_schema() |
 | Typed contracts         | pydantic                                                                                             | pydantic>=2.12.5 (pyproject.toml line 37); 49 locked entries in uv.lock; GateResult(BaseModel) frozen=True; ProbeReport(BaseModel) frozen=False; model_dump() carries ProbeConfig snapshot |
 | Citation index          | SQLite (stdlib)                                                                                      | check_same_thread=False; read-only; citation hash logged; built via src/extract.py |
-| DataFrame / corpus scan | polars                                                                                               | 1.39.3 — mandatory hard dependency; import at module top level; _full_scan_with_polars() always called; pl.scan_ndjson per shard; CPU-only; 16 locked entries in uv.lock; 303 tests pass |
+| DataFrame / corpus scan | polars                                                                                               | 1.39.3 - mandatory hard dependency; import at module top level; _full_scan_with_polars() always called; pl.scan_ndjson per shard; CPU-only; 16 locked entries in uv.lock; 303 tests pass |
 | Experiment tracking     | W&B                                                                                                  | 0.25.1 (wandb>=0.16 in pyproject.toml; 13 locked entries in uv.lock; ProbeConfig in wandb.init; PROBE_VERSION in run name; lazy imports; optional try/except; --log-to-wandb exclusively in main()) |
 | Data versioning         | DVC 3.67.0 + dvc-s3 3.3.0                                                                            | S3 remote: cs1090b-hallucinationlegalragchatbots (us-east-2) |
 | Linting                 | ruff                                                                                                 | lockfile-pinned |
@@ -1155,7 +1155,7 @@ uv run python scripts/audit_jsonl_nan.py --strict-encoding --emit-shard-ids
 `YAML (--config)` > `env vars (AUDIT_*)` > `defaults`
 ---
 
-## Data Audit — `scripts/audit_jsonl_nan.py`
+## Data Audit - `scripts/audit_jsonl_nan.py`
 
 ### Verified CLI results on real data (1,456,611 lines, 159 shards, 2026-04)
 
@@ -1195,7 +1195,7 @@ uv run python scripts/audit_jsonl_nan.py --input-dir data/raw/cl_federal_appella
 ```
 ```
 field,nan_count
-(empty — dataset clean)
+(empty - dataset clean)
 ```
 
 #### Parallel workers
@@ -1238,10 +1238,10 @@ repairing: 100%|████████████████████| 15
 
 | Verdict | Meaning |
 |---------|---------|
-| `CLEAN` | No contamination — pipeline unblocked |
-| `REPAIRABLE` | NaN only in advisory fields (`case_name`, `raw_text`, `cleaning_flags`) — use `--fix` |
-| `HARD_FAILURE` | NaN in required schema fields — blocks Stage 3 |
-| `PARSE_FAILURE` | Malformed JSON with no field mapping — manual inspection required |
+| `CLEAN` | No contamination - pipeline unblocked |
+| `REPAIRABLE` | NaN only in advisory fields (`case_name`, `raw_text`, `cleaning_flags`) - use `--fix` |
+| `HARD_FAILURE` | NaN in required schema fields - blocks Stage 3 |
+| `PARSE_FAILURE` | Malformed JSON with no field mapping - manual inspection required |
 
 ### Config precedence
 
@@ -1298,19 +1298,19 @@ wandb: Synced 4 W&B file(s), 1 media file(s), 4 artifact file(s)
 
 ### Interpretation of W&B run results
 
-**`data/gate_verdict: CLEAN`** — All 1,456,611 lines across 159 shards passed the data contract. Zero non-finite floats, zero string sentinels, zero malformed JSON, zero encoding errors. The dataset is unconditionally safe to ingest into Stage 3 retrieval, chunking, citation, and NLI pipelines.
+**`data/gate_verdict: CLEAN`** - All 1,456,611 lines across 159 shards passed the data contract. Zero non-finite floats, zero string sentinels, zero malformed JSON, zero encoding errors. The dataset is unconditionally safe to ingest into Stage 3 retrieval, chunking, citation, and NLI pipelines.
 
-**`data/clean_pct: 100`** — The pre-training corpus has been semantically repaired in a prior run (bare NaN tokens in `case_name` were replaced with `null`). This confirms the repair was both complete and idempotent — a second pass changes zero lines.
+**`data/clean_pct: 100`** - The pre-training corpus has been semantically repaired in a prior run (bare NaN tokens in `case_name` were replaced with `null`). This confirms the repair was both complete and idempotent - a second pass changes zero lines.
 
-**`config/workers: 48`** — The audit used all available CPU cores on the GPU node. At 5.17 shards/s, the full corpus audit completes in ~30 seconds, making it practical to run as a mandatory pre-training gate before every GPU allocation.
+**`config/workers: 48`** - The audit used all available CPU cores on the GPU node. At 5.17 shards/s, the full corpus audit completes in ~30 seconds, making it practical to run as a mandatory pre-training gate before every GPU allocation.
 
-**`config/strict_encoding: False`** — Lenient encoding mode was used (`errors="replace"`). Zero decode errors were recorded, confirming no byte-level corruption exists in the corpus. A `--strict-encoding` pass can be added for additional byte-integrity assurance.
+**`config/strict_encoding: False`** - Lenient encoding mode was used (`errors="replace"`). Zero decode errors were recorded, confirming no byte-level corruption exists in the corpus. A `--strict-encoding` pass can be added for additional byte-integrity assurance.
 
-**4 W&B artifacts synced** — The `DatasetHealth` JSON, git SHA of the audit script, resolved advisory policy, and per-field contamination Table are permanently stored as a W&B artifact. Any future researcher can download the exact data-health snapshot to verify the corpus state at the moment of ingestion.
+**4 W&B artifacts synced** - The `DatasetHealth` JSON, git SHA of the audit script, resolved advisory policy, and per-field contamination Table are permanently stored as a W&B artifact. Any future researcher can download the exact data-health snapshot to verify the corpus state at the moment of ingestion.
 
-**Zero `nan_fields` entries** — No schema fields carry contamination. This is the strongest possible signal: even advisory fields (`case_name`, `raw_text`, `cleaning_flags`) are clean, ruling out any silent gradient poisoning from non-finite embeddings in downstream attention layers.
+**Zero `nan_fields` entries** - No schema fields carry contamination. This is the strongest possible signal: even advisory fields (`case_name`, `raw_text`, `cleaning_flags`) are clean, ruling out any silent gradient poisoning from non-finite embeddings in downstream attention layers.
 
-**Research implication** — If a model trained on this corpus later exhibits loss spikes or elevated perplexity, the W&B telemetry run `jnqc9vo4` provides a provable baseline: the data was 100% clean at ingestion. The anomaly must originate downstream (model architecture, optimizer, tokenizer, or sampling), not in the pre-training corpus.
+**Research implication** - If a model trained on this corpus later exhibits loss spikes or elevated perplexity, the W&B telemetry run `jnqc9vo4` provides a provable baseline: the data was 100% clean at ingestion. The anomaly must originate downstream (model architecture, optimizer, tokenizer, or sampling), not in the pre-training corpus.
 
 ### Telemetry capabilities
 
@@ -1361,7 +1361,7 @@ uv run python -m src.dataset_probe \
 
 ### Console Output
 ```
-[dataset_probe] Full scan mode — loading all records from data/raw/cl_federal_appellate_bulk via Polars ...
+[dataset_probe] Full scan mode - loading all records from data/raw/cl_federal_appellate_bulk via Polars ...
 [dataset_probe] Full scan loaded 1465484 records.
 [dataset_probe] Subset to 1465484 records.
 [dataset_probe] Gate: schema validation ...
@@ -1384,11 +1384,11 @@ Token indices sequence length is longer than the specified maximum sequence leng
 |------|-------------|----------|--------|--------------------|
 | `schema` | Field presence, types, ranges, `text_length` consistency | Blocking | ✅ PASSED | All 1,456,611 records carry every required field with correct types and internally consistent metadata. No silent coercion risk in downstream vector indexing. |
 | `A7` | Text source breakdown (`plain_text`, `html_with_citations`, etc.) | Blocking | ✅ PASSED | Source distribution is dominated by known, parser-compatible formats. No unexpected format drift that would corrupt chunk boundaries or citation extraction. |
-| `A8` | Text length distribution (p5–p95, % below 1,500-char threshold) | Blocking | ✅ PASSED | Fewer than 25% of opinions fall below the provisional minimum length. Long-tail length distribution is healthy — sufficient text density for meaningful embedding. |
-| `A9` | Citation count distribution (zero-citation rate) | Advisory | ✅ PASSED | Fewer than 20% of opinions carry zero citations. High citation density across the corpus is the primary signal that grounded retrieval is possible — directly reducing hallucination risk. |
-| `A12` | Citation anchor survival (regex anchor vs. stored `citation_count`) | Blocking | ✅ PASSED | Legal citation patterns survive the full ingestion pipeline. Retrieval queries anchored to case citations (`123 F.3d 456`) will find their source documents — critical for citation-grounded RAG. |
+| `A8` | Text length distribution (p5–p95, % below 1,500-char threshold) | Blocking | ✅ PASSED | Fewer than 25% of opinions fall below the provisional minimum length. Long-tail length distribution is healthy - sufficient text density for meaningful embedding. |
+| `A9` | Citation count distribution (zero-citation rate) | Advisory | ✅ PASSED | Fewer than 20% of opinions carry zero citations. High citation density across the corpus is the primary signal that grounded retrieval is possible - directly reducing hallucination risk. |
+| `A12` | Citation anchor survival (regex anchor vs. stored `citation_count`) | Blocking | ✅ PASSED | Legal citation patterns survive the full ingestion pipeline. Retrieval queries anchored to case citations (`123 F.3d 456`) will find their source documents - critical for citation-grounded RAG. |
 | `B6` | Text entropy distribution (Shannon entropy on whitespace tokens) | Advisory | ✅ PASSED | Entropy is consistent with rich, information-dense legal prose. Low-entropy outliers (boilerplate, repeated headers) are within acceptable bounds and will not dominate embedding space. |
-| `A11` | Tokenizer-aware chunk count (BAAI/bge-m3, 1024-subword chunks, 128 overlap) | Blocking | ✅ PASSED | Median chunk count per document confirms the corpus will produce multi-chunk embeddings. **Warning observed:** at least one opinion tokenises to 19,544 subwords — 2.4× the 8,192-token context window. Stage 3 must enforce citation-aware recursive chunking to prevent silent truncation of holdings at document tail. |
+| `A11` | Tokenizer-aware chunk count (BAAI/bge-m3, 1024-subword chunks, 128 overlap) | Blocking | ✅ PASSED | Median chunk count per document confirms the corpus will produce multi-chunk embeddings. **Warning observed:** at least one opinion tokenises to 19,544 subwords - 2.4× the 8,192-token context window. Stage 3 must enforce citation-aware recursive chunking to prevent silent truncation of holdings at document tail. |
 | `A13` | Sentence density (spaCy `en_core_web_sm` sentenciser, min 20 sentences) | Blocking | ✅ PASSED | The majority of opinions contain sufficient sentence-level structure for sentence-window retrieval and reranking strategies. Sparse-sentence outliers are within tolerance and will not degrade recall. |
 
 **FAILED_BLOCKING:** none
@@ -1409,9 +1409,9 @@ Token indices sequence length is longer than the specified maximum sequence leng
 
 Two surgical repair passes were applied before this run to eliminate the only two population-scale data quality issues found during audit:
 
-1. **NaN repair** (`scripts/audit_jsonl_nan.py --fix`): 25,793 bare `NaN` tokens in the `case_name` field across 135/159 shards were replaced with `null`. Root cause: upstream `extract.py` used Python's `json.dumps` default `allow_nan=True`, producing tokens illegal under strict JSON parsers (Polars tape parser). All affected records are fully recoverable — `case_name` is advisory metadata, not required for chunking or retrieval.
+1. **NaN repair** (`scripts/audit_jsonl_nan.py --fix`): 25,793 bare `NaN` tokens in the `case_name` field across 135/159 shards were replaced with `null`. Root cause: upstream `extract.py` used Python's `json.dumps` default `allow_nan=True`, producing tokens illegal under strict JSON parsers (Polars tape parser). All affected records are fully recoverable - `case_name` is advisory metadata, not required for chunking or retrieval.
 
-2. **text_length repair** (`scripts/repair_text_length.py`): 3 records (IDs: 4659133, 3034079, 2810519) had stale `text_length` metadata where stored values exceeded actual `len(text)` by 216–276 characters — consistent with a post-ingestion whitespace normalisation pass that ran after length was first recorded. Repaired by recomputing `text_length = len(text)` in-place with `.bak` backup.
+2. **text_length repair** (`scripts/repair_text_length.py`): 3 records (IDs: 4659133, 3034079, 2810519) had stale `text_length` metadata where stored values exceeded actual `len(text)` by 216–276 characters - consistent with a post-ingestion whitespace normalisation pass that ran after length was first recorded. Repaired by recomputing `text_length = len(text)` in-place with `.bak` backup.
 
 ### Verdict
 
@@ -1465,9 +1465,9 @@ uv run pre-commit run --all-files
 ```
 ## Coverage Enforcement
 80% per-file minimum enforced at three levels:
-- **pre-push hook** — blocks push if below threshold
-- **CI pipeline** — `unit-tests` job with coverage report
-- **pyproject.toml** — `fail_under = 80`
+- **pre-push hook** - blocks push if below threshold
+- **CI pipeline** - `unit-tests` job with coverage report
+- **pyproject.toml** - `fail_under = 80`
 ## CI/CD Pipeline
 | Job | Trigger | Purpose |
 |---|---|---|
@@ -1500,9 +1500,9 @@ Key protections:
 - **CycloneDX SBOM** generated each CI run → `logs/sbom.json`
 ## Reproducibility
 All experiments are reproducible via:
-- `uv.lock` — pinned dependency snapshot
-- `src/repro.py` — seeds + deterministic flags
-- `logs/environment_manifest.json` — full provenance (git SHA, hardware, freeze snapshot, SLURM job)
+- `uv.lock` - pinned dependency snapshot
+- `src/repro.py` - seeds + deterministic flags
+- `logs/environment_manifest.json` - full provenance (git SHA, hardware, freeze snapshot, SLURM job)
 ## Git Workflow (GitFlow)
 ```
 main (production) ← develop (integration) ← feature/* (work)
@@ -1520,10 +1520,10 @@ The 500K cap on LePaRD ingestion was a conservative compute hedge made at projec
 ### Problems with Keeping 500K
 
 **1. Corpus asymmetry.**
-The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* — they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Hit@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
+The project evaluates retrievers against 1.4M CourtListener opinions but only 500K LePaRD retrieval pairs. LePaRD's ground-truth (context, cited passage) pairs are the *evaluation backbone* - they define what counts as a correct retrieval. At 500K pairs against 1.4M candidate opinions, Hit@k and NDCG@10 scores will be systematically underestimated because ground-truth coverage is thin relative to the search space.
 
 **2. Retrieval evaluation validity.**
-LePaRD contains 4M+ ground-truth retrieval pairs. At 500K, the project uses approximately 12% of the available evaluation signal. For a comparative study of five architecture classes, more ground-truth pairs directly produce more statistically reliable MRR and NDCG@10 estimates — especially for the weaker baselines (TF-IDF, CNN) where score variance is high and confidence intervals are wide.
+LePaRD contains 4M+ ground-truth retrieval pairs. At 500K, the project uses approximately 12% of the available evaluation signal. For a comparative study of five architecture classes, more ground-truth pairs directly produce more statistically reliable MRR and NDCG@10 estimates - especially for the weaker baselines (TF-IDF, CNN) where score variance is high and confidence intervals are wide.
 
 **3. Fine-tuning data starvation.**
 The CNN and BiLSTM encoders are trained on LePaRD contrastive pairs using InfoNCE loss. At 500K training pairs, both architectures are likely underfit relative to what an L4 can saturate. The Transformer bi-encoder (Legal-BERT) similarly benefits from more positive/negative pairs for `MultipleNegativesRankingLoss`. Capping training data at 500K artificially limits the quality ceiling of every architecture under comparison, which undermines the comparative validity of the study.
@@ -1557,11 +1557,11 @@ output_file: lepard_train_{cap}_rev0194f95.jsonl
 ---
 
 ```markdown
-## `scripts/ingest_lepard.py` — LePaRD Dataset Ingestion Pipeline
+## `scripts/ingest_lepard.py` - LePaRD Dataset Ingestion Pipeline
 
 ### Role in the RAG Pipeline
 
-This script is **Stage 1: Raw Data Acquisition** in the hallucination-reduction legal RAG pipeline. It is the single authoritative boundary between the HuggingFace Hub and the local corpus. All downstream components — the NaN audit gate, embedding generation, vector indexing, and the RAG retriever — depend on the artifact this script produces being byte-exact, reproducible, and provenance-verified.
+This script is **Stage 1: Raw Data Acquisition** in the hallucination-reduction legal RAG pipeline. It is the single authoritative boundary between the HuggingFace Hub and the local corpus. All downstream components - the NaN audit gate, embedding generation, vector indexing, and the RAG retriever - depend on the artifact this script produces being byte-exact, reproducible, and provenance-verified.
 
 ```
 HuggingFace Hub (rmahari/LePaRD, ACL 2024)
@@ -1598,8 +1598,8 @@ The cap was revised from 500K → 4M rows for three reasons:
 | Artifact | Size | Rows | SHA256 (first 8) |
 |---|---|---|---|
 | `lepard_train_4000000_rev0194f95.jsonl` | 5.4 GB | 4,000,000 | `see .sha256` |
-| `lepard_train_4000000_rev0194f95.jsonl.sha256` | 65 B | — | sidecar |
-| `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | — | provenance |
+| `lepard_train_4000000_rev0194f95.jsonl.sha256` | 65 B | - | sidecar |
+| `lepard_train_4000000_rev0194f95.jsonl.manifest.json` | 450 B | - | provenance |
 
 DVC remote: `s3://cs1090b-hallucinationlegalragchatbots/dvc` (region: `us-east-2`)
 DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
@@ -1608,15 +1608,15 @@ DVC tracking file: `lepard_4M.dvc` (committed to `feature/data-acquisition`)
 
 | Capability | Detail |
 |---|---|
-| **Pinned revision** | Validates 40-char lowercase hex SHA before any network call — mutable refs like `main` are rejected |
+| **Pinned revision** | Validates 40-char lowercase hex SHA before any network call - mutable refs like `main` are rejected |
 | **Idempotent** | O(1) sidecar-presence fast path; skips re-download if artifact already exists |
 | **Self-healing** | Restores missing sidecar + manifest by recomputing SHA256 from disk bytes on next run |
-| **Atomic write** | Unique `tmp → rename` — no partial artifacts on failure or concurrent runs |
-| **Provenance bundle** | Writes `.jsonl` + `.sha256` + `.manifest.json` together — no crash window |
+| **Atomic write** | Unique `tmp → rename` - no partial artifacts on failure or concurrent runs |
+| **Provenance bundle** | Writes `.jsonl` + `.sha256` + `.manifest.json` together - no crash window |
 | **Strict audit** | `--verify-only` fails closed: checks digest, sidecar, revision, dataset, split, cap, rows\_written, sha256 |
-| **Network resilience** | Retries initial HF load up to 3× on `OSError` with jitter (`wait_random_exponential`) — thundering-herd safe on shared clusters |
+| **Network resilience** | Retries initial HF load up to 3× on `OSError` with jitter (`wait_random_exponential`) - thundering-herd safe on shared clusters |
 | **Unicode-safe** | `ensure_ascii=False` preserves legal symbols (§, ¶, em-dash) critical for embedding fidelity |
-| **NaN pass-through** | NaN rows are not filtered here — `audit_jsonl_nan.py` is the downstream gate |
+| **NaN pass-through** | NaN rows are not filtered here - `audit_jsonl_nan.py` is the downstream gate |
 | **DVC + S3** | Artifact versioned via DVC and pushed to S3 for reproducible pulls across machines |
 
 ### Provenance Manifest (actual output)
@@ -1652,19 +1652,19 @@ output_file: lepard_train_{cap}_rev0194f95.jsonl
 ### Demo CLI Commands (Friday TF Session)
 
 ```bash
-# 1. CI smoke test — downloads 1K rows, writes full artifact bundle, runs in ~15s
+# 1. CI smoke test - downloads 1K rows, writes full artifact bundle, runs in ~15s
 uv run python scripts/ingest_lepard.py --smoke
 
-# 2. Preflight dry-run — counts rows without writing any file
+# 2. Preflight dry-run - counts rows without writing any file
 uv run python scripts/ingest_lepard.py --dry-run
 
-# 3. Full 4M ingest — downloads 5.4GB, writes JSONL + sidecar + manifest
+# 3. Full 4M ingest - downloads 5.4GB, writes JSONL + sidecar + manifest
 uv run python scripts/ingest_lepard.py
 
-# 4. Strict provenance audit — fails closed on any mismatch
+# 4. Strict provenance audit - fails closed on any mismatch
 uv run python scripts/ingest_lepard.py --verify-only
 
-# 5. Force re-ingest — purges stale artifacts and rewrites from scratch
+# 5. Force re-ingest - purges stale artifacts and rewrites from scratch
 uv run python scripts/ingest_lepard.py --force
 
 # 6. Version and push artifact to S3 via DVC
@@ -1688,7 +1688,7 @@ The pipeline is covered by 79 pytest tests including:
 - **Idempotency**: second run is always a no-op (Hypothesis property-based)
 - **Strict verify**: fails closed on missing sidecar, missing manifest, tampered SHA256, cap mismatch, rows\_written mismatch, revision mismatch
 - **Self-heal**: restores full artifact bundle; preserves original ingestion timestamp; marks `provenance_reconstructed=True`
-- **Repair**: recomputes SHA256 from disk bytes — never trusts stale sidecar
+- **Repair**: recomputes SHA256 from disk bytes - never trusts stale sidecar
 - **Retry**: `wait_none()` override confirms 3-attempt retry without sleep in CI
 - **Unicode**: legal symbols preserved end-to-end through `ensure_ascii=False`
 - **Atomic write**: no `.tmp` files left after successful or failed write
@@ -1697,7 +1697,7 @@ The pipeline is covered by 79 pytest tests including:
 
 ---
 
-## `src/lepard_cl_compat.py` — LePaRD ↔ CourtListener Compatibility Audit
+## `src/lepard_cl_compat.py` - LePaRD ↔ CourtListener Compatibility Audit
 
 ### Role in the RAG Pipeline
 
@@ -1717,7 +1717,7 @@ LePaRD JSONL (Stage 1, Colab A100)         CourtListener shards (Stage 1, ODD GP
         Stage 5: encoder fine-tuning + Stage 6: Tier A retrieval evaluation
 ```
 
-Without this audit, training on LePaRD pairs whose endpoints are absent from CourtListener teaches the retriever a latent space it cannot use at inference time — guaranteed silent retrieval failures and hallucination at generation time.
+Without this audit, training on LePaRD pairs whose endpoints are absent from CourtListener teaches the retriever a latent space it cannot use at inference time - guaranteed silent retrieval failures and hallucination at generation time.
 
 ### Key Capabilities
 
@@ -1725,11 +1725,11 @@ Without this audit, training on LePaRD pairs whose endpoints are absent from Cou
 |---|---|
 | **Cross-machine reproducibility** | Runs identically on Google Colab Pro A100 and Harvard ODD GPU Cluster L4 from committed fixtures (`tests/fixtures/lepard_sample_1k.jsonl`, `cl_ids.txt.gz`, `cl_matched_courts.json`) |
 | **Strict input validation** | LePaRD: rejects floats, bools, strings, missing keys with 1-based line context. CourtListener ids: rejects sign chars, leading zeros, zero, non-decimal with line context |
-| **Pure analysis core** | `build_report(pairs, cl_ids, court_map)` is side-effect-free and trivially unit-testable — no filesystem mocking required |
+| **Pure analysis core** | `build_report(pairs, cl_ids, court_map)` is side-effect-free and trivially unit-testable - no filesystem mocking required |
 | **Deterministic deduplication** | `extract_valid_pairs` uses `dict.fromkeys` to preserve first-occurrence order across runs (byte-stable JSONL output for caching/diffing) |
 | **Deterministic court tie-breaking** | Court distribution sorted by count desc, then court_id asc |
-| **CI gate** | `--min-usable-pct` exits non-zero if usable pair percentage falls below threshold — blocks downstream training jobs on data drift |
-| **Gate-before-export policy** | Failed `--min-usable-pct` runs do NOT write the export file — guarantees no degraded data leaks into training loops |
+| **CI gate** | `--min-usable-pct` exits non-zero if usable pair percentage falls below threshold - blocks downstream training jobs on data drift |
+| **Gate-before-export policy** | Failed `--min-usable-pct` runs do NOT write the export file - guarantees no degraded data leaks into training loops |
 | **Gold-pair export** | `--write-valid-pairs path.jsonl` writes deduplicated pairs where both endpoints exist in CL, ready for direct DataLoader consumption |
 | **Stable JSON output** | `--json` emits sorted-key, unicode-preserving output for regression diffs and W&B artifact storage |
 | **TDD-locked** | 56 pytest tests including Hypothesis property-based invariants, gate-policy tests, fixture regression test asserting exact live-investigation numbers (512/70/454/13) |
@@ -1776,47 +1776,47 @@ LePaRD <-> CourtListener compatibility analysis
 
 ### What Each Number Means
 
-#### Section [1] — ID-Level Overlap
+#### Section [1] - ID-Level Overlap
 
 This section answers: *do the two datasets even share the same identifier space?* It treats every `source_id` and `dest_id` as a flat set of opinion identifiers and intersects them against the CourtListener id universe.
 
-- **`LePaRD unique ids: 512`** — The 1,000-row LePaRD sample contains exactly 512 distinct opinion identifiers when source and destination columns are flattened together. The fact that 1,000 rows collapse to 512 unique ids already signals heavy duplication: the same opinions appear repeatedly as either citing or cited documents (this is expected in legal corpora — landmark precedents are cited many times).
+- **`LePaRD unique ids: 512`** - The 1,000-row LePaRD sample contains exactly 512 distinct opinion identifiers when source and destination columns are flattened together. The fact that 1,000 rows collapse to 512 unique ids already signals heavy duplication: the same opinions appear repeatedly as either citing or cited documents (this is expected in legal corpora - landmark precedents are cited many times).
 
-- **`CL unique ids: 1,456,611`** — The full CourtListener federal-appellate corpus shipped with this project contains 1.46M opinion ids. This is the "candidate pool" any retriever trained on LePaRD will eventually have to search.
+- **`CL unique ids: 1,456,611`** - The full CourtListener federal-appellate corpus shipped with this project contains 1.46M opinion ids. This is the "candidate pool" any retriever trained on LePaRD will eventually have to search.
 
-- **`Overlap: 70 (13.7% of LePaRD)`** — Of the 512 LePaRD ids, only 70 are present in the local CourtListener corpus. This is the **schema-compatibility signal**: the fact that *any* overlap exists at the integer level confirms LePaRD's `source_id`/`dest_id` columns and CourtListener's `id` column are drawn from the same id space (CourtListener opinion ids), not unrelated counters that happen to be integers. Without this confirmation, the entire compatibility analysis would be meaningless.
+- **`Overlap: 70 (13.7% of LePaRD)`** - Of the 512 LePaRD ids, only 70 are present in the local CourtListener corpus. This is the **schema-compatibility signal**: the fact that *any* overlap exists at the integer level confirms LePaRD's `source_id`/`dest_id` columns and CourtListener's `id` column are drawn from the same id space (CourtListener opinion ids), not unrelated counters that happen to be integers. Without this confirmation, the entire compatibility analysis would be meaningless.
 
-- **`LePaRD id range max: 12,419,282`** vs **`CL id range max: 11,233,407`** — LePaRD contains ids that are *larger* than the largest id in your CourtListener snapshot. This is a temporal/snapshot signal: LePaRD was built from a CourtListener export that postdates your local download, so some opinions referenced in LePaRD simply did not exist yet when your CL snapshot was taken.
+- **`LePaRD id range max: 12,419,282`** vs **`CL id range max: 11,233,407`** - LePaRD contains ids that are *larger* than the largest id in your CourtListener snapshot. This is a temporal/snapshot signal: LePaRD was built from a CourtListener export that postdates your local download, so some opinions referenced in LePaRD simply did not exist yet when your CL snapshot was taken.
 
-- **`LePaRD ids > CL max: 90 (heuristic)`** — Quantifies the previous point: 90 of the 512 LePaRD ids (17.6%) lie above your CL id ceiling. The "heuristic" qualifier is deliberate scientific humility — id-range comparisons are a *suggestion* of snapshot drift, not proof, because id allocation is not strictly monotonic across all CourtListener ingestion paths. Treat this as "investigate further if you want full coverage", not "definitive missing data count".
+- **`LePaRD ids > CL max: 90 (heuristic)`** - Quantifies the previous point: 90 of the 512 LePaRD ids (17.6%) lie above your CL id ceiling. The "heuristic" qualifier is deliberate scientific humility - id-range comparisons are a *suggestion* of snapshot drift, not proof, because id allocation is not strictly monotonic across all CourtListener ingestion paths. Treat this as "investigate further if you want full coverage", not "definitive missing data count".
 
-#### Section [2] — Pair-Level Overlap (the metric that actually matters)
+#### Section [2] - Pair-Level Overlap (the metric that actually matters)
 
 This is the section that decides whether LePaRD is usable as **gold labels for retrieval training**. A retriever learns from `(query, correct_passage)` pairs. For a LePaRD pair to be usable, **both** the source opinion (which provides the query context) **and** the destination opinion (which is the gold passage to retrieve) must exist in the CourtListener corpus the retriever will actually search at inference time.
 
-- **`Total rows: 1,000`** — Raw row count from the LePaRD JSONL fixture, before deduplication.
+- **`Total rows: 1,000`** - Raw row count from the LePaRD JSONL fixture, before deduplication.
 
-- **`Unique pairs: 454`** — After deduplicating identical `(source_id, dest_id)` tuples, only 454 distinct pairs remain. The 546 dropped rows are exact duplicates (same citation appearing in multiple LePaRD passages or extraction passes). Deduplication matters here because counting the same pair multiple times would inflate retrieval metrics during evaluation.
+- **`Unique pairs: 454`** - After deduplicating identical `(source_id, dest_id)` tuples, only 454 distinct pairs remain. The 546 dropped rows are exact duplicates (same citation appearing in multiple LePaRD passages or extraction passes). Deduplication matters here because counting the same pair multiple times would inflate retrieval metrics during evaluation.
 
-- **`Unique sources / dests: 58 / 454`** — There are 58 distinct *citing* opinions but 454 distinct *cited* opinions. The huge ratio (58 vs 454) tells you the sample is *source-skewed*: a small number of source opinions cite many different precedents. This is normal for legal opinions (a single court ruling can cite dozens of prior cases) but worth noting for sampling analysis.
+- **`Unique sources / dests: 58 / 454`** - There are 58 distinct *citing* opinions but 454 distinct *cited* opinions. The huge ratio (58 vs 454) tells you the sample is *source-skewed*: a small number of source opinions cite many different precedents. This is normal for legal opinions (a single court ruling can cite dozens of prior cases) but worth noting for sampling analysis.
 
-- **`Both endpoints in CL: 13 (2.9%)  <- USABLE GOLD`** — **This is the headline number.** Only 13 of the 454 unique pairs have *both* the source and destination opinion present in your CourtListener corpus. These 13 pairs are the *only* ones that can serve as supervised training signal: the retriever can be given a query derived from the source opinion and asked to retrieve the destination opinion from the CL index, and that retrieval will physically be possible. The remaining 441 pairs are unusable because at least one endpoint is absent from the search space.
+- **`Both endpoints in CL: 13 (2.9%)  <- USABLE GOLD`** - **This is the headline number.** Only 13 of the 454 unique pairs have *both* the source and destination opinion present in your CourtListener corpus. These 13 pairs are the *only* ones that can serve as supervised training signal: the retriever can be given a query derived from the source opinion and asked to retrieve the destination opinion from the CL index, and that retrieval will physically be possible. The remaining 441 pairs are unusable because at least one endpoint is absent from the search space.
 
-- **`Source only in CL: 105`** — 105 pairs have the citing opinion in CL but not the cited precedent. These are "dangling citations": you have the question but not the answer document. Useless for end-to-end retrieval evaluation.
+- **`Source only in CL: 105`** - 105 pairs have the citing opinion in CL but not the cited precedent. These are "dangling citations": you have the question but not the answer document. Useless for end-to-end retrieval evaluation.
 
-- **`Dest only in CL: 40`** — 40 pairs have the cited precedent but not the citing opinion. You have the answer but not the natural query that should retrieve it. Useless without synthetic query generation.
+- **`Dest only in CL: 40`** - 40 pairs have the cited precedent but not the citing opinion. You have the answer but not the natural query that should retrieve it. Useless without synthetic query generation.
 
-- **`Neither in CL: 296`** — 296 pairs (65% of unique pairs) have neither endpoint in CL. This dominant bucket is the most diagnostic: it tells you LePaRD covers federal courts your CL filter excludes (district court, bankruptcy, SCOTUS), as Section [3] confirms.
+- **`Neither in CL: 296`** - 296 pairs (65% of unique pairs) have neither endpoint in CL. This dominant bucket is the most diagnostic: it tells you LePaRD covers federal courts your CL filter excludes (district court, bankruptcy, SCOTUS), as Section [3] confirms.
 
-**Extrapolation:** If the 2.9% rate holds across the full 4M-row LePaRD release, you would get roughly **116,000 usable gold pairs** — comfortably within the README §Tier A target of 10K–50K retrieval evaluation queries, but far below the 4M ceiling LePaRD advertises.
+**Extrapolation:** If the 2.9% rate holds across the full 4M-row LePaRD release, you would get roughly **116,000 usable gold pairs** - comfortably within the README §Tier A target of 10K–50K retrieval evaluation queries, but far below the 4M ceiling LePaRD advertises.
 
-#### Section [3] — Court Distribution of Matched CL IDs
+#### Section [3] - Court Distribution of Matched CL IDs
 
 This section explains *why* the usability rate is what it is by showing which courts the surviving matched ids actually come from.
 
-- **`Total matched with known court: 70`** — All 70 matched ids (the same 70 from the id-level overlap in Section 1) have an entry in the `cl_matched_courts.json` fixture, so every match is fully attributed.
+- **`Total matched with known court: 70`** - All 70 matched ids (the same 70 from the id-level overlap in Section 1) have an entry in the `cl_matched_courts.json` fixture, so every match is fully attributed.
 
-- **`ca9: 15, ca5: 11, ca4: 10, ca11: 5, ca8: 5, ca3: 4, cadc: 4, cafc: 4, ca1: 3, ca10: 3, ca6: 3, ca2: 2, ca7: 1`** — Every matched id is from a US federal **circuit court of appeals**: `caN` = Nth Circuit (ca1 = First Circuit, ca9 = Ninth Circuit, etc.), `cadc` = DC Circuit, `cafc` = Federal Circuit. The Ninth Circuit (ca9, the largest by caseload) dominates with 15 matches — proportional to its real-world citation prevalence.
+- **`ca9: 15, ca5: 11, ca4: 10, ca11: 5, ca8: 5, ca3: 4, cadc: 4, cafc: 4, ca1: 3, ca10: 3, ca6: 3, ca2: 2, ca7: 1`** - Every matched id is from a US federal **circuit court of appeals**: `caN` = Nth Circuit (ca1 = First Circuit, ca9 = Ninth Circuit, etc.), `cadc` = DC Circuit, `cafc` = Federal Circuit. The Ninth Circuit (ca9, the largest by caseload) dominates with 15 matches - proportional to its real-world citation prevalence.
 
   **Critical interpretation:** Zero district courts, zero bankruptcy courts, zero SCOTUS opinions appear in this list. That is the smoking gun that explains the 2.9% pair-level rate: **your CourtListener subset is filtered to federal appellate only**, while LePaRD draws from the full federal court hierarchy. Most LePaRD source opinions are district court rulings citing appellate precedent, so the source side of the pair systematically misses your CL corpus.
 
@@ -1827,7 +1827,7 @@ This section explains *why* the usability rate is what it is by showing which co
 | Question | Answer from this output |
 |---|---|
 | Are LePaRD and CourtListener schema-compatible? | **Yes.** They share the CourtListener opinion id space (confirmed by 70 non-trivial id matches and a clean court-distribution monoculture). |
-| Is 1K rows of LePaRD enough to train a retriever? | **No, but the audit method is.** Only 13 usable pairs from 1K rows is far too few — the fixture exists to validate the *audit*, not to train a model. Run the same audit on the full 4M-row LePaRD to get ~116K usable pairs. |
+| Is 1K rows of LePaRD enough to train a retriever? | **No, but the audit method is.** Only 13 usable pairs from 1K rows is far too few - the fixture exists to validate the *audit*, not to train a model. Run the same audit on the full 4M-row LePaRD to get ~116K usable pairs. |
 | Why is the usable rate so low? | **Federal appellate filter mismatch.** LePaRD source opinions are dominated by district courts, which your CL corpus excludes. Section [3] proves this by showing zero district court ids in the matched set. |
 | What can we do about it? | **Two options.** (a) Expand the CL corpus to include federal district courts (recovers source-side matches). (b) Filter LePaRD to appellate-source pairs only before training (keeps CL corpus small but discards data). The README §"500K LePaRD Cap Decision and Revised Scope" tracks this tradeoff. |
 | Can this output drift silently in CI? | **No.** `tests/test_lepard_cl_compat.py::TestRealFixtures::test_matches_live_investigation` asserts the exact numbers `lepard_unique_ids == 512`, `cl_unique_ids == 1_465_484`, `overlap == 70`, `unique_pairs == 454`, `both_in_cl == 13` against the committed fixtures. Any change to the fixtures or analysis logic that perturbs these numbers will fail the test. |
@@ -1879,9 +1879,9 @@ print(f"Usable gold pairs: {report.pair_overlap.both_in_cl} "
 | `scripts/prepare_compat_fixtures.py` | One-time fixture generator with `lepard` (Colab) and `cl` (cluster) subcommands |
 | `scripts/demo_lepard_cl_compat.py` | TF demo runner with narrative + interpretation; reproduces the cross-machine investigation in <1 second |
 | `tests/test_lepard_cl_compat.py` | 56 tests: loaders, pure analysis, Hypothesis property invariants, CLI gate, deterministic ordering, real-fixture regression |
-| `tests/fixtures/lepard_sample_1k.jsonl` | 1,000 LePaRD rows (1.4 MB) — committed |
-| `tests/fixtures/cl_ids.txt.gz` | 1,456,611 CL opinion ids (3.1 MB gzipped) — committed |
-| `tests/fixtures/cl_matched_courts.json` | 70 matched id → court_id entries (1.4 KB) — committed |
+| `tests/fixtures/lepard_sample_1k.jsonl` | 1,000 LePaRD rows (1.4 MB) - committed |
+| `tests/fixtures/cl_ids.txt.gz` | 1,456,611 CL opinion ids (3.1 MB gzipped) - committed |
+| `tests/fixtures/cl_matched_courts.json` | 70 matched id → court_id entries (1.4 KB) - committed |
 
 ---
 
@@ -1911,11 +1911,11 @@ This project uses two distinct reproducibility strategies for its two core datas
 | **Shards** | 159 × `shard_NNNN.jsonl` | 10,000 records/shard (last shard partial) |
 | **Opinions** | 1,456,611 extracted | From 10,682,555 raw records scanned |
 | **Filter** | Federal appellate only | ca1–ca11, cadc, cafc |
-| **DVC tracked** |  **No** | Intentional — do not expect a `cl_federal_appellate_bulk.dvc` file |
+| **DVC tracked** |  **No** | Intentional - do not expect a `cl_federal_appellate_bulk.dvc` file |
 | **S3 remote** |  Not in project S3 bucket | Stays in CourtListener's public S3 |
 | **Provenance** | `manifest.json` (schema v2) + `checkpoint.json` | Git SHA `780ff292`, Python 3.11.9, shard config, court IDs, ingestion stats |
 | **Reproduce on new machine** | `uv run python scripts/bulk_download.py` at pinned git SHA | Re-runs deterministic ingestion against CourtListener public S3 |
-| **Why no DVC** | (1) Reproducible from upstream public source — no need to duplicate bytes in project S3. (2) Avoids 43 GB storage cost in project bucket. (3) Avoids gitignore-negation complexity for 159 nested `.dvc` pointers. (4) Manifest-based provenance is sufficient: git SHA + config + checkpoint stats lock the ingestion exactly. |
+| **Why no DVC** | (1) Reproducible from upstream public source - no need to duplicate bytes in project S3. (2) Avoids 43 GB storage cost in project bucket. (3) Avoids gitignore-negation complexity for 159 nested `.dvc` pointers. (4) Manifest-based provenance is sufficient: git SHA + config + checkpoint stats lock the ingestion exactly. |
 
 ### Quick Reference: Reproduction Commands
 
@@ -1959,29 +1959,29 @@ Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored
 
 | Cell | Direct | Transitive (via pipeline) |
 |---|---|---|
-| 3 | repro, environment, timer | — |
-| 4 | config, s3_discovery, bulk_download | — |
+| 3 | repro, environment, timer | - |
+| 4 | config, s3_discovery, bulk_download | - |
 | 5 | config, pipeline, exceptions, timer | manifest, s3_discovery, bulk_download, filter_chain, extract, validation, schemas |
-| 6 | dataset_probe, timer | — |
-| 7 | scripts/ingest_lepard.py | — |
-| 8 | lepard_cl_compat | — |
-| 9 | scripts/audit_jsonl_nan.py | — |
+| 6 | dataset_probe, timer | - |
+| 7 | scripts/ingest_lepard.py | - |
+| 8 | lepard_cl_compat | - |
+| 9 | scripts/audit_jsonl_nan.py | - |
 
-**Not called in notebook (scope mismatch — not data pipeline):**
+**Not called in notebook (scope mismatch - not data pipeline):**
 
 | Module | Belongs to stage |
 |---|---|
-| `src/dataset_config.py` | Stage 5 (training) — LePaRD loader config |
-| `src/dataset_loader.py` | Stage 5 (training) — HF dataset loader |
-| `src/row_validator.py` | Stage 5 — used by dataset_loader |
-| `src/row_normalizer.py` | Stage 5 — used by dataset_loader |
-| `src/lightning_datamodule.py` | Stage 5 — PyTorch DataModule |
-| `src/model_loader.py` | Stage 5/6 — BGE-M3 loader |
-| `src/split.py` | Stage 5 — train/val/test splits |
-| `src/hf_export.py` | Stage 7 — HF Hub publish |
-| `src/wandb_logger.py` | Stage 7 — W&B telemetry |
-| `src/drift_check.py` | setup.sh tier 4/5 — not notebook |
-| `src/manifest_collector.py` | setup.sh manifest — not notebook |
+| `src/dataset_config.py` | Stage 5 (training) - LePaRD loader config |
+| `src/dataset_loader.py` | Stage 5 (training) - HF dataset loader |
+| `src/row_validator.py` | Stage 5 - used by dataset_loader |
+| `src/row_normalizer.py` | Stage 5 - used by dataset_loader |
+| `src/lightning_datamodule.py` | Stage 5 - PyTorch DataModule |
+| `src/model_loader.py` | Stage 5/6 - BGE-M3 loader |
+| `src/split.py` | Stage 5 - train/val/test splits |
+| `src/hf_export.py` | Stage 7 - HF Hub publish |
+| `src/wandb_logger.py` | Stage 7 - W&B telemetry |
+| `src/drift_check.py` | setup.sh tier 4/5 - not notebook |
+| `src/manifest_collector.py` | setup.sh manifest - not notebook |
 | `scripts/ci_audit_report.py` | CI only |
 | `scripts/ci_write_env.py` | CI only |
 | `scripts/migrate_gate_instantiation.py` | one-shot migration |
@@ -1990,36 +1990,36 @@ Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored
 | `scripts/update_version_pins.py` | one-shot maintenance |
 | `scripts/audit_jsonl_nan.py` | ✓ used (Cell 9) |
 
-**Verdict:** The notebook covers the **complete data pipeline** (Stages 1–3 + readiness gates) as defined in the README. Every module relevant to data acquisition, audit, probing, and compatibility checks is called. Unused modules belong to Stage 5 (training), Stage 6 (evaluation), Stage 7 (publishing), or are CI/setup.sh/one-shot maintenance helpers — per README these are "not started" and correctly excluded from the data-pipeline notebook.
+**Verdict:** The notebook covers the **complete data pipeline** (Stages 1–3 + readiness gates) as defined in the README. Every module relevant to data acquisition, audit, probing, and compatibility checks is called. Unused modules belong to Stage 5 (training), Stage 6 (evaluation), Stage 7 (publishing), or are CI/setup.sh/one-shot maintenance helpers - per README these are "not started" and correctly excluded from the data-pipeline notebook.
 
 ---
 ## Google Colab notebook code cell console output
 
-**Cell 1 — Bootstrap interpretation:**
+**Cell 1 - Bootstrap interpretation:**
 
 Repo cloned, uv installed Python 3.11.9, `uv sync` resolved the locked dependency tree, and version verification confirmed the four anchor libraries loaded at their pinned versions. Total: 73.5s (cold start).
 
 **Pinned versions observed:**
 - Python 3.11.9
 - numpy 1.26.4 (pre-2.0, avoids ABI breaks with torch 2.0.1)
-- torch 2.0.1+cu117 (CUDA 11.7 build — matches Harvard ODD cluster toolchain)
+- torch 2.0.1+cu117 (CUDA 11.7 build - matches Harvard ODD cluster toolchain)
 - transformers 4.41.2 (compatible with bge-m3 tokenizer used by Gate A11)
 
 **Implications for data acquisition stage:**
 
 1. **Reproducibility baseline established.** Every subsequent cell runs against this exact version set via `.venv/bin/python` subprocesses, so Colab's preinstalled (mismatched) torch/numpy/transformers cannot leak in. This is the foundation for the 303-contract-test guarantee in `src.dataset_probe`.
 
-2. **Cross-platform parity confirmed.** Same torch 2.0.1+cu117 and transformers 4.41.2 the Harvard ODD L4 node used to pre-process the 2025-12-31 shards. Means any code that worked on ODD will behave identically here — critical because Cells 5/5.5/6 operate on those pre-processed shards.
+2. **Cross-platform parity confirmed.** Same torch 2.0.1+cu117 and transformers 4.41.2 the Harvard ODD L4 node used to pre-process the 2025-12-31 shards. Means any code that worked on ODD will behave identically here - critical because Cells 5/5.5/6 operate on those pre-processed shards.
 
 3. **Fast bootstrap on warm restarts.** 73.5s is cold-start; warm restarts (repo + .venv already present) drop to ~5-10s. Acceptable for iterative notebook work.
 
-4. **No findings that affect the data itself.** This cell only sets up the execution environment — it doesn't touch CL shards, LePaRD, or any manifest. Conclusions about data quality come from Cells 5-9.
+4. **No findings that affect the data itself.** This cell only sets up the execution environment - it doesn't touch CL shards, LePaRD, or any manifest. Conclusions about data quality come from Cells 5-9.
 
 Environment bootstrap clean and reproducible. No blockers for downstream data-acquisition cells.
 
 ---
 
-**Cell 2 — Environment verification:**
+**Cell 2 - Environment verification:**
 
 Reproducibility config applied, TDD environment contract passed (5/5), preflight failure-isolation gate passed (16/16), 14 pinned dependencies verified. 12.6s.
 
@@ -2034,11 +2034,11 @@ Reproducibility config applied, TDD environment contract passed (5/5), preflight
 
 2. **A100 80GB is overkill for data acquisition** (Cells 3-9 are CPU/IO bound), but necessary for Stage 5 training. Confirms the runtime can host both stages without switching hardware.
 
-3. **CUDA 11.7 runtime matches torch build exactly.** No driver/runtime mismatch — rules out a whole class of silent-failure modes (kernel launch errors, cudnn version skew) that would otherwise surface mid-probe.
+3. **CUDA 11.7 runtime matches torch build exactly.** No driver/runtime mismatch - rules out a whole class of silent-failure modes (kernel launch errors, cudnn version skew) that would otherwise surface mid-probe.
 
 4. **201.9 GB free disk.** Sufficient headroom for the 57 GB pinned CL bulk CSVs + 55 GB shards + 5.8 GB LePaRD + scratch. No risk of ENOSPC during extraction.
 
-5. **transformers 4.41.2 <4.42 pin is deliberate.** Avoids breaking changes in the 4.42 release that affect BAAI/bge-m3 tokenizer loading — the tokenizer Gate A11 uses. Ensures Cell 6 gate results match the 303 contract tests recorded in `dataset_probe`'s test suite.
+5. **transformers 4.41.2 <4.42 pin is deliberate.** Avoids breaking changes in the 4.42 release that affect BAAI/bge-m3 tokenizer loading - the tokenizer Gate A11 uses. Ensures Cell 6 gate results match the 303 contract tests recorded in `dataset_probe`'s test suite.
 
 6. **No data touched yet.** Still purely environment-layer validation. All go/no-go signals are green.
 
@@ -2046,7 +2046,7 @@ Environment is provably reproducible, hardware sufficient, all contract tests pa
 
 ---
 
-**Cell 3 — Drive mount + cl_bulk symlink:**
+**Cell 3 - Drive mount + cl_bulk symlink:**
 
 Drive mounted, symlink created, 4 CSVs verified. 21.0s.
 
@@ -2061,28 +2061,28 @@ Drive mounted, symlink created, 4 CSVs verified. 21.0s.
 
 2. **Drive space adequate but tight.** 191.8 GB free after 67.9 GB committed (CSVs + shards + LePaRD). Stage 3+ artifacts (embeddings, indices) will need budgeting.
 
-3. **Persistence confirmed.** Symlink pattern means Colab runtime resets don't lose the 61 GB — no re-download needed across sessions. Same architecture that saved the project from re-downloading after the 2026-03-31 snapshot was accidentally pulled.
+3. **Persistence confirmed.** Symlink pattern means Colab runtime resets don't lose the 61 GB - no re-download needed across sessions. Same architecture that saved the project from re-downloading after the 2026-03-31 snapshot was accidentally pulled.
 
-4. **Provenance intact.** File sizes match the original ODD copies (dockets 4.88 GB, opinions 53.70 GB) — no truncation during the rclone transfer. Safe to consume downstream.
+4. **Provenance intact.** File sizes match the original ODD copies (dockets 4.88 GB, opinions 53.70 GB) - no truncation during the rclone transfer. Safe to consume downstream.
 
 Drive wiring clean, pinned bulk data restored and verified. Cell 4's idempotent skip-if-present check will hit. Zero blockers.
 
 ---
 
-**Cell 4 — Pinned bulk CSV check:**
+**Cell 4 - Pinned bulk CSV check:**
 
 Idempotent fast-path hit. All 4 CSVs present, 0.2s total.
 
 **Implications:**
 - Snapshot pinning works: `has_pinned_snapshot=True` → no S3 discovery, no download
-- ~61 GB bulk tier ready for Cell 5's filter chain (won't actually read them — fast-path will skip)
+- ~61 GB bulk tier ready for Cell 5's filter chain (won't actually read them - fast-path will skip)
 - Cost of this gate: 200ms directory scan. Effectively free on warm runs.
 
 Pinning fix validated end-to-end. Cell 4 is now a no-op on warm starts, which was the goal. Zero blockers.
 
 ---
 
-**Cell 5 — Pipeline fast-path + contract tests:**
+**Cell 5 - Pipeline fast-path + contract tests:**
 
 Fast-path triggered. 1,465,484 cases across 159 shards verified against manifest. All 13 TDD contract tests passed. 21m 34.6s (dominated by checksum re-hashing of 55 GB shards over Drive + sampled JSON validation).
 
@@ -2095,16 +2095,16 @@ Fast-path triggered. 1,465,484 cases across 159 shards verified against manifest
 
 **Implications:**
 
-1. **Checksums are stable.** The post-Cell-5.5 checksum refresh held — every shard's current SHA-256 matches the manifest, confirming no silent mutation since last repair. Fast-path reproducible across future runs.
+1. **Checksums are stable.** The post-Cell-5.5 checksum refresh held - every shard's current SHA-256 matches the manifest, confirming no silent mutation since last repair. Fast-path reproducible across future runs.
 
-2. **13.7% retention ratio expected.** Filter chain (federal appellate only: ca1-11, cadc, cafc) keeps ~1.47M of ~10.68M scanned opinions. Ratio matches the Harvard ODD original run — no data loss from Drive transfer.
+2. **13.7% retention ratio expected.** Filter chain (federal appellate only: ca1-11, cadc, cafc) keeps ~1.47M of ~10.68M scanned opinions. Ratio matches the Harvard ODD original run - no data loss from Drive transfer.
 
 3. **All 13 circuits present.** Schema consistency + "Multiple circuits" gates pass, confirming the filter chain produced balanced court coverage, not degenerate single-circuit output.
 
 4. **Text length distribution is healthy for retrieval:**
-   - Median 6,373 chars (~1,000 words) — typical opinion length
-   - p95 43,952 chars (~7,000 words) — long-form opinions preserved, not truncated
-   - Mean >> median (12,506 vs 6,373) — right-skewed, as expected for legal text
+   - Median 6,373 chars (~1,000 words) - typical opinion length
+   - p95 43,952 chars (~7,000 words) - long-form opinions preserved, not truncated
+   - Mean >> median (12,506 vs 6,373) - right-skewed, as expected for legal text
 
 5. **21m runtime is checksum-bound, not extraction-bound.** Re-hashing 55 GB over Drive at ~45 MB/s is the floor; not optimizable without local cache.
 
@@ -2112,7 +2112,7 @@ Full data acquisition pipeline verified reproducible and consistent. Corpus read
 
 ---
 
-**Cell 5.5 — NaN repair:**
+**Cell 5.5 - NaN repair:**
 
 **Pre-repair:** 1,992 NaN lines across 9 shards (shard_0000–0007, 0009), all in `case_name` field. Verdict: REPAIRABLE. clean_pct 99.8632%.
 
@@ -2124,15 +2124,15 @@ Full data acquisition pipeline verified reproducible and consistent. Corpus read
 
 **Implications:**
 
-1. **Different contamination pattern than the 2026-03-31 run.** Earlier observed 8 contaminated shards with 19 NaN lines (shard_0040–0049 range). This 2025-12-31 snapshot has 9 shards with 1,992 NaN lines in the 0000-0009 range — ~100x more NaN entries, different shard locations. Suggests the CL upstream has been writing bare NaN in case_name for years; the pattern shifts with each snapshot's extraction ordering.
+1. **Different contamination pattern than the 2026-03-31 run.** Earlier observed 8 contaminated shards with 19 NaN lines (shard_0040–0049 range). This 2025-12-31 snapshot has 9 shards with 1,992 NaN lines in the 0000-0009 range - ~100x more NaN entries, different shard locations. Suggests the CL upstream has been writing bare NaN in case_name for years; the pattern shifts with each snapshot's extraction ordering.
 
-2. **All contamination confined to advisory field.** NaN only in `case_name` (metadata, used for display). Zero NaN in required fields (`text`, `id`, `court_id`). Retrieval quality unaffected — case_name is not part of the embedding input.
+2. **All contamination confined to advisory field.** NaN only in `case_name` (metadata, used for display). Zero NaN in required fields (`text`, `id`, `court_id`). Retrieval quality unaffected - case_name is not part of the embedding input.
 
-3. **Polars fast-path restored for all 159 shards.** Cell 6 will now load all 1,456,611 records via the memory-mapped fast path — no fallback to the slower Python JSON reader on the 9 dirty shards, no silent record drops.
+3. **Polars fast-path restored for all 159 shards.** Cell 6 will now load all 1,456,611 records via the memory-mapped fast path - no fallback to the slower Python JSON reader on the 9 dirty shards, no silent record drops.
 
-4. **Total record count reconciliation.** Manifest says 1,465,484 cases; audit counts 1,456,611 lines. Delta of 8,873 (~0.6%) is the quarantine/extraction-error records that filtered out between raw scan and final shards — expected, not a discrepancy.
+4. **Total record count reconciliation.** Manifest says 1,465,484 cases; audit counts 1,456,611 lines. Delta of 8,873 (~0.6%) is the quarantine/extraction-error records that filtered out between raw scan and final shards - expected, not a discrepancy.
 
-5. **Checksums just changed again.** Cell 6 will trigger fast-path validation in Cell 5, but since we're running forward (not re-running Cell 5), this is fine. **Important for next session**: if you re-run Cell 5 after this, refresh manifest checksums first — same issue as before.
+5. **Checksums just changed again.** Cell 6 will trigger fast-path validation in Cell 5, but since we're running forward (not re-running Cell 5), this is fine. **Important for next session**: if you re-run Cell 5 after this, refresh manifest checksums first - same issue as before.
 
 6. **Repair is idempotent-friendly.** Running Cell 5.5 a second time would audit clean → no repair → no checksum change. Self-stabilizing after the first pass.
 
@@ -2140,7 +2140,7 @@ Corpus data-quality-gate passed. All 1.46M records now Polars-readable, zero NaN
 
 ---
 
-**Cell 6 — Dataset readiness probe:**
+**Cell 6 - Dataset readiness probe:**
 
 All 8 gates PASS. 1,456,611 records loaded via Polars fast-path, 0 parse errors, 6m 55.4s.
 
@@ -2152,15 +2152,15 @@ All 8 gates PASS. 1,456,611 records loaded via Polars fast-path, 0 parse errors,
 
 1. **Polars fast-path worked end-to-end.** Zero WARNINGs, zero TapeErrors, zero parse_errors, full 1,456,611 records loaded. Confirms Cell 5.5's NaN repair eliminated the simd-json contamination across all 159 shards. Versus the pre-repair 2026-03-31 run (1,381,584 loaded, ~83,900 silently dropped), this is a 100% recovery.
 
-2. **6m 55s is ~25% faster than the 2026-03-31 run (9m 19s).** Faster because all shards take the fast path — no fallback to the Python JSON reader.
+2. **6m 55s is ~25% faster than the 2026-03-31 run (9m 19s).** Faster because all shards take the fast path - no fallback to the Python JSON reader.
 
-3. **Gate A11 warning is benign.** `Token indices sequence length is longer than 9214 > 8192` — one opinion exceeds bge-m3's 8,192 token context. This is expected (p95 text length was 43,952 chars ≈ 11k tokens). Gate A11 handles chunking internally; the warning is from the tokenizer's forward-pass heuristic, not the gate logic. Gate still PASSES.
+3. **Gate A11 warning is benign.** `Token indices sequence length is longer than 9214 > 8192` - one opinion exceeds bge-m3's 8,192 token context. This is expected (p95 text length was 43,952 chars ≈ 11k tokens). Gate A11 handles chunking internally; the warning is from the tokenizer's forward-pass heuristic, not the gate logic. Gate still PASSES.
 
-4. `passed_count: 8 / 8`, `failed_blocking: 0`, `failed_advisory: 0` — counts now derived from `report.gates` ground truth, not the unpopulated `summary` dict.
+4. `passed_count: 8 / 8`, `failed_blocking: 0`, `failed_advisory: 0` - counts now derived from `report.gates` ground truth, not the unpopulated `summary` dict.
 - **All 8 gates PASS:** schema, A7, A8, A12, A11, A13 (6 blocking) + A9, B6 (2 advisory). Corpus cleared for Stage 3.
 - **1,456,611 records** scanned via Polars full-scan, 0 parse errors.
-- **A11 tail warning:** one opinion tokenizes to 9,214 subwords (>8,192 bge-m3 limit). Known outlier — Stage 3 must enforce recursive chunking to avoid tail truncation of holdings.
-- **probe_version 2.5.12, polars 1.25.2, full_scan=True** — provenance logged.
+- **A11 tail warning:** one opinion tokenizes to 9,214 subwords (>8,192 bge-m3 limit). Known outlier - Stage 3 must enforce recursive chunking to avoid tail truncation of holdings.
+- **probe_version 2.5.12, polars 1.25.2, full_scan=True** - provenance logged.
 - **Runtime 9m 39.9s** ≈ prior 9m 29.2s. Matches expected "~9–10 min full scan."
 - This is the Go/No-Go gate. 8/8 green = corpus is structurally RAG-ready.
 
@@ -2172,7 +2172,7 @@ All 8 gates PASS. 1,456,611 records loaded via Polars fast-path, 0 parse errors,
    - A13: spaCy sentence density sufficient for chunking
    - A7: text_source distribution not degenerate
 
-**Data acquisition stage — overall conclusion:**
+**Data acquisition stage - overall conclusion:**
 
 The full pipeline is green end-to-end:
 - **61 GB** pinned CL bulk CSVs (2025-12-31 snapshot)
@@ -2187,33 +2187,33 @@ The full pipeline is green end-to-end:
 
 ---
 
-**Cell 7 — LePaRD verify-only fast-path (1m 20.0s)**
+**Cell 7 - LePaRD verify-only fast-path (1m 20.0s)**
 
 - **No download triggered.** Drive held a valid copy; `--verify-only` checked digest + sidecar + manifest and exited clean.
 - **Pinned revision confirmed:** `0194f95c3091acceab3b887c9b09ef432cf84052` (40-char SHA, mutable refs rejected).
 - **Artifact integrity verified two ways:** SHA256 digest matches `.sha256` sidecar, and manifest fields match expected (dataset, split, cap, rows_written, revision).
-- **Full artifact bundle present:** 5.78 GB JSONL + 449 B manifest + 65 B sidecar — the provenance triple that makes this reproducible across machines.
+- **Full artifact bundle present:** 5.78 GB JSONL + 449 B manifest + 65 B sidecar - the provenance triple that makes this reproducible across machines.
 - **1m 20s ≈ SHA256 over 5.78 GB on Colab disk.** Cold download would be 10–20 min from HuggingFace.
-- **4M rows available for training** — matches the revised scope (README: full 4M train split, not the old 500K cap).
+- **4M rows available for training** - matches the revised scope (README: full 4M train split, not the old 500K cap).
 - Second amortization win. Drive persistence means LePaRD is downloaded once, verified every session.
 
 ---
 
-**Cell 8 — LePaRD ↔ CL Compatibility Audit (1.2s)**
+**Cell 8 - LePaRD ↔ CL Compatibility Audit (1.2s)**
 
-- **Deterministic fixture run**, not full-scale. Numbers match the committed regression fixture exactly (512 / 1,465,484 / 70 / 454 / 13) — proves the audit tool is byte-stable across machines.
-- **Section [1] — ID space compatible:** 70/512 (13.7%) overlap confirms LePaRD and CL share the same CourtListener opinion-id namespace. Not coincidental integer collisions.
-- **Section [1] — Snapshot drift signal:** 90 LePaRD ids exceed CL's max id (12.4M vs 11.2M). LePaRD was built from a newer CL export than our local snapshot. Heuristic only.
-- **Section [2] — Headline: 13/454 (2.9%) usable gold pairs.** Both endpoints present in CL. Extrapolates to ~**116K usable pairs** at full 4M scale — comfortably inside the README Tier A target of 10K–50K eval queries.
-- **Section [2] — Loss breakdown:** 296 (65%) "neither in CL", 105 "source only", 40 "dest only." The 296 bucket is diagnostic — most LePaRD source opinions are district court rulings that our federal-appellate filter excludes.
-- **Section [3] — Smoking gun:** 100% of 70 matched ids are **circuit courts** (ca1–ca11, cadc, cafc). Zero district, zero SCOTUS. Explains why the pair rate is 2.9% — LePaRD's source distribution hits courts our corpus deliberately excludes.
-- **ca9 dominance (15/70 = 21%)** matches real-world Ninth Circuit caseload share — further evidence the id match is real, not coincidental.
-- **1.2s runtime** — pure in-memory analysis, no I/O beyond fixture load.
+- **Deterministic fixture run**, not full-scale. Numbers match the committed regression fixture exactly (512 / 1,465,484 / 70 / 454 / 13) - proves the audit tool is byte-stable across machines.
+- **Section [1] - ID space compatible:** 70/512 (13.7%) overlap confirms LePaRD and CL share the same CourtListener opinion-id namespace. Not coincidental integer collisions.
+- **Section [1] - Snapshot drift signal:** 90 LePaRD ids exceed CL's max id (12.4M vs 11.2M). LePaRD was built from a newer CL export than our local snapshot. Heuristic only.
+- **Section [2] - Headline: 13/454 (2.9%) usable gold pairs.** Both endpoints present in CL. Extrapolates to ~**116K usable pairs** at full 4M scale - comfortably inside the README Tier A target of 10K–50K eval queries.
+- **Section [2] - Loss breakdown:** 296 (65%) "neither in CL", 105 "source only", 40 "dest only." The 296 bucket is diagnostic - most LePaRD source opinions are district court rulings that our federal-appellate filter excludes.
+- **Section [3] - Smoking gun:** 100% of 70 matched ids are **circuit courts** (ca1–ca11, cadc, cafc). Zero district, zero SCOTUS. Explains why the pair rate is 2.9% - LePaRD's source distribution hits courts our corpus deliberately excludes.
+- **ca9 dominance (15/70 = 21%)** matches real-world Ninth Circuit caseload share - further evidence the id match is real, not coincidental.
+- **1.2s runtime** - pure in-memory analysis, no I/O beyond fixture load.
 - This is the go/no-go gate before Stage 4 retrieval harness. The 2.9% fixture rate is small because it's a 1K sample; the audit tooling itself is what's being demonstrated. Scaling to full 4M gives us enough gold pairs for Tier A evaluation.
 
 ---
 
-**Cell 9 — Data Quality Gate (2m 23.5s)**
+**Cell 9 - Data Quality Gate (2m 23.5s)**
 
 - **Verdict CLEAN:** 1,456,611 lines across 159 shards, 0 NaN, 0 nonfinite, 0 string sentinels, 0 decode errors, 0 contaminated shards.
 - **Independent second measurement** after Cell 6. Cell 6 proved RAG-readiness (8 gates); Cell 9 proves byte-cleanliness (strict JSON + UTF-8).
@@ -2233,3 +2233,283 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ---
 
+**Cell 10 - Corpus scale & filter impact**
+- 1,465,484 federal appellate opinions scanned; 1,459,910 survive the ≥100-char filter - only 5,574 short records (0.38%) dropped. The short-record tail is negligible, so the filter is a conservative hygiene gate, not a scope-reducing decision.
+
+**Text length distribution (linear + log-log plots)**
+- Mean 12,654 chars, median 6,292 chars → right-skewed (mean ≈ 2× median), classic long-tail legal-text shape.
+- Post-filter mean jumps to 12,701 - confirms the dropped records are all near-zero length, not meaningful opinions.
+- 8,465 opinions exceed 100K chars (hist tail overflow). At BGE-M3's 8,192-subword context, these require recursive chunking. The log-log plot shows the tail extends past 10^6 chars - consistent with the A11 probe warning in MS2 (one opinion tokenized to 19,544 subwords, ~2.4× context).
+- **Implication:** the 1024-subword chunking policy with 128-overlap is load-bearing. Without it, ~0.6% of the corpus silently loses holdings at tail truncation - exactly where legal reasoning conclusions live.
+
+**Circuit distribution**
+- Heavily imbalanced. ca5 (228,427) and ca9 (208,976) dominate; ca1 (44,313) and cadc (51,539) are ~5× smaller. Ratio top:bottom ≈ 5.2×.
+- Matches real-world federal caseload (ca9/ca5 are the largest circuits geographically and by filing volume).
+- **Implication for baseline:** naive random train/val/test splits will bias toward ca5/ca9. Stratified sampling by `court_id` (already supported in `ProbeConfig.stratify_by` per README) is required for fair retrieval eval. Per-circuit Hit@k will expose whether models overfit to dominant circuits.
+
+**Citation density (0–100 window)**
+- Mode at 0–5 citations; heavy concentration under 20; long tail visible up to 100.
+- **Implication for Tier C:** most opinions cite few precedents, but the tail carries dense-citation cases which are the high-value retrieval targets (landmark opinions that get cited repeatedly by others). A9 gate passed (<20% zero-citation), confirming Tier C citation-verification is feasible at scale.
+
+**Provenance**
+- corpus_manifest_sha + git_sha + schema_version 1.2.0 + figure_hashes all captured - every downstream metric traces back to this exact corpus state.
+
+**End-goal implications**
+1. **Retrieval fairness:** Circuit imbalance (ca5/ca9 dominance) means H1/H3 hypotheses must be tested with stratified bootstrap - un-stratified p-values will over-index on the majority circuits.
+2. **Chunking policy is non-negotiable:** the 8,465-opinion overflow tail justifies the 1024-subword + 128-overlap design choice empirically (not just theoretically).
+3. **Short-record filter is cheap insurance:** 0.38% loss is a sane trade to avoid degenerate embeddings.
+4. **Baseline training set = 1,459,910:** this is the number that goes into BM25 index construction and BGE-M3 encoding in Cells 9–10.
+5. **Slide narrative:** the EDA tells a clean story - corpus is large (1.46M), skewed but known, with a well-characterized tail that the chunking policy handles. This is exactly what MS3 asks for: EDA findings motivating downstream model-design decisions.
+
+---
+
+** Cell 11 (LePaRD × CL compatibility, full-scale):**
+
+**Pair funnel - the supervision signal**
+- 4,000,000 raw LePaRD rows → 1,812,918 unique pairs (55% dedup rate) → **47,247 usable gold pairs** (2.61% of unique).
+- The 4M → 1.8M collapse means LePaRD is heavily duplicated (same landmark precedents cited across many source passages). Expected for legal corpora; not a data defect.
+- The 1.8M → 47K collapse is the binding constraint: most LePaRD pairs reference opinions outside our federal appellate filter (district court, SCOTUS, bankruptcy).
+
+**Pair-overlap breakdown**
+- source_only: 250,120 (citing opinion in CL, cited precedent absent)
+- dest_only: 199,284 (precedent in CL, citing opinion absent - mostly district-court sources)
+- neither: 1,316,267 (73% of unique pairs - both endpoints outside scope)
+- **both_in_cl: 47,247** - the only bucket usable for supervised retrieval training/eval.
+
+**ID-space overlap**
+- 662,858 LePaRD unique ids vs 1,465,484 CL ids; 100,285 shared (15.13% of LePaRD, 6.8% of CL).
+- Confirms both datasets draw from the CourtListener opinion-id namespace (not coincidental integer collision - the circuit monoculture in the court distribution proves this).
+
+**Court distribution of matched ids**
+- ca5 (17,031) and ca9 (13,847) dominate - matches the CL corpus skew seen in Cell 5's circuit_distribution, and real-world caseload. Zero district courts, zero SCOTUS → confirms the 2.61% usability rate is explained entirely by the federal-appellate filter boundary, not by data-quality issues.
+
+**End-goal implications**
+1. **Tier A budget is tight, not comfortable.** README Tier A target: 10K–50K eval queries. We have 47,247 - below the 50K upper bound. Headroom is essentially zero at the ceiling; the project should plan Tier A evaluation at the full 47K rather than sampling a smaller subset, and NOT hold out more than ~5K–10K for validation.
+
+2. **Training vs evaluation tradeoff.** 47,247 usable pairs is the *total* supervised budget - must be split across train/val/test. Recommended split given scarcity: 40K train / 2K val / 5K test. BGE-M3 fine-tuning on 40K pairs is feasible (BAAI's MultipleNegativesRankingLoss converges on this scale) but far below the 4M training cap the revised scope targeted. **The MS3 baselines should therefore be zero-shot** (BM25 needs no training; BGE-M3 used off-the-shelf with BAAI checkpoint) and report fine-tuning as a future direction.
+
+3. **Statistical power for H1/H3.** At N=5K test pairs, paired bootstrap (B=10K, per README) gives ~1.4pp CI on Hit@10. Sufficient to detect the README-hypothesized Hybrid vs BM25 gap (typically 8-15pp in legal retrieval) but not small sub-1pp differences between tuning variants.
+
+4. **Scope-widening option documented, not required.** Adding district-court shards would recover the source_only 250K pairs (5× more training signal). README flags this as a tradeoff; for MS3 the federal-appellate-only scope holds, but the Future Directions slide should list corpus expansion as Option A for MS4.
+
+5. **Court stratification is mandatory.** With 13 circuits from 3K (ca1) to 17K (ca5) matched ids - 5.3× imbalance - retrieval eval must stratify by `court_id` or the 47K headline metric will be dominated by ca5/ca9 and hide per-circuit failure modes. `ProbeConfig.stratify_by="court_id"` already supports this.
+
+6. **Slide narrative:** "From 4M advertised to 47K usable - and why that's still enough." The funnel chart is the single most important MS3 slide: it quantifies what the dataset *actually* delivers once the scope filter is applied, converting the README's handwavy ~116K extrapolation into a hard number that sizes every downstream decision.
+
+---
+
+## Cell 12 Interpretation: MS3 Baseline Prep
+
+Cell 12 orchestrates the **MS3 baseline data preparation pipeline** that chunks the CourtListener federal appellate corpus and extracts LePaRD gold pairs for retrieval evaluation. It is structured as a dry-run preflight followed by an idempotency-guarded execution, ensuring teammates can re-run the notebook safely without duplicating expensive work.
+
+### Execution Flow
+
+The cell runs four sequential steps:
+
+1. **Environment resolution** - Locates `bash` at `/usr/bin/bash`, prepends `~/.local/bin` to `PATH`, and confirms `uv` is reachable. This guarantees the shell environment is deterministic before delegating to the prep script.
+
+2. **Dry-run preflight** - Invokes `scripts/run_baseline_prep.sh --dry-run`, which delegates to `scripts/baseline_prep.py --dry-run`. The preflight verifies all 159 CourtListener shards are present, LePaRD (5.4GB) is accessible, and key constants (schema v1.0.0, CHUNK_SIZE=1024, CHUNK_OVERLAP=128, BGE-M3 encoder target, TEST_SIZE=45,000, VAL_SIZE=2,000) are correctly loaded. No data is modified.
+
+3. **Idempotency skip** - Detects that a valid `summary.json` from a prior run already exists and skips re-execution. This guard prevents wasted compute on re-chunking 1.47M opinions when the artifacts are already current. The pipeline re-runs in 4.7 seconds (validation only) instead of multiple hours.
+
+4. **Final summary validation + headline extraction** - Loads the existing `summary.json`, confirms it passes Pydantic schema validation, and prints the MS3 headline findings for slide-deck consumption.
+
+### Canonical Dataset Numbers
+
+| Metric                  | Value         | Meaning                                                                 |
+|-------------------------|---------------|-------------------------------------------------------------------------|
+| `corpus_chunks`         | **7,813,273** | All legal opinions chunked into 1024-token passages with 128-token overlap |
+| `n_opinions_chunked`    | **1,465,484** | Unique federal appellate opinions in the corpus                          |
+| `gold_pairs_total`      | 47,000        | (quote → cited-opinion) ground-truth pairs from LePaRD                   |
+| `gold_pairs_test`       | 45,000        | Test queries for BM25/BGE-M3 retrieval evaluation                        |
+| `gold_pairs_val`        | 2,000         | Validation queries for hyperparameter tuning                             |
+| `gold_pairs_train`      | 0             | No train split at MS3 stage (retrieval baseline is zero-shot)            |
+| Courts represented      | 13 / 13       | All federal circuits (CA1–CA11, CA-DC, CA-FC) present in both test and val |
+| Test top-3 circuits     | CA5 (9,592), CA9 (5,327), CA4 (5,134) | Largest geographic circuits dominate naturally |
+
+### Provenance & Reproducibility
+
+The summary captures full lineage so any teammate can verify the exact same pipeline produced the same artifacts:
+
+- `git_sha`: `66461a0a37bf` - commit that generated the summary
+- `corpus_manifest_sha`: `7e5cbae116380bba...` - SHA-256 of the full 7.8M-chunk JSONL
+- `gold_pair_hashes`:
+  - `gold_pairs_test.jsonl` → `3017cce60c79a1a3...`
+  - `gold_pairs_val.jsonl` → `28f0d2ff2002e169...`
+- `schema_version`: `1.0.0`
+- `seed`: `0`
+
+### Pipeline Health Signals
+
+**Positive:**
+- **Idempotency works** - Re-executing Cell 12 costs 4.7 seconds, not hours. Teammates can safely re-run the full notebook without re-chunking the corpus.
+- **Cross-artifact consistency** - The summary's `corpus_chunks` (7,813,273) matches the BM25 baseline's `n_corpus_chunks`, confirming both retrieval baselines will operate on identical data for a fair comparison.
+- **Gold-pair coverage verified** - 0% of test queries reference missing corpus opinions; all 45,000 `dest_id` values resolve to opinions in the indexed corpus.
+- **Schema validation passes** - Pydantic locks the summary shape, preventing silent drift across runs.
+
+### Project Implications for MS3 and Beyond
+
+**For the MS3 TF presentation (Friday Apr 24, 4PM ET):**
+- Headline numbers (7.8M chunks / 1.47M opinions / 45K queries / 13 circuits) become the "Dataset" slide
+- The court distribution (CA5/CA9/CA4 dominant) motivates a representativeness visualization
+- `git_sha` + `corpus_manifest_sha` on the slides demonstrate reproducibility-grade engineering that TFs value
+
+**For the final project:**
+- **Sparse citation signal**: 47K gold pairs against 1.47M opinions means each opinion is cited by ~0.032 queries on average. Most opinions are never referenced in the LePaRD sample - realistic for long-tail legal citation retrieval.
+- **Training signal capacity**: The 5–10× corpus-to-query ratio provides sufficient training data if the final project adds supervised fine-tuning of a reranker or contrastive encoder on top of these baselines.
+- **Fair baseline comparison locked in**: BM25 (sparse) and BGE-M3 (dense) both index the full 7.8M chunks and retrieve against the same 45K query set with identical MaxP opinion-level aggregation. The only variable is the retrieval mechanism itself - which is exactly what the MS3 baseline comparison aims to isolate.
+
+---
+
+## Cell 13: BM25 Baseline Retrieval - Results & Interpretation
+
+### Output Summary
+
+| Metric | Value |
+|---|---|
+| Corpus chunks indexed | 7,813,273 |
+| Unique opinions | 1,465,484 |
+| Queries retrieved | 45,000 |
+| Top-k per query | 100 |
+| BM25 hyperparameters | k1=1.5, b=0.75 |
+| Index build time | 2,118.3s (35.3 min) |
+| Retrieval time | 1,891.7s (31.5 min) |
+| Per-query throughput | 23.8 qps |
+| `results_hash` | `926b4ebbdff68e13...` (SHA256 verified) |
+| Schema version | 1.0.0 |
+
+### Pipeline Health (All Green)
+
+- `n_corpus_chunks` matches Cell 12 output → corpus handoff intact
+- `n_queries = 45,000` → full test split retrieved, no loss in LePaRD × gold join
+- `results_hash` (summary) equals recomputed SHA256 of `bm25_results.jsonl` → no post-write corruption
+- Pydantic `BaselineBM25Summary` contract validates end-to-end
+
+### Performance Characteristics
+
+- **Index build (2,118s)**: single-threaded `bm25s` tokenization dominates; `n_threads` does not accelerate this phase (hard floor).
+- **Retrieval (1,892s)**: on 48 cores via `n_threads=48` batched retrieval, yields **23.8 qps**. Aggregate ≈ 185M chunk-scores/sec. Prior single-threaded attempts stalled at ~7.8 qps; the batching fix delivered the expected speedup.
+- **End-to-end (~67 min)**: cheap enough to re-run for schema or hyperparameter changes.
+
+### Project Implications
+
+1. **MS3 baseline is locked.** BM25 is the floor. Every neural retriever must beat this exact `results_hash` on Hit@k. If BGE-M3 or a fine-tuned model cannot exceed BM25, the project's core premise (neural retrieval helps in the legal domain) is falsified on this corpus.
+
+2. **Ablation budget ceiling.** One BM25 run = ~1 hour of `gpu` partition. Hyperparameter sweeps (k1, b, chunk size, stride) each cost ~1 hr. Budget 2–3 sweeps before MS4.
+
+3. **BGE-M3 throughput target.** Dense retrieval on 4× L4 GPUs with batched inference should exceed 200–500 qps. If BGE-M3 is slower than BM25 per query, batching is likely misconfigured.
+
+4. **Idempotency verified.** Cell 13 completed in 0.6s on re-run because `bm25_summary.json` existed and validated. TFs and collaborators re-running the notebook will not re-burn 67 min of cluster time - critical for the April 26 deadline.
+
+5. **Cell 15 evaluation unblocked.** `bm25_results.jsonl` (230 MB, DVC-tracked, hash-verified) is the ground input for Hit@k / MRR / NDCG@10. The 45K × top-100 shape means k ∈ {1, 5, 10, 100} are all directly measurable; no re-retrieval needed.
+
+6. **MS4 bottleneck identified.** The 35-min index build grows linearly with corpus size. Scaling to full LePaRD 4M pairs or a larger CourtListener snapshot will require cached, DVC-tracked BM25 indices (pickle or FAISS-style) to avoid rebuilding for every evaluation run.
+
+### Next Actionable
+
+Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs - the only remaining compute-heavy stage before Cell 15 metrics.
+
+---
+
+Cell 14:
+
+---
+
+Cell 15:
+
+---
+
+Reconciled catalog of MS3 files (44 commits total since MS2):
+
+## MS3 File Changes — Complete Catalog
+
+### EDA (early MS3)
+
+| Path | Purpose |
+|---|---|
+| `src/eda_schemas.py` | Shared Pydantic schemas extracted from two EDA scripts; evolved to hold `BaselinePrepSummary`, `BaselineBM25Summary`, `BaselineBgeM3Summary`, `BaselineBgeM3ResultLine`, `BaselineEvalSummary`, `RetrievalHit` |
+| `scripts/eda_ms3_corpus.py` | Refactored to use shared schemas |
+| `scripts/eda_ms3_lepard.py` | LePaRD EDA with keyword-only `main()`, identity-checked shared schema, determinism tests |
+| `tests/test_eda_ms3_lepard.py` | 82 tests GREEN after schema + determinism hardening |
+| `artifacts/eda_ms3_lepard/summary.json` | Pydantic-validated EDA summary |
+| `artifacts/eda_ms3_lepard/court_distribution.png` | EDA visualization |
+| `artifacts/eda_ms3_lepard/id_overlap.png` | EDA visualization |
+| `artifacts/eda_ms3_lepard/pair_funnel.png` | EDA visualization |
+
+### Baseline prep pipeline
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_prep.py` | GREEN implementation: chunker + stratified split + atomic checkpoint + largest-remainder minority-stratum preservation + `--dry-run` flag |
+| `tests/test_baseline_prep.py` | TDD tests + 2nd hardening round (summary JSON roundtrip, chunk boundary exact, split leakage, W&B branching) |
+| `scripts/run_baseline_prep.sh` | Full-scale runner: nohup launch, concurrent guard, `.env` sourcing, thread caps, trap cleanup, liveness check, resume forwarding, hostname/UTC stamping, PYTHONUNBUFFERED |
+| `tests/shell/test_run_baseline_prep.bats` | bats contract tests for runner |
+| `scripts/monitor_baseline.sh` | Monitor: auto-discover PID/log, semantic progress (checkpoint/gold/summary schema), dynamic shard count, ETA/velocity, `--json` + `--strict` CI modes, run-identity symlink |
+| `tests/shell/test_monitor_baseline.bats` | bats tests for monitor hardening |
+| `data/processed/baseline/summary.json` | Refreshed canonical: corpus=7.8M, opinions=1.47M, gold=47K |
+
+### BM25 baseline (Cell 13)
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_bm25.py` | BM25 full-corpus retrieval via `bm25s`; 40 tests |
+| `scripts/baseline_bm25.sbatch` | SLURM sbatch |
+| `scripts/run_baseline_bm25.sh` | Local fallback |
+| `tests/test_baseline_bm25.py` | 40 tests (contract + unit + Hypothesis) |
+| `tests/shell/test_baseline_bm25_sbatch.bats` | 13 bats tests |
+| `data/processed/baseline/bm25_results.jsonl` | 45K queries × top-100 (DVC-tracked) |
+| `data/processed/baseline/bm25_summary.json` | Validated summary |
+
+### BGE-M3 dense baseline (Cell 14)
+
+| Path | Purpose |
+|---|---|
+| `scripts/bench_bge_m3.py` | GPU bench harness for throughput sizing |
+| `scripts/bench_bge_m3.sbatch` | Bench SLURM script |
+| `scripts/baseline_bge_m3.py` | Multi-GPU corpus-shard encoder + FAISS IndexFlatIP; `_shard_range` with largest-remainder; `_merge_shard_results` cross-shard MaxP; `--rank`/`--world-size` CLI; checkpoint/resume (flush every 200 batches, atomic writes, structural + corruption validation); per-rank filename isolation |
+| `scripts/baseline_bge_m3_multigpu.sbatch` | SLURM: `--gres=gpu:4`, 20hr walltime, 4 parallel rank subshells, corpus-shard merge step |
+| `tests/test_baseline_bge_m3.py` | 78+ tests: shard range golden-table, parametrized checkpoint round-trip (1/2/4/8 GPU), checkpoint corruption + atomicity, per-rank filename contract, corpus-shard merge |
+
+### Subsample pivot (MS3 scope decision)
+
+| Path | Purpose |
+|---|---|
+| `scripts/subsample_corpus.py` | One-chunk-per-opinion filter: 7.8M → 1.47M rows; atomic write |
+| `tests/test_subsample_corpus.py` | 6 tests |
+| `data/processed/baseline/corpus_chunks_opinion_sample.jsonl.dvc` | DVC pointer to 4.1GB subsample |
+
+### Retrieval evaluation (Cell 15)
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_eval.py` | Hit@k, MRR, NDCG@10; streaming two-pointer paired comparison (1.13GB→0MB RAM); top_k cutoff for fair sparse-vs-dense; `n_skipped` diagnostic; `_git_sha` with mocked-failure branch |
+| `tests/test_baseline_eval.py` | 33 tests: contract + unit + Hypothesis property + metamorphic (rank-improvement monotonicity, permutation invariance) + malformed inputs + schema round-trip + subprocess mocking |
+
+### Pipeline diagram (Cell 16)
+
+| Path | Purpose |
+|---|---|
+| `src/viz/__init__.py` | Package marker |
+| `src/viz/pipeline_diagram.py` | Dict-DSL DAG builder + matplotlib renderer; `MS3_PIPELINE_SPEC` canonical spec; duplicate-ID rejection; topological layout with cycle-safety; kind-driven styling (data/model/eval/future) |
+| `tests/test_pipeline_diagram.py` | 20 tests: contract + graph construction + rendering + cycle-safety + self-loop + MS3 topology lock + label preservation |
+
+### SLURM ops utility
+
+| Path | Purpose |
+|---|---|
+| `src/ops/__init__.py` | Package marker |
+| `src/ops/slurm_job.py` | `JobStatus`/`ExtendedStatus` dataclasses wrapping `sacct`; `HH:MM:SS`/`D-HH:MM:SS` duration parsing; CLI `python -m src.ops.slurm_job <job_id>` with `--extended`/`--json`/`--warn-fraction` |
+| `tests/test_slurm_ops.py` | 16 tests (unit + CLI, subprocess mocking) |
+
+### Notebook + docs
+
+| Path | Purpose |
+|---|---|
+| `notebooks/Project_Group_#43_MS3_GPU_v01.ipynb` | MS3 deliverable notebook with Cells 12–16 |
+| `README.md` | Updated with MS3 workflow |
+
+---
+
+**Scope summary:** 44 commits, ~30 net new files across 10 subsystems. 300+ tests added across Python unit/property/metamorphic tiers and bats shell contract tiers. Major architectural decisions recorded in commit messages: corpus-shard BGE-M3 refactor (`691ceec`), walltime extension (`79cff5c`), one-chunk-per-opinion pivot (`f06e9dc`), streaming paired comparison (`2647098`).
+
+---
