@@ -114,3 +114,30 @@ class TestMs3PipelineSpec:
         for src, dst in spec["edges"]:
             assert src in ids, f"edge src unknown: {src}"
             assert dst in ids, f"edge dst unknown: {dst}"
+
+
+@pytest.mark.unit
+class TestCycleHandling:
+    """DAG cycles must not crash the renderer — treated as layer 0."""
+
+    def test_cycle_does_not_crash_render(self, viz_module: Any, tmp_path: Path) -> None:
+        spec = {
+            "stages": [
+                {"id": "a", "label": "A", "kind": "data"},
+                {"id": "b", "label": "B", "kind": "model"},
+            ],
+            "edges": [("a", "b"), ("b", "a")],  # cycle
+        }
+        out = tmp_path / "cycle.png"
+        viz_module.render_pipeline(spec, out)
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_self_loop_does_not_crash(self, viz_module: Any, tmp_path: Path) -> None:
+        spec = {
+            "stages": [{"id": "a", "label": "A", "kind": "data"}],
+            "edges": [("a", "a")],
+        }
+        out = tmp_path / "self_loop.png"
+        viz_module.render_pipeline(spec, out)
+        assert out.exists()
