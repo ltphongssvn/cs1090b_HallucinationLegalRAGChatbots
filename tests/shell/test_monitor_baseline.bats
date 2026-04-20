@@ -1,0 +1,150 @@
+#!/usr/bin/env bats
+load 'helpers.bash'
+
+setup() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    cd "$REPO_ROOT"
+}
+
+@test "help flag works" {
+    run bash scripts/monitor_baseline.sh --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Monitor"* ]]
+}
+
+@test "missing PID file produces clear message, exits 0" {
+    rm -f logs/baseline_prep.pid
+    run bash scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no PID file"* ]] || [[ "$output" == *"not running"* ]]
+}
+
+@test "missing log directory produces clear message" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/logs" "$tmpdir/data/processed/baseline"
+    run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh"
+    rm -rf "$tmpdir"
+    [[ "$output" == *"no log"* ]] || [[ "$output" == *"No artifacts"* ]]
+}
+
+@test "auto-discovers latest log via glob, not hardcoded filename" {
+    run grep -E "ls -t logs/baseline_prep_\*.log|logs/baseline_prep_\*\.log" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reads PID dynamically from PID file" {
+    run grep -E "cat.*logs/baseline_prep.pid|cat \"\\\$PID_FILE\"" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "uses %mem in ps format (human-readable)" {
+    run grep -E "%mem|%MEM" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "tail depth >= 20 for diagnosis" {
+    run grep -E "tail -n (2[0-9]|[3-9][0-9]|[1-9][0-9]{2,})" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "ps output includes args/cmd for PID identity verification" {
+    run grep -E "ps -p.*args|ps -p.*cmd" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports checkpoint shard count" {
+    run grep -E "chunking_checkpoint|completed.*shards|checkpoint" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports summary.json presence" {
+    run grep -E "summary.json" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports gold_pairs file line counts" {
+    run grep -E "gold_pairs_val|gold_pairs_test|wc -l" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "sections are independent (uses ; or explicit blocks, not && chains)" {
+    # Ensure no && between major diagnostic sections
+    run bash -c 'grep -c "^.*&&.*tail\|^.*&&.*ps \|^.*&&.*ls " scripts/monitor_baseline.sh'
+    [ "$output" = "0" ]
+}
+
+@test "no bare python3 — uses uv run python only" {
+    run grep -nE "^[^#]*python3 " scripts/monitor_baseline.sh
+    [ "$status" -ne 0 ]
+}
+
+@test "total shards computed dynamically, not hardcoded 159" {
+    run grep -E "/ 159|159 shards" scripts/monitor_baseline.sh
+    [ "$status" -ne 0 ]
+}
+
+@test "total shards discovered via find on shard_dir" {
+    run grep -E "find.*shard_\*.jsonl|TOTAL_SHARDS=" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "reports ETA or velocity from elapsed time + shards done" {
+    run grep -iE "eta|shards/min|velocity|elapsed" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "avoids wc -l on corpus file when size exceeds threshold" {
+    run grep -E "CORPUS_SIZE|du -b|stat -c|size guard" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "--json mode emits valid JSON" {
+    run bash scripts/monitor_baseline.sh --json
+    [ "$status" -eq 0 ]
+    echo "$output" | uv run python -c "import json,sys; json.loads(sys.stdin.read())"
+}
+
+@test "--json includes shards_done, total_shards, summary_present" {
+    run bash scripts/monitor_baseline.sh --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"shards_done"* ]]
+    [[ "$output" == *"total_shards"* ]]
+    [[ "$output" == *"summary_present"* ]]
+}
+
+@test "exits non-zero when summary.json is INVALID" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data/processed/baseline" "$tmpdir/logs" "$tmpdir/data/raw/cl_federal_appellate_bulk"
+    echo "{}" > "$tmpdir/data/processed/baseline/summary.json"
+    run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh --strict"
+    rm -rf "$tmpdir"
+    [ "$status" -ne 0 ]
+}
+
+@test "--strict exits 0 when no summary yet (job still running is not an error)" {
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/data/processed/baseline" "$tmpdir/logs" "$tmpdir/data/raw/cl_federal_appellate_bulk"
+    run bash -c "cd $tmpdir && bash $REPO_ROOT/scripts/monitor_baseline.sh --strict"
+    rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+}
+
+@test "monitor rejects unknown options" {
+    run bash scripts/monitor_baseline.sh --notaflag
+    [ "$status" -ne 0 ]
+}
+
+@test "monitor uses uv run --no-sync --offline (read-only, no env mutation)" {
+    run grep -cE "uv run --no-sync --offline" scripts/monitor_baseline.sh
+    [ "$output" -ge 2 ]
+}
+
+@test "runner writes current_log symlink for run-identity binding" {
+    run grep -E "current_log|ln -sfn" scripts/run_baseline_prep.sh
+    [ "$status" -eq 0 ]
+}
+
+@test "monitor reads current log via symlink, not ls -t" {
+    run grep -E "baseline_prep.current_log" scripts/monitor_baseline.sh
+    [ "$status" -eq 0 ]
+}

@@ -1,0 +1,5 @@
+outs:
+- md5: 1bd2c240da990689ebe404e066c21375
+  size: 4327923394
+  hash: md5
+  path: corpus_chunks_opinion_sample.jsonl

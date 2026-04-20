@@ -1,0 +1,5 @@
+outs:
+- md5: 07aef4976b2753cef247b4f8b486ff0a
+  size: 27299101594
+  hash: md5
+  path: corpus_chunks.jsonl
