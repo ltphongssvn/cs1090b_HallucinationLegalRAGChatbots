@@ -1,0 +1,6 @@
+outs:
+- md5: b0ba85bbce79a239e072fc5e2f8fc7e1.dir
+  size: 61022162697
+  nfiles: 4
+  hash: md5
+  path: cl_bulk
