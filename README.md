@@ -2410,3 +2410,106 @@ The summary captures full lineage so any teammate can verify the exact same pipe
 Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs - the only remaining compute-heavy stage before Cell 15 metrics.
 
 ---
+
+Cell 14:
+
+---
+
+Cell 15:
+
+---
+
+Reconciled catalog of MS3 files (44 commits total since MS2):
+
+## MS3 File Changes — Complete Catalog
+
+### EDA (early MS3)
+
+| Path | Purpose |
+|---|---|
+| `src/eda_schemas.py` | Shared Pydantic schemas extracted from two EDA scripts; evolved to hold `BaselinePrepSummary`, `BaselineBM25Summary`, `BaselineBgeM3Summary`, `BaselineBgeM3ResultLine`, `BaselineEvalSummary`, `RetrievalHit` |
+| `scripts/eda_ms3_corpus.py` | Refactored to use shared schemas |
+| `scripts/eda_ms3_lepard.py` | LePaRD EDA with keyword-only `main()`, identity-checked shared schema, determinism tests |
+| `tests/test_eda_ms3_lepard.py` | 82 tests GREEN after schema + determinism hardening |
+| `artifacts/eda_ms3_lepard/summary.json` | Pydantic-validated EDA summary |
+| `artifacts/eda_ms3_lepard/court_distribution.png` | EDA visualization |
+| `artifacts/eda_ms3_lepard/id_overlap.png` | EDA visualization |
+| `artifacts/eda_ms3_lepard/pair_funnel.png` | EDA visualization |
+
+### Baseline prep pipeline
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_prep.py` | GREEN implementation: chunker + stratified split + atomic checkpoint + largest-remainder minority-stratum preservation + `--dry-run` flag |
+| `tests/test_baseline_prep.py` | TDD tests + 2nd hardening round (summary JSON roundtrip, chunk boundary exact, split leakage, W&B branching) |
+| `scripts/run_baseline_prep.sh` | Full-scale runner: nohup launch, concurrent guard, `.env` sourcing, thread caps, trap cleanup, liveness check, resume forwarding, hostname/UTC stamping, PYTHONUNBUFFERED |
+| `tests/shell/test_run_baseline_prep.bats` | bats contract tests for runner |
+| `scripts/monitor_baseline.sh` | Monitor: auto-discover PID/log, semantic progress (checkpoint/gold/summary schema), dynamic shard count, ETA/velocity, `--json` + `--strict` CI modes, run-identity symlink |
+| `tests/shell/test_monitor_baseline.bats` | bats tests for monitor hardening |
+| `data/processed/baseline/summary.json` | Refreshed canonical: corpus=7.8M, opinions=1.47M, gold=47K |
+
+### BM25 baseline (Cell 13)
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_bm25.py` | BM25 full-corpus retrieval via `bm25s`; 40 tests |
+| `scripts/baseline_bm25.sbatch` | SLURM sbatch |
+| `scripts/run_baseline_bm25.sh` | Local fallback |
+| `tests/test_baseline_bm25.py` | 40 tests (contract + unit + Hypothesis) |
+| `tests/shell/test_baseline_bm25_sbatch.bats` | 13 bats tests |
+| `data/processed/baseline/bm25_results.jsonl` | 45K queries × top-100 (DVC-tracked) |
+| `data/processed/baseline/bm25_summary.json` | Validated summary |
+
+### BGE-M3 dense baseline (Cell 14)
+
+| Path | Purpose |
+|---|---|
+| `scripts/bench_bge_m3.py` | GPU bench harness for throughput sizing |
+| `scripts/bench_bge_m3.sbatch` | Bench SLURM script |
+| `scripts/baseline_bge_m3.py` | Multi-GPU corpus-shard encoder + FAISS IndexFlatIP; `_shard_range` with largest-remainder; `_merge_shard_results` cross-shard MaxP; `--rank`/`--world-size` CLI; checkpoint/resume (flush every 200 batches, atomic writes, structural + corruption validation); per-rank filename isolation |
+| `scripts/baseline_bge_m3_multigpu.sbatch` | SLURM: `--gres=gpu:4`, 20hr walltime, 4 parallel rank subshells, corpus-shard merge step |
+| `tests/test_baseline_bge_m3.py` | 78+ tests: shard range golden-table, parametrized checkpoint round-trip (1/2/4/8 GPU), checkpoint corruption + atomicity, per-rank filename contract, corpus-shard merge |
+
+### Subsample pivot (MS3 scope decision)
+
+| Path | Purpose |
+|---|---|
+| `scripts/subsample_corpus.py` | One-chunk-per-opinion filter: 7.8M → 1.47M rows; atomic write |
+| `tests/test_subsample_corpus.py` | 6 tests |
+| `data/processed/baseline/corpus_chunks_opinion_sample.jsonl.dvc` | DVC pointer to 4.1GB subsample |
+
+### Retrieval evaluation (Cell 15)
+
+| Path | Purpose |
+|---|---|
+| `scripts/baseline_eval.py` | Hit@k, MRR, NDCG@10; streaming two-pointer paired comparison (1.13GB→0MB RAM); top_k cutoff for fair sparse-vs-dense; `n_skipped` diagnostic; `_git_sha` with mocked-failure branch |
+| `tests/test_baseline_eval.py` | 33 tests: contract + unit + Hypothesis property + metamorphic (rank-improvement monotonicity, permutation invariance) + malformed inputs + schema round-trip + subprocess mocking |
+
+### Pipeline diagram (Cell 16)
+
+| Path | Purpose |
+|---|---|
+| `src/viz/__init__.py` | Package marker |
+| `src/viz/pipeline_diagram.py` | Dict-DSL DAG builder + matplotlib renderer; `MS3_PIPELINE_SPEC` canonical spec; duplicate-ID rejection; topological layout with cycle-safety; kind-driven styling (data/model/eval/future) |
+| `tests/test_pipeline_diagram.py` | 20 tests: contract + graph construction + rendering + cycle-safety + self-loop + MS3 topology lock + label preservation |
+
+### SLURM ops utility
+
+| Path | Purpose |
+|---|---|
+| `src/ops/__init__.py` | Package marker |
+| `src/ops/slurm_job.py` | `JobStatus`/`ExtendedStatus` dataclasses wrapping `sacct`; `HH:MM:SS`/`D-HH:MM:SS` duration parsing; CLI `python -m src.ops.slurm_job <job_id>` with `--extended`/`--json`/`--warn-fraction` |
+| `tests/test_slurm_ops.py` | 16 tests (unit + CLI, subprocess mocking) |
+
+### Notebook + docs
+
+| Path | Purpose |
+|---|---|
+| `notebooks/Project_Group_#43_MS3_GPU_v01.ipynb` | MS3 deliverable notebook with Cells 12–16 |
+| `README.md` | Updated with MS3 workflow |
+
+---
+
+**Scope summary:** 44 commits, ~30 net new files across 10 subsystems. 300+ tests added across Python unit/property/metamorphic tiers and bats shell contract tiers. Major architectural decisions recorded in commit messages: corpus-shard BGE-M3 refactor (`691ceec`), walltime extension (`79cff5c`), one-chunk-per-opinion pivot (`f06e9dc`), streaming paired comparison (`2647098`).
+
+---
