@@ -141,3 +141,56 @@ class TestCycleHandling:
         out = tmp_path / "self_loop.png"
         viz_module.render_pipeline(spec, out)
         assert out.exists()
+
+
+@pytest.mark.unit
+class TestDuplicateAndUnknown:
+    def test_rejects_duplicate_stage_ids(self, viz_module: Any) -> None:
+        spec = {
+            "stages": [
+                {"id": "a", "label": "A1", "kind": "data"},
+                {"id": "a", "label": "A2", "kind": "model"},
+            ],
+            "edges": [],
+        }
+        with pytest.raises(ValueError, match="duplicate stage id"):
+            viz_module.build_pipeline_graph(spec)
+
+    def test_rejects_unknown_kind(self, viz_module: Any) -> None:
+        spec = {
+            "stages": [{"id": "a", "label": "A", "kind": "mystery"}],
+            "edges": [],
+        }
+        with pytest.raises(ValueError, match="unknown kind"):
+            viz_module.build_pipeline_graph(spec)
+
+    def test_preserves_label_on_nodes(self, viz_module: Any) -> None:
+        spec = {
+            "stages": [
+                {"id": "a", "label": "Corpus Prep Step", "kind": "data"},
+                {"id": "b", "label": "BM25 Retrieval", "kind": "model"},
+            ],
+            "edges": [("a", "b")],
+        }
+        graph = viz_module.build_pipeline_graph(spec)
+        labels = {n["id"]: n["label"] for n in graph["nodes"]}
+        assert labels == {"a": "Corpus Prep Step", "b": "BM25 Retrieval"}
+
+
+@pytest.mark.unit
+class TestMs3Topology:
+    """Lock the scientific pipeline flow, not just node presence."""
+
+    def test_corpus_feeds_both_retrievers(self, viz_module: Any) -> None:
+        edges = set(viz_module.MS3_PIPELINE_SPEC["edges"])
+        assert ("corpus", "bm25") in edges
+        assert ("corpus", "bge_m3") in edges
+
+    def test_both_retrievers_feed_eval(self, viz_module: Any) -> None:
+        edges = set(viz_module.MS3_PIPELINE_SPEC["edges"])
+        assert ("bm25", "eval") in edges
+        assert ("bge_m3", "eval") in edges
+
+    def test_gold_feeds_eval(self, viz_module: Any) -> None:
+        edges = set(viz_module.MS3_PIPELINE_SPEC["edges"])
+        assert ("gold", "eval") in edges

@@ -40,6 +40,8 @@ def build_pipeline_graph(spec: dict[str, Any]) -> dict[str, Any]:
             raise KeyError(f"stage missing required keys: {missing} in {stage}")
         if stage["kind"] not in _KIND_STYLE:
             raise ValueError(f"unknown kind {stage['kind']!r}; expected one of {list(_KIND_STYLE)}")
+        if stage["id"] in node_ids:
+            raise ValueError(f"duplicate stage id: {stage['id']!r}")
         nodes.append(dict(stage))
         node_ids.add(stage["id"])
 
