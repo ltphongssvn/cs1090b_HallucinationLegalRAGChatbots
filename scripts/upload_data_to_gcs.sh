@@ -3,6 +3,13 @@
 # Upload all datasets to GCS: CourtListener bulk, processed shards, and LePaRD
 # Mirrors the structure from notebooks/Project_Group_#43_Submission_v01.ipynb
 # Usage: GCS_BUCKET=bucket-name ./scripts/upload_data_to_gcs.sh
+#
+# Resilience strategy for Colab (runtime disconnects mid-transfer):
+#   - Completed local downloads are uploaded to GCS directly (no re-download)
+#   - Missing files are downloaded via src.bulk_download (aws CLI → requests
+#     fallback), so AWS CLI is NOT required (Colab ships without it)
+#   - Per-file failures are logged but never abort the run, so any file already
+#     in GCS or completed on disk still reaches GCS
 
 set -e
 
@@ -184,126 +191,98 @@ echo ""
 # ============================================================
 # 3. CourtListener Bulk CSVs (from S3)
 # ============================================================
+# Hybrid Colab-resilient transfer (inlined, no external helper script):
+#   - Pure-Python HTTPS download with Range-based resume (no aws CLI)
+#   - Per-file: skip-if-in-GCS → resumable download → immediate upload → cleanup
+#   - Staging dir persists across runtime disconnects (defaults to Google Drive
+#     when $CL_BULK_STAGING_DIR is unset and /content/drive is mounted)
 echo "========================================"
 echo "3. CourtListener Bulk CSVs"
 echo "========================================"
 
-GCS_CL_BULK="cs1090b_cl_bulk"
-TEMP_DIR="/tmp/courtlistener_bulk"
+export GCS_BUCKET
+export GCS_CL_BULK_PREFIX="${GCS_CL_BULK_PREFIX:-cs1090b_cl_bulk}"
 
-echo "→ Discovering latest bulk files on S3..."
-$PYTHON -c "
-import sys
-import json
-from src.s3_discovery import discover_latest_bulk_files
+export CL_BULK_STAGING_DIR="/content/drive/MyDrive/cs1090b_cl_bulk_staging"
+
+echo "→ Staging dir: $CL_BULK_STAGING_DIR"
+echo "→ Target:      gs://$GCS_BUCKET/$GCS_CL_BULK_PREFIX/"
+echo ""
+
+# Per-file loop: skip if already in GCS, else download into the Drive staging
+# dir via src.bulk_download (idempotent — skips files already on disk), then
+# upload to GCS. Drive-persistent files survive Colab runtime disconnects.
+set +e
+$PYTHON -u - <<'PYEOF'
+import logging, os, subprocess, sys
+from pathlib import Path
+
+from src.bulk_download import download_file
 from src.config import PipelineConfig
+from src.s3_discovery import discover_latest_bulk_files
 
-try:
-    config = PipelineConfig()
-    latest = discover_latest_bulk_files(config)
-    print(json.dumps(latest, indent=2))
-except Exception as e:
-    print(f'ERROR: {e}', file=sys.stderr)
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+log = logging.getLogger("cl_bulk")
+
+bucket  = os.environ["GCS_BUCKET"]
+prefix  = os.environ.get("GCS_CL_BULK_PREFIX", "cs1090b_cl_bulk").rstrip("/")
+staging = Path(os.environ["CL_BULK_STAGING_DIR"]).expanduser()
+staging.mkdir(parents=True, exist_ok=True)
+
+config = PipelineConfig()
+latest = discover_latest_bulk_files(config)
+
+failed = []
+for label in ("courts", "dockets", "clusters", "opinions"):
+    if label not in latest:
+        continue
+    key      = str(latest[label]["key"])
+    filename = Path(key).name
+    uri      = f"gs://{bucket}/{prefix}/{filename}"
+    dest     = staging / filename
+
+    log.info("\n[%s] %s", label, filename)
+
+    # 1. Skip if already in GCS.
+    if subprocess.run(["gsutil", "-q", "stat", uri]).returncode == 0:
+        log.info("  ✓ already in GCS, skipping")
+        continue
+
+    # 2. Download directly into Drive (no-op if file is already there).
+    try:
+        download_file(key, dest, config=config, logger=log)
+    except Exception as e:
+        log.error("  ✗ download failed: %s", e)
+        failed.append(filename)
+        continue
+
+    # 3. Upload Drive → GCS.
+    log.info("  → uploading to %s", uri)
+    if subprocess.run(["gsutil", "-m", "cp", str(dest), uri]).returncode != 0:
+        log.error("  ✗ upload failed")
+        failed.append(filename)
+        continue
+    log.info("  ✓ %s now in GCS", filename)
+
+if failed:
+    log.error("\n%d file(s) failed: %s", len(failed), ", ".join(failed))
     sys.exit(1)
-" > /tmp/latest_files.json
+PYEOF
+CL_BULK_RC=$?
+set -e
 
-if [ $? -ne 0 ]; then
-    echo "✗ Failed to discover files"
-    exit 1
-fi
-
-# Parse discovered files
-FILES=$($PYTHON -c "
-import json
-with open('/tmp/latest_files.json') as f:
-    data = json.load(f)
-    for label in ['courts', 'dockets', 'clusters', 'opinions']:
-        if label in data:
-            key = data[label]['key']
-            filename = key.split('/')[-1]
-            print(filename)
-")
-
-mkdir -p "$TEMP_DIR"
-
-COUNT=0
-TOTAL=$(echo "$FILES" | wc -l | tr -d ' ')
-
-echo "Files to transfer: $TOTAL (parallel)"
-echo ""
-
-# Function to transfer a single file
-transfer_file() {
-    local file=$1
-    local num=$2
-    local S3_PATH="s3://com-courtlistener-storage/bulk-data/$file"
-    local GCS_PATH="gs://$GCS_BUCKET/$GCS_CL_BULK/$file"
-    local LOCAL_PATH="$TEMP_DIR/$file"
-
-    echo "[$num/$TOTAL] $file"
-
-    if gsutil -q stat "$GCS_PATH" 2>/dev/null; then
-        echo "  ✓ Already in GCS, skipping"
-        return 0
-    fi
-
-    echo "  → Downloading from S3..."
-    # Show progress for large files (remove --quiet to show progress)
-    if ! aws s3 cp "$S3_PATH" "$LOCAL_PATH" --no-sign-request; then
-        echo "  ✗ Download failed"
-        return 1
-    fi
-
-    echo "  → Uploading to GCS..."
-    if ! gsutil -m cp "$LOCAL_PATH" "$GCS_PATH" 2>/dev/null; then
-        echo "  ✗ Upload failed"
-        rm -f "$LOCAL_PATH"
-        return 1
-    fi
-
-    rm -f "$LOCAL_PATH"
-    echo "  ✓ Done"
-    return 0
-}
-
-export -f transfer_file
-export GCS_BUCKET GCS_CL_BULK TEMP_DIR TOTAL
-
-# Launch parallel transfers
-echo "Starting parallel transfers..."
-echo ""
-PIDS=()
-for file in $FILES; do
-    COUNT=$((COUNT + 1))
-    echo "  Launching transfer: $file"
-    transfer_file "$file" "$COUNT" &
-    PIDS+=($!)
-done
-
-echo ""
-echo "Waiting for all transfers to complete..."
-echo ""
-
-# Wait for all transfers to complete
-FAILED=0
-for pid in "${PIDS[@]}"; do
-    if ! wait "$pid"; then
-        FAILED=$((FAILED + 1))
-    fi
-done
-
-echo ""
-if [ $FAILED -gt 0 ]; then
-    echo "⚠️  $FAILED file(s) failed to transfer"
+if [ $CL_BULK_RC -ne 0 ]; then
+    echo ""
+    echo "⚠️  One or more CourtListener bulk files failed to transfer (exit $CL_BULK_RC)"
+    echo "     Re-run this script to resume from the last completed byte"
 else
-    echo "✓ All transfers completed successfully"
+    echo ""
+    echo "✓ All CourtListener bulk transfers completed successfully"
 fi
 
-rm -f /tmp/latest_files.json
-rmdir "$TEMP_DIR" 2>/dev/null || true
+# Expose the prefix under the old var name so the summary below keeps working.
+GCS_CL_BULK="$GCS_CL_BULK_PREFIX"
 
-echo ""
-echo "✓ CourtListener bulk CSVs uploaded"
 echo ""
 
 # ============================================================
