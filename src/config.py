@@ -140,6 +140,14 @@ class PipelineConfig:
     schema_audit_per_shard: int = 50
     min_expected_total: int = 10000
 
+    # GCS (Google Cloud Storage)
+    use_gcs_streaming: bool = False
+    gcs_bucket_name: Optional[str] = None
+    gcs_project_id: Optional[str] = None
+    gcs_cl_bulk_prefix: str = "cs1090b_cl_bulk/"
+    gcs_cl_shards_prefix: str = "cs1090b_cl_federal_appellate_bulk/"
+    gcs_lepard_prefix: str = "cs1090b_lepard/"
+
     def __post_init__(self) -> None:
         """Coerce string paths to :class:`~pathlib.Path` instances.
 
