@@ -69,7 +69,11 @@ echo "1. Processed Federal Appellate Shards"
 echo "========================================"
 
 GCS_SHARDS="cs1090b_cl_federal_appellate_bulk"
-LOCAL_SHARDS="data/raw/cl_federal_appellate_bulk"
+STAGING_SHARDS="/content/drive/MyDrive/cs1090b_shards_staging"
+
+echo "→ Staging dir: $STAGING_SHARDS"
+echo "→ Target:      gs://$GCS_BUCKET/$GCS_SHARDS/"
+echo ""
 
 # Check if shards already exist in GCS
 if gsutil -q stat "gs://$GCS_BUCKET/$GCS_SHARDS/manifest.json" 2>/dev/null; then
@@ -80,14 +84,14 @@ if gsutil -q stat "gs://$GCS_BUCKET/$GCS_SHARDS/manifest.json" 2>/dev/null; then
     if [ "$SHARD_COUNT" -gt 0 ]; then
         echo "  $SHARD_COUNT shards available for streaming"
     fi
-elif [ -f "$LOCAL_SHARDS/manifest.json" ]; then
-    # Shards exist locally, upload them
-    echo "→ Uploading shards from $LOCAL_SHARDS..."
-    gsutil -m rsync -r "$LOCAL_SHARDS/" "gs://$GCS_BUCKET/$GCS_SHARDS/"
+elif [ -f "$STAGING_SHARDS/manifest.json" ]; then
+    # Shards exist in Drive staging, upload them
+    echo "→ Uploading shards from Drive staging..."
+    gsutil -m rsync -r "$STAGING_SHARDS/" "gs://$GCS_BUCKET/$GCS_SHARDS/"
     echo "  ✓ Shards uploaded"
 else
     # Shards don't exist - need to run pipeline
-    echo "⚠️  Shards not found in GCS or locally"
+    echo "⚠️  Shards not found in GCS or Drive staging"
     echo ""
     echo "→ Running pipeline to generate shards..."
     echo "  This will:"
@@ -95,11 +99,16 @@ else
     echo "  2. Filter to federal appellate courts"
     echo "  3. Extract and shard opinions"
     echo "  4. Generate manifest with SHA-256 checksums"
+    echo "  5. Stage to Drive: $STAGING_SHARDS"
     echo ""
 
+    # Create staging directory
+    mkdir -p "$STAGING_SHARDS"
+
     # Run the pipeline (unbuffered output for real-time progress)
-    if $PYTHON -u -c "
+    if PIPELINE_OUTPUT_DIR="$STAGING_SHARDS" $PYTHON -u -c "
 import logging
+import os
 import sys
 from src.pipeline import run_pipeline
 from src.config import PipelineConfig
@@ -114,8 +123,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 try:
+    # Override output directory to use Drive staging
+    output_dir = os.environ.get('PIPELINE_OUTPUT_DIR', 'data/raw/cl_federal_appellate_bulk')
     config = PipelineConfig()
-    logger.info('Starting pipeline...')
+    config.output_dir = output_dir
+    logger.info(f'Starting pipeline (output: {output_dir})...')
     manifest = run_pipeline(config=config, logger=logger)
     logger.info(f'✓ Pipeline complete: {manifest[\"num_cases\"]:,} cases, {manifest[\"num_shards\"]} shards')
     sys.exit(0)
@@ -130,9 +142,9 @@ except Exception as e:
         echo ""
 
         # Upload generated shards to GCS
-        if [ -f "$LOCAL_SHARDS/manifest.json" ]; then
+        if [ -f "$STAGING_SHARDS/manifest.json" ]; then
             echo "→ Uploading generated shards to GCS..."
-            gsutil -m rsync -r "$LOCAL_SHARDS/" "gs://$GCS_BUCKET/$GCS_SHARDS/"
+            gsutil -m rsync -r "$STAGING_SHARDS/" "gs://$GCS_BUCKET/$GCS_SHARDS/"
             echo "  ✓ Shards uploaded"
         else
             echo "  ✗ Pipeline completed but manifest not found"
@@ -153,37 +165,43 @@ echo "2. LePaRD Training Data"
 echo "========================================"
 
 GCS_LEPARD="cs1090b_lepard"
-LOCAL_LEPARD="data/raw/lepard"
+STAGING_LEPARD="/content/drive/MyDrive/cs1090b_lepard_staging"
 
-# Use scripts/ingest_lepard.py to ensure artifact is ready (follows notebook pattern)
-echo "→ Ensuring LePaRD artifact is ready..."
+echo "→ Staging dir: $STAGING_LEPARD"
+echo "→ Target:      gs://$GCS_BUCKET/$GCS_LEPARD/"
+echo ""
 
-# Step 1: Fast-path verify
-if $PYTHON scripts/ingest_lepard.py --verify-only 2>/dev/null; then
-    echo "  ✓ LePaRD artifact valid (fast-path)"
+# Check if already in GCS
+if gsutil -q stat "gs://$GCS_BUCKET/$GCS_LEPARD/lepard_train_4000000_rev0194f95.jsonl" 2>/dev/null; then
+    echo "✓ LePaRD already in GCS"
+elif [ -d "$STAGING_LEPARD" ] && [ "$(ls -A $STAGING_LEPARD 2>/dev/null)" ]; then
+    # LePaRD exists in Drive staging, upload it
+    echo "→ Uploading LePaRD from Drive staging..."
+    gsutil -m rsync -r "$STAGING_LEPARD/" "gs://$GCS_BUCKET/$GCS_LEPARD/"
+    echo "  ✓ LePaRD uploaded"
 else
-    # Step 2: Self-heal or re-ingest (with progress output)
-    echo "  → Running ingest_lepard.py (self-heal/download)..."
-    echo "     This may take several minutes for 4M training pairs..."
+    # Need to download LePaRD to Drive staging
+    echo "⚠️  LePaRD not found in GCS or Drive staging"
     echo ""
-    # Use unbuffered Python and show progress
-    if ! $PYTHON -u scripts/ingest_lepard.py; then
+    echo "→ Downloading LePaRD to Drive staging..."
+    echo "  This may take several minutes for 4M training pairs..."
+    echo ""
+
+    # Create staging directory
+    mkdir -p "$STAGING_LEPARD"
+
+    # Use scripts/ingest_lepard.py with Drive staging directory
+    if LEPARD_OUTPUT_DIR="$STAGING_LEPARD" $PYTHON -u scripts/ingest_lepard.py; then
+        echo ""
+        echo "  ✓ LePaRD download complete"
+        echo ""
+        echo "→ Uploading LePaRD to GCS..."
+        gsutil -m rsync -r "$STAGING_LEPARD/" "gs://$GCS_BUCKET/$GCS_LEPARD/"
+        echo "  ✓ LePaRD uploaded"
+    else
         echo "  ✗ LePaRD ingest failed"
         echo "     Skipping LePaRD upload"
     fi
-fi
-
-# Upload all files from data/raw/lepard to GCS
-if [ -d "$LOCAL_LEPARD" ] && [ "$(ls -A $LOCAL_LEPARD 2>/dev/null)" ]; then
-    echo ""
-    echo "→ Uploading LePaRD to GCS..."
-
-    # Use rsync to upload entire directory
-    gsutil -m rsync -r "$LOCAL_LEPARD/" "gs://$GCS_BUCKET/$GCS_LEPARD/"
-
-    echo "  ✓ LePaRD uploaded"
-else
-    echo "  ⚠️  $LOCAL_LEPARD is empty or not found"
 fi
 
 echo ""
