@@ -1995,7 +1995,7 @@ Only LePaRD occupies this remote. The 43 GB CourtListener corpus is not mirrored
 ---
 ## Google Colab notebook code cell console output
 
-**Cell 1 - Bootstrap interpretation:**
+## Cell 1 - Bootstrap interpretation:
 
 Repo cloned, uv installed Python 3.11.9, `uv sync` resolved the locked dependency tree, and version verification confirmed the four anchor libraries loaded at their pinned versions. Total: 73.5s (cold start).
 
@@ -2019,7 +2019,7 @@ Environment bootstrap clean and reproducible. No blockers for downstream data-ac
 
 ---
 
-**Cell 2 - Environment verification:**
+## Cell 2 - Environment verification:
 
 Reproducibility config applied, TDD environment contract passed (5/5), preflight failure-isolation gate passed (16/16), 14 pinned dependencies verified. 12.6s.
 
@@ -2046,7 +2046,7 @@ Environment is provably reproducible, hardware sufficient, all contract tests pa
 
 ---
 
-**Cell 3 - Drive mount + cl_bulk symlink:**
+## Cell 3 - Drive mount + cl_bulk symlink:
 
 Drive mounted, symlink created, 4 CSVs verified. 21.0s.
 
@@ -2069,7 +2069,7 @@ Drive wiring clean, pinned bulk data restored and verified. Cell 4's idempotent 
 
 ---
 
-**Cell 4 - Pinned bulk CSV check:**
+## Cell 4 - Pinned bulk CSV check:
 
 Idempotent fast-path hit. All 4 CSVs present, 0.2s total.
 
@@ -2082,7 +2082,7 @@ Pinning fix validated end-to-end. Cell 4 is now a no-op on warm starts, which wa
 
 ---
 
-**Cell 5 - Pipeline fast-path + contract tests:**
+## Cell 5 - Pipeline fast-path + contract tests:
 
 Fast-path triggered. 1,465,484 cases across 159 shards verified against manifest. All 13 TDD contract tests passed. 21m 34.6s (dominated by checksum re-hashing of 55 GB shards over Drive + sampled JSON validation).
 
@@ -2112,7 +2112,7 @@ Full data acquisition pipeline verified reproducible and consistent. Corpus read
 
 ---
 
-**Cell 5.5 - NaN repair:**
+## Cell 5.5 - NaN repair:
 
 **Pre-repair:** 1,992 NaN lines across 9 shards (shard_0000–0007, 0009), all in `case_name` field. Verdict: REPAIRABLE. clean_pct 99.8632%.
 
@@ -2140,7 +2140,7 @@ Corpus data-quality-gate passed. All 1.46M records now Polars-readable, zero NaN
 
 ---
 
-**Cell 6 - Dataset readiness probe:**
+## Cell 6 - Dataset readiness probe:
 
 All 8 gates PASS. 1,456,611 records loaded via Polars fast-path, 0 parse errors, 6m 55.4s.
 
@@ -2187,7 +2187,7 @@ The full pipeline is green end-to-end:
 
 ---
 
-**Cell 7 - LePaRD verify-only fast-path (1m 20.0s)**
+## Cell 7 - LePaRD verify-only fast-path (1m 20.0s)
 
 - **No download triggered.** Drive held a valid copy; `--verify-only` checked digest + sidecar + manifest and exited clean.
 - **Pinned revision confirmed:** `0194f95c3091acceab3b887c9b09ef432cf84052` (40-char SHA, mutable refs rejected).
@@ -2199,7 +2199,7 @@ The full pipeline is green end-to-end:
 
 ---
 
-**Cell 8 - LePaRD ↔ CL Compatibility Audit (1.2s)**
+## Cell 8 - LePaRD ↔ CL Compatibility Audit (1.2s)
 
 - **Deterministic fixture run**, not full-scale. Numbers match the committed regression fixture exactly (512 / 1,465,484 / 70 / 454 / 13) - proves the audit tool is byte-stable across machines.
 - **Section [1] - ID space compatible:** 70/512 (13.7%) overlap confirms LePaRD and CL share the same CourtListener opinion-id namespace. Not coincidental integer collisions.
@@ -2213,7 +2213,7 @@ The full pipeline is green end-to-end:
 
 ---
 
-**Cell 9 - Data Quality Gate (2m 23.5s)**
+## Cell 9 - Data Quality Gate (2m 23.5s)
 
 - **Verdict CLEAN:** 1,456,611 lines across 159 shards, 0 NaN, 0 nonfinite, 0 string sentinels, 0 decode errors, 0 contaminated shards.
 - **Independent second measurement** after Cell 6. Cell 6 proved RAG-readiness (8 gates); Cell 9 proves byte-cleanliness (strict JSON + UTF-8).
@@ -2224,7 +2224,8 @@ The full pipeline is green end-to-end:
 
 ---
 
-[MS3] EDA, Baseline Modeling, and Pipeline Development [4/11-4/24]
+# [MS3] EDA, Baseline Modeling, and Pipeline Development [4/11-4/24]
+
 Milestone 3: EDA and Baseline Modeling [20 pts]
 Key dates: 
 Slides and accompanying Notebook: due at your presentation time (if earlier) or by April 24 at 9:59pm, whichever comes first.
@@ -2233,7 +2234,7 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ---
 
-**Cell 10 - Corpus scale & filter impact**
+## Cell 10 - Corpus scale & filter impact
 - 1,465,484 federal appellate opinions scanned; 1,459,910 survive the ≥100-char filter - only 5,574 short records (0.38%) dropped. The short-record tail is negligible, so the filter is a conservative hygiene gate, not a scope-reducing decision.
 
 **Text length distribution (linear + log-log plots)**
@@ -2263,7 +2264,7 @@ Note that submissions are due at 9:59pm the day of the deadline (submission wind
 
 ---
 
-** Cell 11 (LePaRD × CL compatibility, full-scale):**
+##  Cell 11 (LePaRD × CL compatibility, full-scale):
 
 **Pair funnel - the supervision signal**
 - 4,000,000 raw LePaRD rows → 1,812,918 unique pairs (55% dedup rate) → **47,247 usable gold pairs** (2.61% of unique).
@@ -2562,6 +2563,8 @@ As MS3 rubric states accuracy is not the grading focus; methodology and reasonin
 - `data/processed/baseline/eval_summary.json` — Pydantic-validated at `BaselineEvalSummary` schema v1.0.0
 - `data/processed/baseline/eval_comparison.json` — per-query win/tie counts
 - Current git SHA at time of this report: `02177cb61d99`
+
+---
 
 ## Cell 16 - MS3 Pipeline Diagrams (Conceptual + Infrastructure)
 
