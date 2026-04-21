@@ -194,3 +194,67 @@ class TestMs3Topology:
     def test_gold_feeds_eval(self, viz_module: Any) -> None:
         edges = set(viz_module.MS3_PIPELINE_SPEC["edges"])
         assert ("gold", "eval") in edges
+
+
+@pytest.mark.contract
+class TestInfrastructureSpec:
+    """MS3_INFRASTRUCTURE_SPEC — detailed infra view: DVC, sharding, checkpointing."""
+
+    def test_infrastructure_spec_exists(self, viz_module: Any) -> None:
+        spec = getattr(viz_module, "MS3_INFRASTRUCTURE_SPEC", None)
+        assert spec is not None
+        assert "stages" in spec
+        assert "edges" in spec
+
+    def test_infrastructure_spec_covers_all_infra_concerns(self, viz_module: Any) -> None:
+        """Infrastructure spec must show DVC, sharding, checkpointing, subsampling."""
+        spec = viz_module.MS3_INFRASTRUCTURE_SPEC
+        ids = {s["id"] for s in spec["stages"]}
+        required = {
+            "cl_bulk",
+            "corpus_full",
+            "subsample",
+            "corpus_subsample",
+            "bge_shard_0",
+            "bge_shard_1",
+            "bge_shard_2",
+            "bge_shard_3",
+            "checkpoint",
+            "merge",
+            "dvc_s3",
+        }
+        missing = required - ids
+        assert not missing, f"missing infrastructure nodes: {missing}"
+
+    def test_infrastructure_edges_reference_existing_stages(self, viz_module: Any) -> None:
+        spec = viz_module.MS3_INFRASTRUCTURE_SPEC
+        ids = {s["id"] for s in spec["stages"]}
+        for src, dst in spec["edges"]:
+            assert src in ids, f"infra edge src unknown: {src}"
+            assert dst in ids, f"infra edge dst unknown: {dst}"
+
+    def test_infrastructure_has_dvc_tracking_node(self, viz_module: Any) -> None:
+        """DVC / S3 storage layer is the key reproducibility artifact."""
+        spec = viz_module.MS3_INFRASTRUCTURE_SPEC
+        dvc_nodes = [s for s in spec["stages"] if s["id"] == "dvc_s3"]
+        assert len(dvc_nodes) == 1
+        assert "S3" in dvc_nodes[0]["label"] or "DVC" in dvc_nodes[0]["label"]
+
+    def test_infrastructure_has_4_way_sharding(self, viz_module: Any) -> None:
+        """Four per-rank BGE-M3 shards must be represented with exact IDs bge_shard_{0..3}."""
+        spec = viz_module.MS3_INFRASTRUCTURE_SPEC
+        shard_ids = {s["id"] for s in spec["stages"] if s["id"].startswith("bge_shard_")}
+        assert shard_ids == {
+            "bge_shard_0",
+            "bge_shard_1",
+            "bge_shard_2",
+            "bge_shard_3",
+        }
+
+    def test_infrastructure_stage_ids_are_unique(self, viz_module: Any) -> None:
+        """Spec must not declare duplicate stage IDs (sets would silently collapse them)."""
+        spec = viz_module.MS3_INFRASTRUCTURE_SPEC
+        stage_ids = [s["id"] for s in spec["stages"]]
+        assert len(stage_ids) == len(set(stage_ids)), (
+            f"duplicate stage ids: {[x for x in stage_ids if stage_ids.count(x) > 1]}"
+        )
