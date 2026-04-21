@@ -2563,6 +2563,74 @@ As MS3 rubric states accuracy is not the grading focus; methodology and reasonin
 - `data/processed/baseline/eval_comparison.json` — per-query win/tie counts
 - Current git SHA at time of this report: `02177cb61d99`
 
+## Cell 16 - MS3 Pipeline Diagrams (Conceptual + Infrastructure)
+
+Cell 16 emits two inline-rendered PNG diagrams documenting the MS3 retrieval pipeline from complementary perspectives. The split mirrors the way our group separates the methods (what the pipeline does) from the systems / implementation section (how it actually runs). Each diagram is produced by a separate canonical spec in `src/viz/pipeline_diagram.py` and locked by its own pytest contract class.
+
+### Cell 16a - Conceptual Pipeline Diagram
+
+```
+rendered artifacts/ms3_pipeline.png  (93.4 KB)
+stages:  8
+edges:   9
+⏱ Cell 16a: MS3 pipeline diagram render completed in 0.2s
+```
+
+**What it encodes:** The research-level dataflow. Two data inputs (CourtListener corpus chunks at 7.8M; LePaRD gold pairs at 45K test + 2K val) feed two retrieval baselines (BM25 via `bm25s` at `k1=1.5, b=0.75`; BGE-M3 at 1024-dim with FAISS inner product). Both retrievers converge into a single evaluation node computing Hit@k, MRR, and NDCG@10. From there, three dashed "future" boxes encode the MS4+ roadmap: Hybrid BM25+Dense RRF fusion, Cross-Encoder Reranker, and RAG Generation + Hallucination Check.
+
+**What it communicates to a reader:**
+- The sparse vs. dense baseline comparison is structurally complete - both retrievers feed the same evaluation harness, which enables fair head-to-head measurement.
+- Gold pairs feed evaluation directly (not retrieval), correctly representing LePaRD as the oracle rather than an input feature.
+- The three future nodes are visually distinguished (dashed border, gray fill) so no reader confuses roadmap with delivered work.
+- Nine edges means nine tested topology invariants - every edge is locked by pytest in `TestMs3Topology` and `TestMs3PipelineSpec` (e.g., `("corpus", "bm25")`, `("gold", "eval")`, `("bm25", "eval")`).
+
+**What it intentionally abstracts away:** The infrastructure. This diagram treats "BGE-M3" as a single box, but the actual implementation is 4-way GPU-sharded with checkpoint-resume. That engineering complexity is documented in Cell 16b.
+
+### Cell 16b - Infrastructure Overlay Diagram
+
+```
+rendered artifacts/ms3_infrastructure.png  (113.8 KB)
+stages:  11
+edges:   13
+⏱ Cell 16b: MS3 infrastructure diagram render completed in 0.2s
+```
+
+**What it encodes:** The execution-level dataflow. CourtListener Bulk Dumps (58 GB of DVC-tracked raw data) produce the Full Corpus Chunks (7.8M). Subsampling (one-chunk-per-opinion, an MS3 scope decision to fit within 20-hour SLURM walltime) produces the Subsample Corpus (1.47M chunks). That subsample fans out to four parallel BGE-M3 shards running on GPU ranks 0 through 3. All four shards fan in to the Per-Rank FAISS Index Checkpoint - the infra layer that caught the 14-hour recovery after the OOM crash during query encoding. Checkpoint output flows into Cross-Shard MaxP Merge (top-100), which finally writes to the DVC + S3 Remote - the reproducibility source of truth.
+
+**What it communicates to a reader:**
+- **Corpus subsampling is a visible, first-class stage.** The decision to move from 7.8M chunks to 1.47M opinions for the MS3 BGE-M3 baseline is documented in the graph, not hidden. No ambiguity about why the BGE-M3 `n_corpus_chunks` summary field reads 1,465,484 instead of 7,813,273.
+- **4-way fan-out and fan-in are explicit.** The diagram shows exactly four `bge_shard_{0..3}` nodes converging on a single `checkpoint` node. This matches the deployed Harvard ODD reality (4× NVIDIA L4) and is locked by the test `test_infrastructure_has_4_way_sharding`, which asserts the set `{bge_shard_0, bge_shard_1, bge_shard_2, bge_shard_3}` exactly (not just cardinality).
+- **Checkpoint is a named concept.** Rendered as an `infra`-kind node (purple, dashed) because the per-rank FAISS index atomic-write pattern (flush every 200 batches, `os.replace()` rename) is what enabled recovery from the OOM crash without losing 14 hours of corpus encoding.
+- **Merge is distinguished from encoding.** Shards produce partial FAISS indices; Merge produces the canonical top-100 retrieval output via cross-shard MaxP aggregation. Readers can see reconciliation is a real named operation, not an afterthought.
+- **DVC + S3 is the terminus.** The graph does not end at "results computed" - it ends at "results are durably reproducible via S3." That is the engineering invariant that matters for cross-team work and for MS4 when teammates on fresh clones must reproduce the exact baseline.
+
+**What it deliberately excludes:** The scientific meaning of the outputs. There is no evaluation node, no LePaRD, no Hit@k metric. Those live on the conceptual diagram. Infrastructure documents *how*; conceptual documents *what for*.
+
+### Why two diagrams instead of one
+
+A single diagram trying to encode both layers would either hide the infrastructure (misrepresenting the actual engineering work) or overwhelm the research narrative with fan-out arrows and storage nodes. The two-layer split gives each audience its native view: a TF reviewing research methodology reads Cell 16a; a collaborator trying to reproduce the BGE-M3 run or extend it for MS4 reads Cell 16b. The pair together satisfies MS3 rubric §5 "Final Model Pipeline Setup" with more rigor than required.
+
+### Implementation notes
+
+- Both specs live as module-level constants in `src/viz/pipeline_diagram.py`: `MS3_PIPELINE_SPEC` (conceptual) and `MS3_INFRASTRUCTURE_SPEC` (infrastructure).
+- A single `render_pipeline()` function handles both via the shared `build_pipeline_graph()` + `_layout_nodes()` pipeline. Figure size scales automatically with graph complexity (layer count and max-nodes-per-layer).
+- Stage kinds are pinned in `_KIND_STYLE`: `data` (tan, solid), `model` (blue, solid), `eval` (green, solid), `future` (gray, dashed), `infra` (purple, dashed). All five kinds appear in the shared legend even if a particular diagram uses only a subset - that is a consequence of using one palette across both diagrams, and is acceptable for MS3.
+- Twenty-six pytest tests cover both specs (`TestContract`, `TestGraphBuilder`, `TestRenderPipeline`, `TestMs3PipelineSpec`, `TestCycleHandling`, `TestDuplicateAndUnknown`, `TestMs3Topology`, `TestInfrastructureSpec`). Running `uv run pytest tests/test_pipeline_diagram.py -q` completes in 3 seconds.
+
+### Relevance to the final project end-goal
+
+**The conceptual diagram's future nodes are already architecturally scaffolded.** Hybrid RRF fusion will consume both existing retriever outputs (`bm25_results.jsonl` and `bge_m3_results.jsonl`), which already share the same `(source_id, dest_id, retrieved)` schema. Reranker consumes hybrid output. RAG + Hallucination Check consumes reranker output. Each future node is a well-defined input/output contract rather than a vague aspiration.
+
+**The infrastructure diagram proves the engineering can absorb MS4 scope.** The 4-way shard + checkpoint pattern is not BGE-M3-specific - the same infrastructure handles cross-encoder reranker inference (embarrassingly parallel over query-candidate pairs), ColBERT-v2 late-interaction if pursued, and LLM-based methods such as HyDE query expansion or RAG generation. MS4 experiments add nodes to existing specs but do not require new infrastructure. The `render_pipeline()` renderer, `build_pipeline_graph()` validator, `_KIND_STYLE` palette, and `TestInfrastructureSpec` contract class all extend linearly.
+
+**Artifacts produced:**
+
+```
+artifacts/
+    ms3_pipeline.png          (~93 KB, conceptual diagram for slide deck)
+    ms3_infrastructure.png    (~114 KB, infra overlay for engineering discussion)
+```
+
 ---
 
 Reconciled catalog of MS3 files (44 commits total since MS2):
