@@ -43,7 +43,7 @@ OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
 ENCODE_BATCH_SIZE="${ENCODE_BATCH_SIZE:-32}"
-QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-256}"
+QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-8}"
 WORLD_SIZE=4
 
 echo "=== SLURM BGE-M3 multi-GPU job (corpus-shard) ==="

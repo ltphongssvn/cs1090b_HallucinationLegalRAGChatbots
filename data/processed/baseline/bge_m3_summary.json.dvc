@@ -1,0 +1,5 @@
+outs:
+- md5: 0160d15378cc327b5b4a1cb135c6b8de
+  size: 674
+  hash: md5
+  path: bge_m3_summary.json

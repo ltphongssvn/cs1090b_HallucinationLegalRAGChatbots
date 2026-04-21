@@ -53,7 +53,7 @@ TOP_K = 100
 ENCODER_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024
 ENCODE_BATCH_SIZE = 64
-QUERY_BATCH_SIZE = 256
+QUERY_BATCH_SIZE = 8  # reduced from 256 after OOM on long quote outliers (18.56 GB matmul at bs=256, max_len=8192)
 RETRIEVAL_K_MULTIPLIER = 3
 CHECKPOINT_INTERVAL_BATCHES = 200  # flush partial FAISS index + meta every N batches
 MAX_LENGTH = 8192
@@ -398,7 +398,7 @@ def main(
 
     # --- Build or reuse/resume FAISS index ---
     reuse_index = False
-    if world_size == 1 and index_path.exists() and meta_path.exists():
+    if index_path.exists() and meta_path.exists():
         with meta_path.open(encoding="utf-8") as f:
             meta_line_count = sum(1 for _ in f)
         if meta_line_count == n_chunks:
