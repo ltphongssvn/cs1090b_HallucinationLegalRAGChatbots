@@ -2410,7 +2410,7 @@ The summary captures full lineage so any teammate can verify the exact same pipe
 
 ## Cell 14: BGE-M3 dense baseline on 4× idle L4 GPUs - the only remaining compute-heavy stage before Cell 15 metrics.
 
-Cell 14 Output — What It Means and Project Implications
+Cell 14 Output - What It Means and Project Implications
 
 ### What executed
 
@@ -2427,7 +2427,7 @@ The three steps that ran:
 | Metric | Value | Interpretation |
 |---|---|---|
 | `n_corpus_chunks` | 1,465,484 | **One-chunk-per-opinion subsample** (not the full 7.8M corpus). This was an MS3 scope decision to fit timeline |
-| `n_unique_opinions` | 1,465,484 | Matches corpus chunks exactly — confirms the 1:1 opinion-to-chunk mapping |
+| `n_unique_opinions` | 1,465,484 | Matches corpus chunks exactly - confirms the 1:1 opinion-to-chunk mapping |
 | `n_queries` | 45,000 | Full LePaRD test set encoded |
 | `embedding_dim` | 1024 | BGE-M3 native dimension |
 | `max_length` | 8192 tokens | Model operates at full 8K context |
@@ -2445,7 +2445,7 @@ The run confirms several important pipeline properties:
 
 1. **Multi-GPU corpus sharding works end-to-end.** `world_size=4` with per-rank shard files present on disk confirms the 4-way corpus split, parallel FAISS search, and cross-shard MaxP merge all executed correctly.
 2. **Checkpoint-resume is production-grade.** The fix survived session disconnects, SLURM termination, pyproject.toml drift, and a full resubmission cycle without corrupting saved state.
-3. **Results are content-addressed.** The `results_hash` (`0511547649c1c3a8...`) matches the file's SHA-256 — any drift in the merged output would surface immediately. This is a reproducibility property.
+3. **Results are content-addressed.** The `results_hash` (`0511547649c1c3a8...`) matches the file's SHA-256 - any drift in the merged output would surface immediately. This is a reproducibility property.
 4. **Full provenance.** `git_sha=570c0a489090` ties the output to the exact commit (the post-OOM fix). `schema_version=1.0.0` + `seed=0` + the complete hyperparameter set mean another researcher could replay this exact run bit-for-bit.
 
 ### Implications for the MS3 project end-goal
@@ -2464,13 +2464,13 @@ The run confirms several important pipeline properties:
 The BGE-M3 pipeline we just validated is the **foundation for hybrid retrieval experiments**. Specifically:
 - The per-query top-100 dense results feed directly into planned MS4 work: RRF fusion with BM25, cross-encoder reranking, and ColBERT-v2 late-interaction comparisons.
 - The infrastructure (multi-GPU sharding, checkpoint-resume, content-addressed outputs) means the full-7.8M-chunk version is a walltime-scheduling exercise, not an engineering-risk exercise. That's the biggest operational uncertainty removed.
-- The gold-label cluster-mapping issue we uncovered is a research finding worth discussing explicitly with the TF — it reframes what "retrieval quality" means on LePaRD and opens a legitimate MS4 experiment: case-level vs. opinion-level evaluation.
+- The gold-label cluster-mapping issue we uncovered is a research finding worth discussing explicitly with the TF - it reframes what "retrieval quality" means on LePaRD and opens a legitimate MS4 experiment: case-level vs. opinion-level evaluation.
 
 **Bottom line:** Cell 14's output is a successful idempotent validation of a completed run, confirming that the BGE-M3 baseline is locked in as a reproducible MS3 deliverable and provides the platform for all MS4 architectural experiments.
 
 ---
 
-## Cell 15 — MS3 Retrieval Evaluation Status Report
+## Cell 15 - MS3 Retrieval Evaluation Status Report
 
 ### The numbers as they are
 
@@ -2487,13 +2487,13 @@ Cell 15 evaluated both baselines against the 45,000 LePaRD test queries and prod
 
 Paired head-to-head: BGE-M3 wins 3 queries, BM25 wins 5 queries, 44,992 queries are ties. Of the 45,000 test queries, only ~8 had the gold `dest_id` anywhere in the top-100 retrieved results.
 
-**These are effectively zero. We suspected this is an issue to fix. We do not yet have a working baseline retrieval system that produces meaningful Hit@k numbers against the LePaRD test set.** The pipeline runs end-to-end, produces reproducible content-hashed outputs, and the infrastructure is sound — but the model outputs are not scoring on the evaluation we built.
+**These are effectively zero. We suspected this is an issue to fix. We do not yet have a working baseline retrieval system that produces meaningful Hit@k numbers against the LePaRD test set.** The pipeline runs end-to-end, produces reproducible content-hashed outputs, and the infrastructure is sound - but the model outputs are not scoring on the evaluation we built.
 
 ### What we have verified through direct inspection
 
 We performed several diagnostics before concluding anything about the cause. Each is documented so a teammate or TF reviewer can repeat them.
 
-**1. The ID namespaces are compatible.** We confirmed that all 45,000 `(source_id, dest_id)` keys in `gold_pairs_test.jsonl` appear in both `bm25_results.jsonl` and `bge_m3_results.jsonl` — the intersection is exactly 45,000. Gold `dest_id`s like `382100` and `613312` exist as valid `opinion_id`s in `corpus_chunks.jsonl`. Retrieved `opinion_id`s are all valid CourtListener opinions in the indexed corpus. There is no string-vs-int or namespace mixup.
+**1. The ID namespaces are compatible.** We confirmed that all 45,000 `(source_id, dest_id)` keys in `gold_pairs_test.jsonl` appear in both `bm25_results.jsonl` and `bge_m3_results.jsonl` - the intersection is exactly 45,000. Gold `dest_id`s like `382100` and `613312` exist as valid `opinion_id`s in `corpus_chunks.jsonl`. Retrieved `opinion_id`s are all valid CourtListener opinions in the indexed corpus. There is no string-vs-int or namespace mixup.
 
 **2. Query text loads correctly.** `scripts/baseline_bge_m3.py::_load_queries` joins `gold_pairs_test.jsonl` to `lepard_train_4000000_rev0194f95.jsonl` by `(source_id, dest_id)` and extracts the `quote` field. We verified 0 of 45,000 loaded queries have empty quote text. Samples look like real legal phrasings: `"any Act of Congress or treaty"`, `"every civil action commenced against the United States,"`, etc.
 
@@ -2508,19 +2508,19 @@ Scaled up to 500 queries, still 0 matches. This is **not** a unicode or whitespa
 
 **5. The corpus text is substantially shorter than real federal appellate opinions.** Sampling 10,000 opinions from `corpus_chunks_opinion_sample.jsonl`: mean text length 2,468 chars, median 3,258 chars, maximum 5,877 chars. Real federal appellate opinions typically run 20,000–100,000+ chars. Over the full `corpus_chunks.jsonl`, **40.5% of opinions have <5,000 chars of text, 71.3% have <20,000 chars.** Either the upstream CourtListener bulk dump ships heavily truncated text for a large fraction of its opinions, or our chunking/filtering pipeline is dropping content. We have not yet determined which.
 
-**6. Retrieval returns legally-related opinions, not gibberish.** For the query `"the consent decree is not intended to permit____"` with gold `dest_id=613312` (*Alliance to End Repression v. City of Chicago, 742 F.2d 1007, 1984*), BM25 rank-1 returned `opinion_id=9472576` — Judge Posner's appellate opinion in the **same Alliance to End Repression litigation, different procedural stage**. Rank-12 returned `9473085` — the dissent in the same case. The retriever is finding the correct legal dispute; it is not finding the specific CourtListener `opinion_id` that LePaRD's gold label points to.
+**6. Retrieval returns legally-related opinions, not gibberish.** For the query `"the consent decree is not intended to permit____"` with gold `dest_id=613312` (*Alliance to End Repression v. City of Chicago, 742 F.2d 1007, 1984*), BM25 rank-1 returned `opinion_id=9472576` - Judge Posner's appellate opinion in the **same Alliance to End Repression litigation, different procedural stage**. Rank-12 returned `9473085` - the dissent in the same case. The retriever is finding the correct legal dispute; it is not finding the specific CourtListener `opinion_id` that LePaRD's gold label points to.
 
 ### The hypotheses we are weighing now
 
 The diagnostics above are consistent with more than one root cause. We have not yet proven which one is primary. Here is an our enumeration:
 
-**Hypothesis A — Opinion-ID granularity mismatch.** CourtListener assigns distinct `opinion_id`s to majority opinions, dissents, concurrences, procedural-stage variants, and appellate-vs-district versions of the same legal dispute. LePaRD's gold `dest_id` points to one specific `opinion_id`; retrieval returns sibling `opinion_id`s from the same CourtListener `cluster_id`. If true, remapping both gold and retrieved IDs to `cluster_id` before scoring should recover nontrivial Hit@k numbers. We have partial evidence for this from the `9472576` vs `613312` example above, but we have only verified it on a handful of queries. **We have not yet executed the full remap.**
+**Hypothesis A - Opinion-ID granularity mismatch.** CourtListener assigns distinct `opinion_id`s to majority opinions, dissents, concurrences, procedural-stage variants, and appellate-vs-district versions of the same legal dispute. LePaRD's gold `dest_id` points to one specific `opinion_id`; retrieval returns sibling `opinion_id`s from the same CourtListener `cluster_id`. If true, remapping both gold and retrieved IDs to `cluster_id` before scoring should recover nontrivial Hit@k numbers. We have partial evidence for this from the `9472576` vs `613312` example above, but we have only verified it on a handful of queries. **We have not yet executed the full remap.**
 
-**Hypothesis B — Corpus truncation.** 70%+ of our corpus opinions have <20K chars. The quotes that never appear in any corpus text (0/500 in our normalized match test) may simply be missing because the body text wasn't retained through the bulk-dump → shard → chunk pipeline. If true, no amount of retrieval sophistication fixes this; we would need to rebuild the corpus from fuller-text CourtListener sources (e.g., the `xml_harvard` or `html_with_citations` columns of `opinions-2025-12-31.csv.bz2`, which we are currently dropping in favor of `plain_text`).
+**Hypothesis B - Corpus truncation.** 70%+ of our corpus opinions have <20K chars. The quotes that never appear in any corpus text (0/500 in our normalized match test) may simply be missing because the body text wasn't retained through the bulk-dump → shard → chunk pipeline. If true, no amount of retrieval sophistication fixes this; we would need to rebuild the corpus from fuller-text CourtListener sources (e.g., the `xml_harvard` or `html_with_citations` columns of `opinions-2025-12-31.csv.bz2`, which we are currently dropping in favor of `plain_text`).
 
-**Hypothesis C — LePaRD quotes are paraphrases.** The LePaRD paper claims quotes are exact extracts. Our 0/500 match rate argues against that claim for our corpus subset, but we have not confirmed by sampling LePaRD rows where the same quote *does* appear in CourtListener text for comparison. This hypothesis is the hardest to rule out cheaply.
+**Hypothesis C - LePaRD quotes are paraphrases.** The LePaRD paper claims quotes are exact extracts. Our 0/500 match rate argues against that claim for our corpus subset, but we have not confirmed by sampling LePaRD rows where the same quote *does* appear in CourtListener text for comparison. This hypothesis is the hardest to rule out cheaply.
 
-**Hypothesis D — Some combination of A + B.** Both granularity and truncation issues might be present and compounding.
+**Hypothesis D - Some combination of A + B.** Both granularity and truncation issues might be present and compounding.
 
 ### What we have NOT yet done but plan to
 
@@ -2535,8 +2535,8 @@ Estimated effort: ~4 hours of CPU-only work. Outcome decides whether Hypothesis 
 **Sample the `xml_harvard` column for full opinion text.** If corpus truncation (Hypothesis B) is primary, we need to rebuild the corpus from a less-truncated text column. We will sample 100 opinions for which LePaRD quotes currently don't match and check whether the quote appears in the Harvard XML text. If it does, the rebuild is justified. Estimated effort: ~2 hours.
 
 **Run the full 7.8M BGE-M3 encoding.** The current BGE-M3 baseline ran on the one-chunk-per-opinion subsample (1.47M rows) for MS3 timeline reasons. We planned to commit ~84 hours of 4×L4 GPU time across 5 SLURM walltime cycles (20hr each) for the full 7.8M-chunk BGE-M3 encoding. **We are reconsidering this plan** because:
-- If Hypothesis A (granularity) is primary, the subsample vs full corpus distinction doesn't affect Hit@k meaningfully — scaling up won't help.
-- If Hypothesis B (truncation) is primary, scaling up the current truncated corpus amplifies bad retrieval on more chunks without adding signal — still won't help.
+- If Hypothesis A (granularity) is primary, the subsample vs full corpus distinction doesn't affect Hit@k meaningfully - scaling up won't help.
+- If Hypothesis B (truncation) is primary, scaling up the current truncated corpus amplifies bad retrieval on more chunks without adding signal - still won't help.
 - We should remap to clusters FIRST. If clusters give nontrivial Hit@k on the subsample, then scaling to full 7.8M is worthwhile. If clusters still give near-zero Hit@k, we need to diagnose corpus truncation before any further GPU time.
 
 Current provisional order of operations, subject to change after the cluster remap:
@@ -2557,11 +2557,11 @@ As MS3 rubric states accuracy is not the grading focus; methodology and reasonin
 
 ### Artifacts this status refers to
 
-- `data/processed/baseline/gold_pairs_test.jsonl` — 45,000 test queries
+- `data/processed/baseline/gold_pairs_test.jsonl` - 45,000 test queries
 - `data/processed/baseline/bm25_results.jsonl` (229 MB, results_hash `926b4ebbdff68e13...`)
 - `data/processed/baseline/bge_m3_results.jsonl` (233 MB, results_hash `0511547649c1c3a8...`)
-- `data/processed/baseline/eval_summary.json` — Pydantic-validated at `BaselineEvalSummary` schema v1.0.0
-- `data/processed/baseline/eval_comparison.json` — per-query win/tie counts
+- `data/processed/baseline/eval_summary.json` - Pydantic-validated at `BaselineEvalSummary` schema v1.0.0
+- `data/processed/baseline/eval_comparison.json` - per-query win/tie counts
 - Current git SHA at time of this report: `02177cb61d99`
 
 ---
@@ -2638,7 +2638,7 @@ artifacts/
 
 Reconciled catalog of MS3 files (44 commits total since MS2):
 
-## MS3 File Changes — Complete Catalog
+## MS3 File Changes - Complete Catalog
 
 ### EDA (early MS3)
 
