@@ -1,0 +1,23 @@
+{
+  "sample_size": 100,
+  "cl_dir": "/Users/alexoort/Documents/Harvard/CS 1090b/cs1090b_HallucinationLegalRAGChatbots/data/raw/cl_federal_appellate_bulk",
+  "fuzzy_threshold": 0.85,
+  "id_level": {
+    "source_ids_sampled": 97,
+    "found_in_cl": 0,
+    "missing_from_cl": 97,
+    "id_match_pct": 0.0
+  },
+  "text_level": {
+    "checkable_pairs": 0,
+    "exact_match": 0,
+    "norm_match": 0,
+    "fuzzy_match": 0,
+    "exact_match_pct_of_checkable": 0.0,
+    "norm_match_pct_of_checkable": 0.0,
+    "fuzzy_match_pct_of_checkable": 0.0,
+    "exact_match_pct_of_total": 0.0,
+    "norm_match_pct_of_total": 0.0
+  },
+  "elapsed_sec": 23.9
+}

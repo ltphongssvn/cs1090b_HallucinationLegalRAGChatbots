@@ -1,0 +1,35 @@
+{
+  "sample_size": 10000,
+  "full_lepard_run": false,
+  "citations_file": "citations-2026-03-31.csv.bz2",
+  "cl_index_size": 15038997,
+  "elapsed_sec": 163.9,
+  "row_level": {
+    "total_rows": 10000,
+    "has_source_cite": 10000,
+    "parse_ok": 10000,
+    "parse_fail": 0,
+    "in_cl": 9977,
+    "parse_rate_pct": 100.0,
+    "cl_match_of_parsed_pct": 99.77,
+    "cl_match_of_total_pct": 99.77
+  },
+  "unique_cite_level": {
+    "unique_source_cites": 7152,
+    "unique_parsed": 7152,
+    "unique_in_cl": 7141,
+    "unique_match_of_parsed_pct": 99.85
+  },
+  "federal_appellate_subset": {
+    "appellate_rows": 5525,
+    "appellate_parse_ok": 5525,
+    "appellate_in_cl": 5525,
+    "appellate_match_of_parsed_pct": 100.0
+  },
+  "top_missed_reporters": [
+    {
+      "reporter": "s.ct.",
+      "count": 23
+    }
+  ]
+}

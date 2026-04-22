@@ -50,3 +50,5 @@ data/**
 wandb/
 /lepard_train_4000000_rev0194f95.jsonl
 lepard_eda/lepard_data/
+# CourtListener bulk data + on-disk caches (regenerable, >1GB)
+lepard_eda/cl_bulk/

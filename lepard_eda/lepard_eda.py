@@ -32,6 +32,10 @@ CL_FEDERAL_APPELLATE_COURTS = frozenset({
     "ca7", "ca8", "ca9", "ca10", "ca11", "cadc", "cafc",
 })
 
+if __name__ != "__main__":
+    raise ImportError("lepard_eda.py is a standalone script — do not import it. "
+                      "Import lepard_cl_cite_overlap or lepard_cl_text_overlap_api instead.")
+
 # ---------------------------------------------------------------------------
 # 1. Load LePaRD
 # ---------------------------------------------------------------------------

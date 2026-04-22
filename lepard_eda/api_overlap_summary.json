@@ -1,0 +1,27 @@
+{
+  "sample_size": 500,
+  "fuzzy_threshold": 75.0,
+  "elapsed_sec": 405.0,
+  "cluster_resolved": 500,
+  "checkable_pairs": 500,
+  "exact_match": 134,
+  "norm_match": 143,
+  "clean_match": 160,
+  "fuzzy_match": 463,
+  "exact_pct_of_checkable": 26.8,
+  "norm_pct_of_checkable": 28.6,
+  "clean_pct_of_checkable": 32.0,
+  "fuzzy_pct_of_checkable": 92.6,
+  "ratio_distribution": {
+    "exact(=100)": 172,
+    "near(90-100)": 212,
+    "fuzzy(75-90)": 79,
+    "low(50-75)": 34,
+    "miss(<50)": 3
+  },
+  "match_by_opinion_type": {
+    "combined": 154,
+    "majority": 30,
+    "dissent": 1
+  }
+}
