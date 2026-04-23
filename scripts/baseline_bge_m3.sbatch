@@ -43,7 +43,6 @@ export TRANSFORMERS_CACHE="$HF_HOME/hub"
 
 CORPUS_PATH="${CORPUS_PATH:-data/processed/baseline/corpus_chunks.jsonl}"
 GOLD_PATH="${GOLD_PATH:-data/processed/baseline/gold_pairs_test.jsonl}"
-LEPARD_PATH="${LEPARD_PATH:-lepard_train_4000000_rev0194f95.jsonl}"
 OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
@@ -68,7 +67,7 @@ echo "  uv_version        : $(uv --version 2>&1 | head -1)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || echo "  (no nvidia-smi)"
 
 # --- Preflight: inputs exist before allocating encoder ---
-for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
+for p in "$CORPUS_PATH" "$GOLD_PATH"; do
     if [[ ! -f "$p" ]]; then
         echo "FAIL: missing input: $p" >&2
         exit 2
@@ -117,7 +116,6 @@ echo "=== preflight: dry-run ==="
 uv run --locked python scripts/baseline_bge_m3.py \
     --corpus-path "$CORPUS_PATH" \
     --gold-pairs-path "$GOLD_PATH" \
-    --lepard-path "$LEPARD_PATH" \
     --out-dir "$OUT_DIR" \
     --top-k "$TOP_K" \
     --seed "$SEED" \
@@ -134,7 +132,6 @@ trap "kill $GPU_DMON_PID 2>/dev/null || true" EXIT
 uv run --locked python scripts/baseline_bge_m3.py \
     --corpus-path "$CORPUS_PATH" \
     --gold-pairs-path "$GOLD_PATH" \
-    --lepard-path "$LEPARD_PATH" \
     --out-dir "$OUT_DIR" \
     --top-k "$TOP_K" \
     --seed "$SEED" \

@@ -7,7 +7,6 @@ class-based, module-scoped import fixture, Hypothesis for property tests.
 from __future__ import annotations
 
 import ast
-import gzip
 import importlib
 import inspect
 import json
@@ -69,9 +68,7 @@ class TestMainSignature:
         sig = inspect.signature(baseline_module.main)
         expected = {
             "shard_dir",
-            "lepard_path",
-            "cl_ids_path",
-            "court_map_path",
+            "verified_subset_path",
             "out_dir",
             "log_to_wandb",
             "resume",
@@ -113,13 +110,10 @@ class TestNoBasicConfigAtImport:
 class TestArgparseCLI:
     def test_build_arg_parser(self, baseline_module: Any) -> None:
         parser = baseline_module._build_arg_parser()
-        # Matches tests/test_eda_ms3_lepard.py:367 repo convention
         actions = {a.dest: a for a in parser._actions}
         for dest in (
             "shard_dir",
-            "lepard_path",
-            "cl_ids_path",
-            "court_map_path",
+            "verified_subset_path",
             "out_dir",
             "log_to_wandb",
             "resume",
@@ -169,61 +163,34 @@ def mini_shard(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def mini_lepard(tmp_path: Path) -> Path:
-    pairs = [
-        {"source_id": 1001, "dest_id": 1002, "passage": "p1"},
-        {"source_id": 1002, "dest_id": 1003, "passage": "p2"},
-        {"source_id": 1003, "dest_id": 1004, "passage": "p3"},
-        {"source_id": 1001, "dest_id": 1004, "passage": "p4"},
-        {"source_id": 9999, "dest_id": 1001, "passage": "p5"},
-        {"source_id": 1002, "dest_id": 8888, "passage": "p6"},
+def mini_verified_subset(tmp_path: Path) -> Path:
+    # source_cluster_id and dest_id match opinion ids in mini_shard (1001-1004)
+    rows = [
+        {"source_id": 1001, "source_cluster_id": 1001, "source_court": "ca5",
+         "dest_id": 1002, "quote": "p1 text", "destination_context": "ctx1"},
+        {"source_id": 1002, "source_cluster_id": 1002, "source_court": "ca9",
+         "dest_id": 1003, "quote": "p2 text", "destination_context": "ctx2"},
+        {"source_id": 1003, "source_cluster_id": 1003, "source_court": "ca1",
+         "dest_id": 1004, "quote": "p3 text", "destination_context": "ctx3"},
+        {"source_id": 1001, "source_cluster_id": 1001, "source_court": "ca5",
+         "dest_id": 1004, "quote": "p4 text", "destination_context": "ctx4"},
     ]
-    p = tmp_path / "lepard.jsonl"
+    p = tmp_path / "lepard_cl_verified_subset.jsonl"
     with p.open("w", encoding="utf-8") as f:
-        for r in pairs:
+        for r in rows:
             f.write(json.dumps(r) + "\n")
-    return p
-
-
-@pytest.fixture
-def mini_cl_ids(tmp_path: Path) -> Path:
-    p = tmp_path / "cl_ids.txt.gz"
-    with gzip.open(p, "wt", encoding="utf-8") as f:
-        for oid in (1001, 1002, 1003, 1004):
-            f.write(f"{oid}\n")
-    return p
-
-
-@pytest.fixture
-def mini_court_map(tmp_path: Path) -> Path:
-    p = tmp_path / "court_map.json"
-    p.write_text(json.dumps({"1001": "ca5", "1002": "ca9", "1003": "ca1", "1004": "cadc"}))
     return p
 
 
 @pytest.mark.unit
 class TestGoldPairExtraction:
-    def test_filters_to_both_in_cl(self, baseline_module: Any, mini_lepard: Path, mini_cl_ids: Path) -> None:
-        cl_ids = baseline_module._load_cl_ids(mini_cl_ids)
-        pairs = list(baseline_module._iter_usable_gold(mini_lepard, cl_ids))
-        assert len(pairs) == 4
-        ids = {(p["source_id"], p["dest_id"]) for p in pairs}
-        assert (1001, 1002) in ids
-        assert (9999, 1001) not in ids
-        assert (1002, 8888) not in ids
-
-
-@pytest.mark.unit
-class TestSourceCourtLookup:
-    def test_annotates_source_court(
-        self, baseline_module: Any, mini_lepard: Path, mini_cl_ids: Path, mini_court_map: Path
-    ) -> None:
-        cl_ids = baseline_module._load_cl_ids(mini_cl_ids)
-        court_map = baseline_module._load_court_map(mini_court_map)
-        pairs = list(baseline_module._iter_usable_gold(mini_lepard, cl_ids))
-        annotated = baseline_module._annotate_source_court(pairs, court_map)
-        assert all("source_court" in p for p in annotated)
-        assert annotated[0]["source_court"] in {"ca5", "ca9", "ca1", "cadc"}
+    def test_loads_verified_subset(self, baseline_module: Any, mini_verified_subset: Path) -> None:
+        rows = baseline_module._load_verified_subset(mini_verified_subset)
+        assert len(rows) == 4
+        assert all("source_cluster_id" in r for r in rows)
+        assert all("dest_id" in r for r in rows)
+        assert all("source_court" in r for r in rows)
+        assert all("quote" in r for r in rows)
 
 
 @pytest.mark.unit
@@ -318,9 +285,18 @@ class TestCheckpointResume:
         out_dir = tmp_path / "out"
         out_dir.mkdir()
         ck = out_dir / "chunking_checkpoint.json"
-        ck.write_text(json.dumps({"completed": ["shard_0000.jsonl"]}))
-        completed = baseline_module._load_checkpoint(ck)
+        ck.write_text(json.dumps({"completed": ["shard_0000.jsonl"], "run_key": "abc123"}))
+        completed, run_key = baseline_module._load_checkpoint(ck)
         assert "shard_0000.jsonl" in completed
+        assert run_key == "abc123"
+
+    def test_missing_run_key_defaults_to_empty(self, baseline_module: Any, tmp_path: Path) -> None:
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        ck = out_dir / "chunking_checkpoint.json"
+        ck.write_text(json.dumps({"completed": ["shard_0000.jsonl"]}))
+        completed, run_key = baseline_module._load_checkpoint(ck)
+        assert run_key == ""  # legacy checkpoint without run_key triggers fresh start
 
 
 @pytest.mark.unit
@@ -341,9 +317,12 @@ class TestSummarySchema:
             "seed": 0,
             "git_sha": "abc123def456",
             "corpus_manifest_sha": "a" * 64,
+            "verified_subset_sha": "b" * 64,
+            "n_verified_pairs": 4,
         }
         mod = BaselinePrepSummary(**data)
         assert mod.gold_pairs_test == 2
+        assert mod.n_verified_pairs == 4
         j1 = json.dumps(mod.model_dump(), sort_keys=True)
         j2 = json.dumps(mod.model_dump(), sort_keys=True)
         assert j1 == j2
@@ -356,9 +335,9 @@ class TestAtomicArtifactWrite:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Mock tokenizer to air-gap this integration test from HF Hub
@@ -370,9 +349,7 @@ class TestAtomicArtifactWrite:
         out_dir = tmp_path / "out"
         baseline_module.main(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=out_dir,
             log_to_wandb=False,
             resume=False,
@@ -505,9 +482,9 @@ class TestMainResumeIdempotency:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
@@ -518,9 +495,7 @@ class TestMainResumeIdempotency:
         out_dir = tmp_path / "out"
         kwargs = dict(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=out_dir,
             log_to_wandb=False,
             resume=True,
@@ -552,9 +527,9 @@ class TestGoldPairHashRoundtrip:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import hashlib
@@ -567,9 +542,7 @@ class TestGoldPairHashRoundtrip:
         out_dir = tmp_path / "out"
         baseline_module.main(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=out_dir,
             log_to_wandb=False,
             resume=False,
@@ -609,9 +582,9 @@ class TestSummaryJsonRoundtrip:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from src.eda_schemas import BaselinePrepSummary
@@ -624,9 +597,7 @@ class TestSummaryJsonRoundtrip:
         out_dir = tmp_path / "out"
         baseline_module.main(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=out_dir,
             log_to_wandb=False,
             resume=False,
@@ -744,9 +715,9 @@ class TestWandbBranchBehavior:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
@@ -762,9 +733,7 @@ class TestWandbBranchBehavior:
         )
         baseline_module.main(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=tmp_path / "out",
             log_to_wandb=False,
             resume=False,
@@ -779,9 +748,9 @@ class TestWandbBranchBehavior:
         baseline_module: Any,
         tmp_path: Path,
         mini_shard: Path,
-        mini_lepard: Path,
-        mini_cl_ids: Path,
-        mini_court_map: Path,
+        mini_verified_subset: Path,
+        
+        
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
@@ -797,9 +766,7 @@ class TestWandbBranchBehavior:
         )
         baseline_module.main(
             shard_dir=mini_shard,
-            lepard_path=mini_lepard,
-            cl_ids_path=mini_cl_ids,
-            court_map_path=mini_court_map,
+            verified_subset_path=mini_verified_subset,
             out_dir=tmp_path / "out",
             log_to_wandb=True,
             resume=False,

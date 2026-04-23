@@ -90,26 +90,21 @@ def _iter_corpus(path: Path) -> Iterator[dict[str, Any]]:
             yield json.loads(line)
 
 
-def _load_queries(gold_path: Path, lepard_path: Path) -> list[dict[str, Any]]:
-    gold_keys: set[tuple[int, int]] = set()
+def _load_queries(gold_path: Path) -> list[dict[str, Any]]:
+    """Load queries directly from gold pairs (quote field embedded by baseline_prep)."""
+    queries: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
     with gold_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
-            gold_keys.add((int(r["source_id"]), int(r["dest_id"])))
-
-    queries: list[dict[str, Any]] = []
-    seen: set[tuple[int, int]] = set()
-    with lepard_path.open(encoding="utf-8") as f:
-        for line in f:
-            r = json.loads(line)
             key = (int(r["source_id"]), int(r["dest_id"]))
-            if key in gold_keys and key not in seen:
+            if key not in seen:
                 seen.add(key)
                 queries.append(
                     {
                         "source_id": key[0],
                         "dest_id": key[1],
-                        "query_text": r.get("quote", ""),
+                        "query_text": r.get("destination_context", ""),
                     }
                 )
     return queries
@@ -322,7 +317,6 @@ def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
 def main(
     corpus_path: Path = DEFAULT_CORPUS,
     gold_pairs_path: Path = DEFAULT_GOLD,
-    lepard_path: Path = DEFAULT_LEPARD,
     out_dir: Path = DEFAULT_OUT_DIR,
     top_k: int = TOP_K,
     log_to_wandb: bool = False,
@@ -349,7 +343,7 @@ def main(
         raise ValueError(f"world_size must be >= 1, got {world_size}")
     if rank < 0 or rank >= world_size:
         raise ValueError(f"rank {rank} out of range [0, {world_size})")
-    for path in (corpus_path, gold_pairs_path, lepard_path):
+    for path in (corpus_path, gold_pairs_path):
         if not Path(path).is_file():
             raise FileNotFoundError(f"input missing: {path}")
 
@@ -512,7 +506,7 @@ def main(
 
     # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
-    queries = _load_queries(gold_pairs_path, lepard_path)
+    queries = _load_queries(gold_pairs_path)
     logger.info(f"  queries          : {len(queries):,}")
     query_texts = [q["query_text"] for q in queries]
     t0 = time.perf_counter()
@@ -632,7 +626,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="MS3 BGE-M3 dense baseline retrieval.")
     ap.add_argument("--corpus-path", type=Path, default=DEFAULT_CORPUS)
     ap.add_argument("--gold-pairs-path", type=Path, default=DEFAULT_GOLD)
-    ap.add_argument("--lepard-path", type=Path, default=DEFAULT_LEPARD)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--top-k", type=int, default=TOP_K)
     ap.add_argument("--encode-batch-size", type=int, default=ENCODE_BATCH_SIZE)
@@ -658,7 +651,6 @@ if __name__ == "__main__":
     main(
         corpus_path=args.corpus_path,
         gold_pairs_path=args.gold_pairs_path,
-        lepard_path=args.lepard_path,
         out_dir=args.out_dir,
         top_k=args.top_k,
         log_to_wandb=args.log_to_wandb,

@@ -1,8 +1,7 @@
 """MS3 Baseline dataset prep: chunk CL corpus + extract usable gold pairs.
 
 Thin orchestration over:
-    - src.lepard_cl_compat primitives (_load_cl_ids-equivalent)
-    - Polars for corpus shard scanning
+    - Verified LePaRD-CL subset (from scripts/build_lepard_cl_subset.py)
     - transformers.AutoTokenizer for 1024-subword, 128-overlap chunking
 
 Outputs (data/processed/baseline/):
@@ -12,25 +11,32 @@ Outputs (data/processed/baseline/):
     chunking_checkpoint.json   — per-shard resume state (atomic via os.replace)
     summary.json               — BaselinePrepSummary (Pydantic-validated)
 
+Gold pairs are drawn exclusively from the verified LePaRD-CL subset produced
+by scripts/build_lepard_cl_subset.py (eyecite citation match + fuzzy text
+overlap). Each pair uses source_cluster_id (verified CL opinion ID) as
+source_id; dest_id is the LePaRD destination opinion ID. The corpus is
+restricted to opinions referenced in the verified pairs (source_cluster_id
+union dest_id), keeping it tractable while preserving all gold targets.
+
 Checkpoint semantics: per-shard completion recorded atomically via
 tempfile.mkstemp + os.replace (matches scripts/ingest_lepard.py:578 +
 src/bulk_download.py:141 repo convention). Crashed runs resume from
-last completed shard.
+last completed shard. Checkpoints are invalidated when the verified subset
+SHA changes (new subset → fresh chunking run).
 
-Stratification: source_court key (via cl_matched_courts.json lookup),
+Stratification: source_court key (present in verified subset rows),
 minority-group-preserving largest-remainder allocation. Guarantees every
-stratum with >=2 members appears in val or test. Matches inference-time
-query distribution (a user's question comes from a specific circuit).
+stratum with >=2 members appears in val or test.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
 import json
 import logging
 import os
+import re
 import random
 import subprocess
 import sys
@@ -48,9 +54,7 @@ VAL_SIZE = 2000
 TEST_SIZE = 45000
 
 DEFAULT_SHARD_DIR = Path("data/raw/cl_federal_appellate_bulk")
-DEFAULT_LEPARD = Path("lepard_train_4000000_rev0194f95.jsonl")
-DEFAULT_CL_IDS = Path("data/processed/cl_ids.txt.gz")
-DEFAULT_COURT_MAP = Path("data/processed/cl_matched_courts.json")
+DEFAULT_VERIFIED_SUBSET = Path("data/processed/lepard_cl_verified_subset.jsonl")
 DEFAULT_OUT_DIR = Path("data/processed/baseline")
 
 
@@ -71,39 +75,15 @@ logger = _get_logger()
 # ---------- I/O primitives ----------
 
 
-def _load_cl_ids(path: Path) -> set[int]:
-    """Load CL opinion id universe from gzipped or plain text."""
-    opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rt", encoding="utf-8") as f:
-        return {int(line.strip()) for line in f if line.strip()}
-
-
-def _load_court_map(path: Path) -> dict[int, str]:
-    """Load {opinion_id: court_id} from JSON (keys serialized as strings)."""
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    return {int(k): v for k, v in raw.items()}
-
-
-def _iter_usable_gold(
-    lepard_path: Path,
-    cl_ids: set[int],
-) -> Iterator[dict[str, Any]]:
-    """Stream LePaRD pairs, yielding only those where both endpoints are in CL."""
-    with lepard_path.open(encoding="utf-8") as f:
+def _load_verified_subset(path: Path) -> list[dict[str, Any]]:
+    """Load all rows from the verified LePaRD-CL subset JSONL."""
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as f:
         for line in f:
-            r = json.loads(line)
-            src = int(r["source_id"])
-            dst = int(r["dest_id"])
-            if src in cl_ids and dst in cl_ids:
-                yield {"source_id": src, "dest_id": dst}
-
-
-def _annotate_source_court(
-    pairs: list[dict[str, Any]],
-    court_map: dict[int, str],
-) -> list[dict[str, Any]]:
-    """Add source_court from the matched-courts lookup."""
-    return [{**p, "source_court": court_map.get(p["source_id"], "unknown")} for p in pairs]
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
 
 
 # ---------- stratified split ----------
@@ -220,48 +200,110 @@ def _chunk_text(
     opinion_id: int,
     tok: Any,
 ) -> list[dict[str, Any]]:
-    """Chunk text into 1024-subword windows with 128-subword overlap.
+    """Chunk text into 1024-subword windows with paragraph-boundary awareness.
 
-    Matches README chunking policy (Revision 4). Returns list of
-    {opinion_id, chunk_index, text} dicts.
+    Algorithm:
+      1. Split on blank lines (\\n\\n+) so cuts land at natural paragraph
+         boundaries wherever possible.
+      2. Paragraphs that exceed CHUNK_SIZE on their own are pre-split at
+         token level (fallback), producing sub-paragraph slices.
+      3. The main loop greedily fills a buffer with whole paragraph token
+         sequences. When the next paragraph would overflow, the buffer is
+         flushed as a chunk and the last CHUNK_OVERLAP_SUBWORDS tokens are
+         carried forward so no inter-chunk context is hard-lost.
+      4. Flat text (no blank lines) degrades gracefully to the old token-
+         level sliding-window behaviour via the pre-split fallback.
     """
-    tokens = tok.encode(text, add_special_tokens=False)
-    if not tokens:
+    raw_paras = re.split(r"\n{2,}", text)
+    paragraphs = [p.strip() for p in raw_paras if p.strip()]
+    if not paragraphs:
         return []
+
     stride = CHUNK_SIZE_SUBWORDS - CHUNK_OVERLAP_SUBWORDS  # 896
+
+    # Encode each paragraph; pre-split oversized ones at token level so the
+    # main loop can assume every element fits within CHUNK_SIZE.
+    para_seqs: list[list[int]] = []
+    for para in paragraphs:
+        tokens = tok.encode(para, add_special_tokens=False)
+        if not tokens:
+            continue
+        if len(tokens) <= CHUNK_SIZE_SUBWORDS:
+            para_seqs.append(tokens)
+        else:
+            start = 0
+            while start < len(tokens):
+                end = min(start + CHUNK_SIZE_SUBWORDS, len(tokens))
+                para_seqs.append(tokens[start:end])
+                if end >= len(tokens):
+                    break
+                start += stride
+
+    if not para_seqs:
+        return []
+
     chunks: list[dict[str, Any]] = []
-    idx = 0
-    start = 0
-    while start < len(tokens):
-        end = min(start + CHUNK_SIZE_SUBWORDS, len(tokens))
-        chunk_tokens = tokens[start:end]
-        chunk_text = tok.decode(chunk_tokens, skip_special_tokens=True)
+    chunk_idx = 0
+    current: list[int] = []
+
+    for para_tokens in para_seqs:
+        if len(current) + len(para_tokens) <= CHUNK_SIZE_SUBWORDS:
+            current.extend(para_tokens)
+        else:
+            if current:
+                chunks.append(
+                    {
+                        "opinion_id": opinion_id,
+                        "chunk_index": chunk_idx,
+                        "text": tok.decode(current, skip_special_tokens=True),
+                    }
+                )
+                chunk_idx += 1
+                current = current[-CHUNK_OVERLAP_SUBWORDS:]
+            # para_tokens is guaranteed <= CHUNK_SIZE (pre-split above).
+            # If overlap + para still overflows (edge case where overlap itself
+            # is near-full), drop the overlap rather than truncating the para.
+            if len(current) + len(para_tokens) <= CHUNK_SIZE_SUBWORDS:
+                current.extend(para_tokens)
+            else:
+                current = list(para_tokens)
+
+    if current:
         chunks.append(
             {
                 "opinion_id": opinion_id,
-                "chunk_index": idx,
-                "text": chunk_text,
+                "chunk_index": chunk_idx,
+                "text": tok.decode(current, skip_special_tokens=True),
             }
         )
-        idx += 1
-        if end >= len(tokens):
-            break
-        start += stride
+
     return chunks
 
 
 # ---------- checkpoint (atomic) ----------
 
 
-def _load_checkpoint(path: Path) -> set[str]:
+def _load_checkpoint(path: Path) -> tuple[set[str], str]:
+    """Return (completed_shard_names, run_key).
+
+    Missing run_key in legacy checkpoints defaults to "" so that old
+    checkpoint files trigger a fresh run (run_key mismatch with any real key).
+    """
     if not path.exists():
-        return set()
-    return set(json.loads(path.read_text(encoding="utf-8"))["completed"])
+        return set(), ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return set(data["completed"]), str(data.get("run_key", ""))
+    except (KeyError, json.JSONDecodeError, ValueError):
+        return set(), ""
 
 
-def _save_checkpoint(path: Path, completed: set[str]) -> None:
+def _save_checkpoint(path: Path, completed: set[str], run_key: str = "") -> None:
     """Atomic write: tempfile.mkstemp + os.replace (repo convention)."""
-    data = json.dumps({"completed": sorted(completed)}, indent=2)
+    data = json.dumps(
+        {"completed": sorted(completed), "run_key": run_key},
+        indent=2,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".json.tmp")
     try:
@@ -308,19 +350,31 @@ def _chunk_corpus(
     *,
     resume: bool,
     tok: Any,
+    opinion_ids: set[int],
+    run_key: str = "",
 ) -> tuple[int, int]:
-    """Stream CL shards, chunk every opinion, write corpus_chunks.jsonl.
+    """Stream CL shards, chunk opinions in opinion_ids, write corpus_chunks.jsonl.
 
-    Returns (n_chunks, n_opinions). Resumes from last checkpoint if
-    resume=True; idempotent: counts pre-existing chunks from prior runs.
+    Returns (n_chunks, n_opinions). Only opinions whose id is in opinion_ids
+    are chunked; others are skipped. Checkpoints are invalidated when run_key
+    changes (i.e. when the verified subset is updated).
+
+    Resume semantics: if the existing checkpoint recorded a different run_key,
+    the checkpoint is discarded and chunking restarts from scratch.
     """
-    completed = _load_checkpoint(ckpt_path) if resume else set()
+    completed, ckpt_run_key = _load_checkpoint(ckpt_path) if resume else (set(), run_key)
+    if ckpt_run_key != run_key:
+        logger.info(
+            f"  run_key changed ({ckpt_run_key[:8] or 'none'!r} → {run_key[:8]!r}), discarding checkpoint"
+        )
+        completed = set()
+
     shards = sorted(shard_dir.glob("shard_*.jsonl"))
     mode = "a" if completed else "w"
     n_chunks = 0
     n_opinions = 0
 
-    # Idempotency: count pre-existing chunks from prior resumed runs
+    # Idempotency: count pre-existing chunks from prior resumed runs.
     if completed and out_path.exists():
         seen_opinions: set[int] = set()
         with out_path.open(encoding="utf-8") as fin:
@@ -340,6 +394,8 @@ def _chunk_corpus(
                 for line in fin:
                     r = json.loads(line)
                     oid = int(r["id"])
+                    if oid not in opinion_ids:
+                        continue
                     text = r.get("text", "")
                     if not text:
                         continue
@@ -350,7 +406,7 @@ def _chunk_corpus(
                     if chunks:
                         n_opinions += 1
             completed.add(shard.name)
-            _save_checkpoint(ckpt_path, completed)
+            _save_checkpoint(ckpt_path, completed, run_key=run_key)
     return n_chunks, n_opinions
 
 
@@ -383,9 +439,7 @@ def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
 
 def main(
     shard_dir: Path = DEFAULT_SHARD_DIR,
-    lepard_path: Path = DEFAULT_LEPARD,
-    cl_ids_path: Path = DEFAULT_CL_IDS,
-    court_map_path: Path = DEFAULT_COURT_MAP,
+    verified_subset_path: Path = DEFAULT_VERIFIED_SUBSET,
     out_dir: Path = DEFAULT_OUT_DIR,
     log_to_wandb: bool = False,
     resume: bool = True,
@@ -393,7 +447,13 @@ def main(
     val_size: int = VAL_SIZE,
     test_size: int = TEST_SIZE,
 ) -> dict[str, Any]:
-    """Run baseline prep pipeline. Returns summary dict."""
+    """Run baseline prep pipeline. Returns summary dict.
+
+    Reads gold pairs from the verified LePaRD-CL subset (eyecite + fuzzy
+    match verified). Corpus chunking is restricted to the opinion IDs
+    referenced in those pairs (source_cluster_id ∪ dest_id), keeping the
+    corpus tractable while ensuring all gold targets are retrievable.
+    """
     from src.eda_schemas import BaselinePrepSummary
 
     out_dir = Path(out_dir)
@@ -402,30 +462,45 @@ def main(
     logger.info("=" * 60)
     logger.info(f"MS3 baseline prep  (seed={seed})")
     logger.info("=" * 60)
-    logger.info(f"  shard_dir      : {shard_dir}")
-    logger.info(f"  lepard_path    : {lepard_path}")
-    logger.info(f"  cl_ids_path    : {cl_ids_path}")
-    logger.info(f"  court_map_path : {court_map_path}")
-    logger.info(f"  out_dir        : {out_dir}")
+    logger.info(f"  shard_dir            : {shard_dir}")
+    logger.info(f"  verified_subset_path : {verified_subset_path}")
+    logger.info(f"  out_dir              : {out_dir}")
 
-    logger.info("\n[1/3] Loading CL id universe + court map")
-    cl_ids = _load_cl_ids(cl_ids_path)
-    court_map = _load_court_map(court_map_path)
-    logger.info(f"  cl_ids     : {len(cl_ids):,}")
-    logger.info(f"  court_map  : {len(court_map):,} matched ids")
+    logger.info("\n[1/3] Loading verified LePaRD-CL subset")
+    verified_rows = _load_verified_subset(verified_subset_path)
+    logger.info(f"  verified pairs       : {len(verified_rows):,}")
 
-    logger.info("\n[2/3] Extracting usable gold pairs")
-    raw_pairs = list(_iter_usable_gold(lepard_path, cl_ids))
-    pairs = _annotate_source_court(raw_pairs, court_map)
+    verified_subset_sha = hashlib.sha256(verified_subset_path.read_bytes()).hexdigest()
+    logger.info(f"  verified_subset_sha  : {verified_subset_sha[:16]}...")
+
+    logger.info("\n[2/3] Building gold pairs + corpus opinion ID set")
+
+    # Deduplicate by (source_cluster_id, dest_id)
     seen: set[tuple[int, int]] = set()
     deduped: list[dict[str, Any]] = []
-    for p in pairs:
-        k = (p["source_id"], p["dest_id"])
+    corpus_opinion_ids: set[int] = set()
+
+    for row in verified_rows:
+        src_cid = int(row["source_cluster_id"])
+        dst_id = int(row["dest_id"])
+        corpus_opinion_ids.add(src_cid)
+        corpus_opinion_ids.add(dst_id)
+        k = (src_cid, dst_id)
         if k not in seen:
             seen.add(k)
-            deduped.append(p)
-    logger.info(f"  raw pairs       : {len(pairs):,}")
-    logger.info(f"  unique pairs    : {len(deduped):,}")
+            deduped.append(
+                {
+                    "source_id": src_cid,
+                    "dest_id": dst_id,
+                    "source_court": row.get("source_court", "unknown"),
+                    "quote": row.get("quote", ""),
+                    "destination_context": row.get("destination_context", ""),
+                }
+            )
+
+    logger.info(f"  raw pairs            : {len(verified_rows):,}")
+    logger.info(f"  unique pairs         : {len(deduped):,}")
+    logger.info(f"  corpus opinion IDs   : {len(corpus_opinion_ids):,} unique")
 
     val, test = _stratified_split(
         deduped,
@@ -433,8 +508,8 @@ def main(
         test_size=test_size,
         seed=seed,
     )
-    logger.info(f"  val split       : {len(val):,}")
-    logger.info(f"  test split      : {len(test):,}")
+    logger.info(f"  val split            : {len(val):,}")
+    logger.info(f"  test split           : {len(test):,}")
 
     (out_dir / "gold_pairs_val.jsonl").write_text(
         "\n".join(json.dumps(p) for p in val) + "\n",
@@ -452,7 +527,7 @@ def main(
     for p in test:
         test_dist[p["source_court"]] += 1
 
-    logger.info("\n[3/3] Chunking CL corpus")
+    logger.info("\n[3/3] Chunking CL corpus (verified opinions only)")
     tok = _get_tokenizer()
     corpus_path = out_dir / "corpus_chunks.jsonl"
     ckpt_path = out_dir / "chunking_checkpoint.json"
@@ -462,22 +537,23 @@ def main(
         ckpt_path,
         resume=resume,
         tok=tok,
+        opinion_ids=corpus_opinion_ids,
+        run_key=verified_subset_sha,
     )
-    logger.info(f"  chunks written  : {n_chunks:,}")
-    logger.info(f"  opinions        : {n_opinions:,}")
+    logger.info(f"  chunks written       : {n_chunks:,}")
+    logger.info(f"  opinions             : {n_opinions:,}")
 
-    # SHA256 roundtrip for provenance (matches figure_hashes in EDA suites)
     gold_pair_hashes = {
         fname: hashlib.sha256((out_dir / fname).read_bytes()).hexdigest()
         for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl")
     }
 
-    summary_data = {
+    summary_data: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "corpus_chunks": n_chunks,
         "n_opinions_chunked": n_opinions,
         "gold_pairs_total": len(deduped),
-        "gold_pairs_train": 0,  # zero-shot baselines per MS3 plan
+        "gold_pairs_train": 0,
         "gold_pairs_val": len(val),
         "gold_pairs_test": len(test),
         "val_court_distribution": dict(val_dist),
@@ -486,6 +562,8 @@ def main(
         "git_sha": _git_sha(),
         "corpus_manifest_sha": _corpus_manifest_sha(shard_dir),
         "gold_pair_hashes": gold_pair_hashes,
+        "verified_subset_sha": verified_subset_sha,
+        "n_verified_pairs": len(verified_rows),
     }
     validated = BaselinePrepSummary.model_validate(summary_data)
     summary_path = out_dir / "summary.json"
@@ -504,9 +582,7 @@ def main(
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="MS3 baseline dataset prep.")
     ap.add_argument("--shard-dir", type=Path, default=DEFAULT_SHARD_DIR)
-    ap.add_argument("--lepard-path", type=Path, default=DEFAULT_LEPARD)
-    ap.add_argument("--cl-ids-path", type=Path, default=DEFAULT_CL_IDS)
-    ap.add_argument("--court-map-path", type=Path, default=DEFAULT_COURT_MAP)
+    ap.add_argument("--verified-subset-path", type=Path, default=DEFAULT_VERIFIED_SUBSET)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--resume", action="store_true", default=True)
@@ -515,7 +591,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--val-size", type=int, default=VAL_SIZE)
     ap.add_argument("--test-size", type=int, default=TEST_SIZE)
     ap.add_argument(
-        "--dry-run", action="store_true", help="Validate inputs + print fingerprint without running pipeline"
+        "--dry-run", action="store_true",
+        help="Validate inputs + print fingerprint without running pipeline",
     )
     return ap
 
@@ -526,21 +603,19 @@ if __name__ == "__main__":
         import sys as _sys
 
         print("[baseline_prep] DRY RUN")
-        print(f"  schema_version : {SCHEMA_VERSION}")
-        print(f"  CHUNK_SIZE     : {CHUNK_SIZE_SUBWORDS}")
-        print(f"  CHUNK_OVERLAP  : {CHUNK_OVERLAP_SUBWORDS}")
-        print(f"  ENCODER_MODEL  : {ENCODER_MODEL}")
-        print(f"  VAL_SIZE       : {VAL_SIZE}")
-        print(f"  TEST_SIZE      : {TEST_SIZE}")
-        print(f"  python         : {_sys.version.split()[0]}")
-        print(f"  git_sha        : {_git_sha()}")
-        print(f"  args           : {vars(args)}")
+        print(f"  schema_version        : {SCHEMA_VERSION}")
+        print(f"  CHUNK_SIZE            : {CHUNK_SIZE_SUBWORDS}")
+        print(f"  CHUNK_OVERLAP         : {CHUNK_OVERLAP_SUBWORDS}")
+        print(f"  ENCODER_MODEL         : {ENCODER_MODEL}")
+        print(f"  VAL_SIZE              : {VAL_SIZE}")
+        print(f"  TEST_SIZE             : {TEST_SIZE}")
+        print(f"  python                : {_sys.version.split()[0]}")
+        print(f"  git_sha               : {_git_sha()}")
+        print(f"  args                  : {vars(args)}")
         _sys.exit(0)
     main(
         shard_dir=args.shard_dir,
-        lepard_path=args.lepard_path,
-        cl_ids_path=args.cl_ids_path,
-        court_map_path=args.court_map_path,
+        verified_subset_path=args.verified_subset_path,
         out_dir=args.out_dir,
         log_to_wandb=args.log_to_wandb,
         resume=args.resume,

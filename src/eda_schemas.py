@@ -78,6 +78,15 @@ class BaselinePrepSummary(BaseModel):
         default_factory=dict,
         description="SHA256 hex of each gold_pairs_*.jsonl (64 lowercase hex chars)",
     )
+    verified_subset_sha: str = Field(
+        default="",
+        description="SHA256 of lepard_cl_verified_subset.jsonl used for this run.",
+    )
+    n_verified_pairs: int = Field(
+        default=0,
+        ge=0,
+        description="Total rows in the verified subset before deduplication.",
+    )
 
 
 class BaselineBM25Summary(BaseModel):

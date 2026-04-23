@@ -38,7 +38,6 @@ export TRANSFORMERS_CACHE="$HF_HOME/hub"
 
 CORPUS_PATH="${CORPUS_PATH:-data/processed/baseline/corpus_chunks.jsonl}"
 GOLD_PATH="${GOLD_PATH:-data/processed/baseline/gold_pairs_test.jsonl}"
-LEPARD_PATH="${LEPARD_PATH:-lepard_train_4000000_rev0194f95.jsonl}"
 OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
@@ -54,7 +53,7 @@ echo "  utc_start  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  git_sha    : $(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
-for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
+for p in "$CORPUS_PATH" "$GOLD_PATH"; do
     if [[ ! -f "$p" ]]; then
         echo "FAIL: missing input: $p" >&2
         exit 2
@@ -91,7 +90,6 @@ for rank in 0 1 2 3; do
         uv run --locked python scripts/baseline_bge_m3.py \
             --corpus-path "$CORPUS_PATH" \
             --gold-pairs-path "$GOLD_PATH" \
-            --lepard-path "$LEPARD_PATH" \
             --out-dir "$OUT_DIR" \
             --top-k "$TOP_K" \
             --seed "$SEED" \

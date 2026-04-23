@@ -1,27 +1,23 @@
 # src/repro.py — canonical reproducibility module
 # Call configure() as FIRST statement in every notebook Cell 1 and CLI script.
 # RANDOM_SEED injected from scripts/lib.sh. To change: update lib.sh, re-run, commit.
-import logging
-import os
-import random
+import os, random, logging
 from pathlib import Path
 from typing import Optional
-
 logger = logging.getLogger(__name__)
-_EXPECTED_PYTHONHASHSEED = "0"
-_EXPECTED_CUBLAS_CFG = ":4096:8"
-_EXPECTED_TOKENIZERS_PAR = "false"
-_RANDOM_SEED = 0
-
-
+_EXPECTED_PYTHONHASHSEED  = "0"
+_EXPECTED_CUBLAS_CFG      = ":4096:8"
+_EXPECTED_TOKENIZERS_PAR  = "false"
+_RANDOM_SEED              = 0
 def _load_dotenv(project_root: Optional[Path] = None) -> None:
     root = project_root or Path(__file__).resolve().parent.parent
     env_path = root / ".env"
     if not env_path.exists():
-        raise FileNotFoundError(f".env not found at {env_path}.\n  Fix: bash setup.sh from project root.")
+        raise FileNotFoundError(
+            f".env not found at {env_path}.\n  Fix: bash setup.sh from project root."
+        )
     try:
         from dotenv import load_dotenv
-
         load_dotenv(env_path, override=False)
     except ImportError:
         with open(env_path) as f:
@@ -32,43 +28,33 @@ def _load_dotenv(project_root: Optional[Path] = None) -> None:
                     key = key.replace("export ", "").strip()
                     if key not in os.environ:
                         os.environ[key] = val.strip()
-
-
 def _apply_torch_flags() -> None:
     import torch
-
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", _EXPECTED_CUBLAS_CFG)
     torch.use_deterministic_algorithms(True, warn_only=False)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-
-
 def _seed_all(seed: int) -> None:
     random.seed(seed)
     try:
         import numpy as np
-
         np.random.seed(seed)
     except ImportError:
         pass
     try:
         import torch
-
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
     except ImportError:
         pass
-
-
 def _verify() -> dict:
     import torch
-
     checks: dict = {}
     for var, expected in [
-        ("PYTHONHASHSEED", _EXPECTED_PYTHONHASHSEED),
+        ("PYTHONHASHSEED",          _EXPECTED_PYTHONHASHSEED),
         ("CUBLAS_WORKSPACE_CONFIG", _EXPECTED_CUBLAS_CFG),
-        ("TOKENIZERS_PARALLELISM", _EXPECTED_TOKENIZERS_PAR),
+        ("TOKENIZERS_PARALLELISM",  _EXPECTED_TOKENIZERS_PAR),
     ]:
         actual = os.environ.get(var)
         if actual != expected:
@@ -88,8 +74,6 @@ def _verify() -> dict:
     checks["cudnn_deterministic"] = True
     checks["random_seed"] = _RANDOM_SEED
     return checks
-
-
 def configure(project_root: Optional[Path] = None, verbose: bool = True) -> dict:
     """Thin orchestrator: load → apply → seed → verify. Call FIRST in every Cell 1."""
     _load_dotenv(project_root)
@@ -98,7 +82,6 @@ def configure(project_root: Optional[Path] = None, verbose: bool = True) -> dict
     cfg = _verify()
     if verbose:
         import torch
-
         print("  [repro] Reproducibility configured:")
         for k, v in cfg.items():
             print(f"    {k}={v}")

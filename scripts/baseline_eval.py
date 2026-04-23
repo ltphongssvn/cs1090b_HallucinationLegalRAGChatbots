@@ -7,7 +7,7 @@ per-query comparison between the two baselines.
 
 Metrics
 -------
-Hit@k       — fraction of queries where gold dest_id appears in top-k retrieved
+Hit@k       — fraction of queries where gold source_id appears in top-k retrieved
 MRR         — mean reciprocal rank of gold across all queries (0 if missed)
 NDCG@10     — normalized DCG with binary relevance at k=10 (pinned by MS3 contract)
 
@@ -58,15 +58,16 @@ def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
 
 
 def _load_gold(gold_path: Path) -> dict[tuple[int, int], int]:
-    """Returns {(source_id, dest_id): dest_id}.
+    """Returns {(source_id, dest_id): source_id}.
 
-    The composite key matches the LePaRD gold-pair identity — a single source
-    opinion can cite multiple dest opinions, each a distinct query.
+    In LePaRD: source = cited precedent (what we retrieve), dest = citing case
+    (where the destination_context query comes from). The gold document is
+    source_id (the cited opinion whose chunks should rank first).
     """
     gold: dict[tuple[int, int], int] = {}
     for row in _iter_jsonl(gold_path):
         key = (int(row["source_id"]), int(row["dest_id"]))
-        gold[key] = int(row["dest_id"])
+        gold[key] = int(row["source_id"])
     return gold
 
 

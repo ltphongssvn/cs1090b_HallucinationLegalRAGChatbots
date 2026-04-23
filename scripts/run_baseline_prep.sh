@@ -26,9 +26,7 @@ cd "$REPO_ROOT"
 
 # Env-overridable paths (SLURM/Docker friendly)
 SHARD_DIR="${SHARD_DIR:-data/raw/cl_federal_appellate_bulk}"
-LEPARD="${LEPARD:-lepard_train_4000000_rev0194f95.jsonl}"
-CL_IDS="${CL_IDS:-data/processed/cl_ids.txt.gz}"
-COURT_MAP="${COURT_MAP:-data/processed/cl_matched_courts.json}"
+VERIFIED_SUBSET="${VERIFIED_SUBSET:-data/processed/lepard_cl_verified_subset.jsonl}"
 OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 SEED="${SEED:-0}"
 
@@ -61,9 +59,7 @@ done
 echo "=== MS3 baseline prep runner ==="
 echo "  repo_root       : $REPO_ROOT"
 echo "  shard_dir       : $SHARD_DIR"
-echo "  lepard          : $LEPARD"
-echo "  cl_ids          : $CL_IDS"
-echo "  court_map       : $COURT_MAP"
+echo "  verified_subset : $VERIFIED_SUBSET"
 echo "  out_dir         : $OUT_DIR"
 echo "  seed            : $SEED"
 echo "  resume          : $RESUME_FLAG"
@@ -74,7 +70,7 @@ echo "  hostname        : $(hostname)"
 echo "  utc_start       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 
-for path in "$SHARD_DIR" "$LEPARD" "$CL_IDS" "$COURT_MAP"; do
+for path in "$SHARD_DIR" "$VERIFIED_SUBSET"; do
     if [[ ! -e "$path" ]]; then
         echo "FAIL: missing input: $path" >&2
         exit 2
@@ -86,7 +82,7 @@ if [[ "$SHARD_COUNT" -eq 0 ]]; then
     echo "FAIL: no shards under $SHARD_DIR" >&2
     exit 2
 fi
-echo "OK preflight: $SHARD_COUNT shards, LePaRD $(du -h "$LEPARD" | cut -f1)"
+echo "OK preflight: $SHARD_COUNT shards, subset $(du -h "$VERIFIED_SUBSET" | cut -f1)"
 
 # Concurrent-run guard
 PID_FILE="logs/baseline_prep.pid"
@@ -116,9 +112,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "=== DRY RUN: delegating to scripts/baseline_prep.py --dry-run ==="
     PYTHONPATH="$REPO_ROOT" uv run python scripts/baseline_prep.py \
         --shard-dir "$SHARD_DIR" \
-        --lepard-path "$LEPARD" \
-        --cl-ids-path "$CL_IDS" \
-        --court-map-path "$COURT_MAP" \
+        --verified-subset-path "$VERIFIED_SUBSET" \
         --out-dir "$OUT_DIR" \
         --seed "$SEED" \
         $RESUME_FLAG \
@@ -154,12 +148,10 @@ nohup env \
     WANDB_API_KEY="${WANDB_API_KEY:-}" \
     uv run python scripts/baseline_prep.py \
     --shard-dir "$SHARD_DIR" \
-    --lepard-path "$LEPARD" \
-    --cl-ids-path "$CL_IDS" \
-    --court-map-path "$COURT_MAP" \
+    --verified-subset-path "$VERIFIED_SUBSET" \
     --out-dir "$OUT_DIR" \
-    $RESUME_FLAG \
     --seed "$SEED" \
+    $RESUME_FLAG \
     > "$LOG_FILE" 2>&1 &
 
 PID=$!

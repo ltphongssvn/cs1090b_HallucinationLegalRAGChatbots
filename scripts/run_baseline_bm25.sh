@@ -29,7 +29,6 @@ mkdir -p logs
 
 CORPUS="${CORPUS:-data/processed/baseline/corpus_chunks.jsonl}"
 GOLD="${GOLD:-data/processed/baseline/gold_pairs_test.jsonl}"
-LEPARD="${LEPARD:-lepard_train_4000000_rev0194f95.jsonl}"
 OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
@@ -75,7 +74,6 @@ echo "=== MS3 BM25 baseline runner ==="
 echo "  repo_root   : $REPO_ROOT"
 echo "  corpus      : $CORPUS"
 echo "  gold        : $GOLD"
-echo "  lepard      : $LEPARD"
 echo "  out_dir     : $OUT_DIR"
 echo "  top_k       : $TOP_K"
 echo "  seed        : $SEED"
@@ -85,7 +83,7 @@ echo "  hostname    : $(hostname)"
 echo "  utc_start   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 
-for path in "$CORPUS" "$GOLD" "$LEPARD"; do
+for path in "$CORPUS" "$GOLD"; do
     if [[ ! -f "$path" ]]; then
         echo "FAIL: missing input: $path" >&2
         exit 2
@@ -113,7 +111,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "=== DRY RUN ==="
     PYTHONPATH="$REPO_ROOT" uv run --locked python scripts/baseline_bm25.py \
         --corpus-path "$CORPUS" --gold-pairs-path "$GOLD" \
-        --lepard-path "$LEPARD" --out-dir "$OUT_DIR" \
+        --out-dir "$OUT_DIR" \
         --top-k "$TOP_K" --seed "$SEED" --dry-run
     echo "DRY RUN complete"
     exit 0
@@ -142,7 +140,6 @@ setsid nohup env \
     uv run python scripts/baseline_bm25.py \
     --corpus-path "$CORPUS" \
     --gold-pairs-path "$GOLD" \
-    --lepard-path "$LEPARD" \
     --out-dir "$OUT_DIR" \
     --top-k "$TOP_K" \
     --seed "$SEED" \
@@ -162,7 +159,6 @@ cat > "$MANIFEST" << MANIFEST_EOF
   "log_file": "$LOG_FILE",
   "corpus_path": "$CORPUS",
   "gold_path": "$GOLD",
-  "lepard_path": "$LEPARD",
   "out_dir": "$OUT_DIR",
   "top_k": $TOP_K,
   "seed": $SEED,
