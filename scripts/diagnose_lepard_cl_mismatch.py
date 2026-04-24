@@ -306,22 +306,32 @@ def stage4_cluster_to_opinion(
         needed.add(int(r["cl_cluster_id"]))
     log.info(f"  needed cluster_ids: {len(needed):,}")
 
-    log.info(f"stage 4: scanning {cl_opinions.name} (single-threaded bz2)")
+    log.info(f"stage 4: scanning {cl_opinions.name} (single-threaded bz2, column-projected)")
     csv.field_size_limit(sys.maxsize)
-    f = bz2.open(cl_opinions, "rt", encoding="utf-8")
 
+    # The opinions CSV has 21 columns, several holding multi-MB text
+    # (plain_text, html, xml_harvard, html_with_citations). csv.DictReader
+    # parses every column for every row, which on a 51GB bz2 file stalls
+    # on single rows with >100MB embedded text. We only need `id` (col 0)
+    # and `cluster_id` (col 20), so we use csv.reader and index by position,
+    # still respecting CSV quoting rules for embedded newlines/quotes.
+    f = bz2.open(cl_opinions, "rt", encoding="utf-8")
     c2o: dict[int, list[int]] = defaultdict(list)
     n_rows = n_kept = 0
     with f:
-        reader = csv.DictReader(f)
+        reader = csv.reader(f)
+        header = next(reader)
+        id_idx = header.index("id")
+        cid_idx = header.index("cluster_id")
+        log.info(f"  column layout: id=col{id_idx}, cluster_id=col{cid_idx}")
         for row in reader:
             n_rows += 1
             try:
-                cid = int(row["cluster_id"])
+                cid = int(row[cid_idx])
                 if cid in needed:
-                    c2o[cid].append(int(row["id"]))
+                    c2o[cid].append(int(row[id_idx]))
                     n_kept += 1
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, IndexError, TypeError):
                 continue
             if n_rows % 100_000 == 0:
                 log.info(

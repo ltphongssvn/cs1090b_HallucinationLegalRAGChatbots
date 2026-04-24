@@ -443,3 +443,59 @@ class TestStage6Validate:
         out = tmp_path / "report.json"
         meta = stage6_validate(final, corpus, lepard, out, n_sample=1)
         assert meta["hit_rate"] == 0.0
+
+
+class TestStage4ColumnProjection:
+    """Regression: stage 4 must not OOM/hang on CSVs with large embedded text
+    in non-needed columns. Only `id` and `cluster_id` are read."""
+
+    def _make_opinions_bz2_with_bloat(self, path: Path, rows: list[dict]) -> None:
+        """Emulate real CL opinions.csv layout with 21 columns including
+        a multi-MB plain_text field in the middle."""
+        cols = [
+            "id",
+            "date_created",
+            "date_modified",
+            "author_str",
+            "per_curiam",
+            "joined_by_str",
+            "type",
+            "sha1",
+            "page_count",
+            "download_url",
+            "local_path",
+            "plain_text",
+            "html",
+            "html_lawbox",
+            "html_columbia",
+            "html_anon_2020",
+            "xml_harvard",
+            "html_with_citations",
+            "extracted_by_ocr",
+            "author_id",
+            "cluster_id",
+        ]
+        with bz2.open(path, "wt", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=cols)
+            writer.writeheader()
+            for r in rows:
+                full = {c: "" for c in cols}
+                full.update(r)
+                writer.writerow(full)
+
+    def test_skips_heavy_columns_correctly(self, tmp_path):
+        lepard_cluster = tmp_path / "joined.jsonl"
+        lepard_cluster.write_text(json.dumps({"lepard_id": 1, "cl_cluster_id": 100}) + "\n")
+        opinions = tmp_path / "opinions.csv.bz2"
+        huge_text = "x" * 100_000  # 100KB synthetic bloat
+        self._make_opinions_bz2_with_bloat(
+            opinions,
+            [
+                {"id": "1000", "cluster_id": "100", "plain_text": huge_text},
+                {"id": "2000", "cluster_id": "999", "plain_text": huge_text},
+            ],
+        )
+        out = tmp_path / "c2o.json"
+        meta = stage4_cluster_to_opinion(lepard_cluster, opinions, out)
+        assert json.loads(out.read_text()) == {"100": 1000}
+        assert meta["n_clusters_matched"] == 1
