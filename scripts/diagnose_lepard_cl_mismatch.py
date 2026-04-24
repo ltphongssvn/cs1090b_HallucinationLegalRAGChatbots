@@ -306,18 +306,9 @@ def stage4_cluster_to_opinion(
         needed.add(int(r["cl_cluster_id"]))
     log.info(f"  needed cluster_ids: {len(needed):,}")
 
-    log.info(f"stage 4: scanning {cl_opinions.name} (filtered, parallel bz2)")
+    log.info(f"stage 4: scanning {cl_opinions.name} (single-threaded bz2)")
     csv.field_size_limit(sys.maxsize)
-
-    import io
-    try:
-        import indexed_bzip2 as ibz2
-        raw = ibz2.open(str(cl_opinions), parallelization=12)
-        f = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-        log.info("  using indexed_bzip2 parallel decoder (12 threads)")
-    except ImportError:
-        f = bz2.open(cl_opinions, "rt", encoding="utf-8")
-        log.info("  indexed_bzip2 unavailable — falling back to single-threaded bz2")
+    f = bz2.open(cl_opinions, "rt", encoding="utf-8")
 
     c2o: dict[int, list[int]] = defaultdict(list)
     n_rows = n_kept = 0
@@ -332,7 +323,7 @@ def stage4_cluster_to_opinion(
                     n_kept += 1
             except (ValueError, KeyError, TypeError):
                 continue
-            if n_rows % 1_000_000 == 0:
+            if n_rows % 100_000 == 0:
                 log.info(
                     f"  [{n_rows:>10,} rows] kept: {n_kept:>8,}  "
                     f"clusters matched: {len(c2o):>7,}/{len(needed):,}"
