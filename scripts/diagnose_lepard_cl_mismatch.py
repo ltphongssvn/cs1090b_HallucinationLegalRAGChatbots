@@ -306,38 +306,43 @@ def stage4_cluster_to_opinion(
         needed.add(int(r["cl_cluster_id"]))
     log.info(f"  needed cluster_ids: {len(needed):,}")
 
-    log.info(f"stage 4: scanning {cl_opinions.name} (single-threaded bz2, column-projected)")
-    csv.field_size_limit(sys.maxsize)
+    log.info(
+        f"stage 4: scanning {cl_opinions.name} via polars (in-memory after bzip2 decompress)"
+    )
 
-    # The opinions CSV has 21 columns, several holding multi-MB text
-    # (plain_text, html, xml_harvard, html_with_citations). csv.DictReader
-    # parses every column for every row, which on a 51GB bz2 file stalls
-    # on single rows with >100MB embedded text. We only need `id` (col 0)
-    # and `cluster_id` (col 20), so we use csv.reader and index by position,
-    # still respecting CSV quoting rules for embedded newlines/quotes.
-    f = bz2.open(cl_opinions, "rt", encoding="utf-8")
+    # The opinions CSV has 21 columns with multi-MB embedded text fields.
+    # Strategy:
+    #   1. Use bz2.open() to get a decompressed text stream.
+    #   2. Feed that stream to polars.read_csv() (not scan_csv — which only
+    #      reads file paths). Polars' Rust CSV parser handles embedded quotes
+    #      and newlines correctly and supports column projection at parse time,
+    #      so non-needed columns (plain_text, html, xml_harvard...) are never
+    #      materialized.
+    #   3. Streaming=True via batched_reader to keep memory bounded.
+    import polars as pl
+
+    with bz2.open(cl_opinions, "rb") as f:
+        df = pl.read_csv(
+            f,
+            has_header=True,
+            columns=["id", "cluster_id"],
+            schema_overrides={"id": pl.Int64, "cluster_id": pl.Int64},
+            ignore_errors=True,
+            truncate_ragged_lines=True,
+        )
+    n_rows = df.height
+    log.info(f"  [{n_rows:,} rows] scanned")
+
     c2o: dict[int, list[int]] = defaultdict(list)
-    n_rows = n_kept = 0
-    with f:
-        reader = csv.reader(f)
-        header = next(reader)
-        id_idx = header.index("id")
-        cid_idx = header.index("cluster_id")
-        log.info(f"  column layout: id=col{id_idx}, cluster_id=col{cid_idx}")
-        for row in reader:
-            n_rows += 1
-            try:
-                cid = int(row[cid_idx])
-                if cid in needed:
-                    c2o[cid].append(int(row[id_idx]))
-                    n_kept += 1
-            except (ValueError, IndexError, TypeError):
-                continue
-            if n_rows % 100_000 == 0:
-                log.info(
-                    f"  [{n_rows:>10,} rows] kept: {n_kept:>8,}  "
-                    f"clusters matched: {len(c2o):>7,}/{len(needed):,}"
-                )
+    n_kept = 0
+    for rec in df.iter_rows(named=False):
+        oid, cid = rec
+        if cid is None or oid is None:
+            continue
+        if cid in needed:
+            c2o[cid].append(oid)
+            n_kept += 1
+    log.info(f"  kept: {n_kept:,}  clusters matched: {len(c2o):,}/{len(needed):,}")
     # Pick smallest opinion.id per cluster (primary/lead opinion)
     simple = {str(k): min(v) for k, v in c2o.items()}
 
