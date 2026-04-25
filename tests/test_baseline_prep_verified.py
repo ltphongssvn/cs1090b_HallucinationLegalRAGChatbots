@@ -292,3 +292,174 @@ class TestRetrievalSchemaContract:
         for pair in val + test:
             for field in self.REQUIRED_FOR_VERIFIED_RETRIEVAL:
                 assert field in pair, f"verified-retrieval needs {field}: corpus key + query + gold"
+
+
+# ----- main_verified() integration tests -----------------------------------
+
+
+class TestMainVerified:
+    """TDD coverage for main_verified() — the polars-streaming CLI entrypoint."""
+
+    def _make_subset(self, path: Path, n_pairs: int, n_clusters: int, courts: list[str]) -> None:
+        """Write a synthetic verified-subset JSONL."""
+        with path.open("w") as f:
+            for i in range(n_pairs):
+                row = _make_pair(i, courts[i % len(courts)])
+                row["source_cluster_id"] = 1000 + (i % n_clusters)
+                f.write(json.dumps(row) + "\n")
+
+    def test_writes_gold_pairs_and_summary(self, tmp_path: Path) -> None:
+        from baseline_prep import main_verified
+
+        subset = tmp_path / "subset.jsonl"
+        self._make_subset(subset, n_pairs=200, n_clusters=100, courts=["ca5", "ca9"])
+        out_dir = tmp_path / "out"
+        summary = main_verified(
+            verified_subset_path=subset,
+            out_dir=out_dir,
+            seed=DEFAULT_SEED,
+            val_size=10,
+            test_size=50,
+        )
+        assert (out_dir / "gold_pairs_val.jsonl").exists()
+        assert (out_dir / "gold_pairs_test.jsonl").exists()
+        assert (out_dir / "verified_split_summary.json").exists()
+        assert summary["gold_pairs_val"] == 10
+        assert summary["gold_pairs_test"] == 50
+        assert summary["n_clusters_leaked"] == 0
+
+    def test_raises_on_missing_subset(self, tmp_path: Path) -> None:
+        from baseline_prep import main_verified
+
+        with pytest.raises(FileNotFoundError, match="verified subset not found"):
+            main_verified(
+                verified_subset_path=tmp_path / "missing.jsonl",
+                out_dir=tmp_path / "out",
+                val_size=1,
+                test_size=1,
+            )
+
+    def test_raises_on_insufficient_pairs(self, tmp_path: Path) -> None:
+        from baseline_prep import main_verified
+
+        subset = tmp_path / "subset.jsonl"
+        self._make_subset(subset, n_pairs=50, n_clusters=25, courts=["ca9"])
+        with pytest.raises(ValueError, match="insufficient verified pairs"):
+            main_verified(
+                verified_subset_path=subset,
+                out_dir=tmp_path / "out",
+                val_size=100,
+                test_size=200,
+            )
+
+    def test_raises_on_missing_required_column(self, tmp_path: Path) -> None:
+        from baseline_prep import main_verified
+
+        subset = tmp_path / "subset.jsonl"
+        with subset.open("w") as f:
+            f.write(json.dumps({"source_id": 1, "dest_id": 2}) + "\n")
+        with pytest.raises(ValueError, match="missing required columns"):
+            main_verified(
+                verified_subset_path=subset,
+                out_dir=tmp_path / "out",
+                val_size=1,
+                test_size=1,
+            )
+
+    def test_summary_includes_provenance_hashes(self, tmp_path: Path) -> None:
+        from baseline_prep import main_verified
+
+        subset = tmp_path / "subset.jsonl"
+        self._make_subset(subset, n_pairs=200, n_clusters=100, courts=["ca9"])
+        out_dir = tmp_path / "out"
+        summary = main_verified(
+            verified_subset_path=subset,
+            out_dir=out_dir,
+            seed=DEFAULT_SEED,
+            val_size=10,
+            test_size=50,
+        )
+        assert "verified_subset_sha" in summary
+        assert "gold_pair_hashes" in summary
+        assert len(summary["verified_subset_sha"]) == 64
+        assert "git_sha" in summary
+
+
+# ----- _write_jsonl helper + main() preflight -------------------------------
+
+
+class TestWriteJsonlHelper:
+    def test_writes_one_row_per_line(self, tmp_path: Path) -> None:
+        from baseline_prep import _write_jsonl
+
+        path = tmp_path / "out.jsonl"
+        rows = [{"a": 1}, {"a": 2}, {"a": 3}]
+        _write_jsonl(path, rows)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        assert [json.loads(line) for line in lines] == rows
+
+    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
+        from baseline_prep import _write_jsonl
+
+        path = tmp_path / "nested" / "deep" / "out.jsonl"
+        _write_jsonl(path, [{"x": 1}])
+        assert path.exists()
+
+    def test_trailing_newline(self, tmp_path: Path) -> None:
+        from baseline_prep import _write_jsonl
+
+        path = tmp_path / "out.jsonl"
+        _write_jsonl(path, [{"x": 1}])
+        assert path.read_text(encoding="utf-8").endswith("\n")
+
+    def test_empty_rows(self, tmp_path: Path) -> None:
+        from baseline_prep import _write_jsonl
+
+        path = tmp_path / "out.jsonl"
+        _write_jsonl(path, [])
+        # Empty list still produces a file (just a single newline)
+        assert path.exists()
+
+
+class TestMainPreflight:
+    """main() must raise FileNotFoundError on any missing input path."""
+
+    def test_missing_shard_dir_raises(self, tmp_path: Path) -> None:
+        from baseline_prep import main
+
+        with pytest.raises(FileNotFoundError, match="missing shard_dir"):
+            main(
+                shard_dir=tmp_path / "missing_shards",
+                lepard_path=tmp_path,
+                cl_ids_path=tmp_path,
+                court_map_path=tmp_path,
+                out_dir=tmp_path / "out",
+            )
+
+    def test_missing_lepard_raises(self, tmp_path: Path) -> None:
+        from baseline_prep import main
+
+        (tmp_path / "shards").mkdir()
+        with pytest.raises(FileNotFoundError, match="missing lepard_path"):
+            main(
+                shard_dir=tmp_path / "shards",
+                lepard_path=tmp_path / "missing.jsonl",
+                cl_ids_path=tmp_path,
+                court_map_path=tmp_path,
+                out_dir=tmp_path / "out",
+            )
+
+    def test_missing_cl_ids_raises(self, tmp_path: Path) -> None:
+        from baseline_prep import main
+
+        (tmp_path / "shards").mkdir()
+        (tmp_path / "lepard.jsonl").write_text("{}\n")
+        with pytest.raises(FileNotFoundError, match="missing cl_ids_path"):
+            main(
+                shard_dir=tmp_path / "shards",
+                lepard_path=tmp_path / "lepard.jsonl",
+                cl_ids_path=tmp_path / "missing.txt.gz",
+                court_map_path=tmp_path,
+                out_dir=tmp_path / "out",
+            )

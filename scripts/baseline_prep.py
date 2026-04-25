@@ -1,20 +1,8 @@
 """MS3 Baseline dataset prep: chunk CL corpus + extract usable gold pairs.
 
-Thin orchestration over:
-    - src.lepard_cl_compat primitives (_load_cl_ids-equivalent)
-    - Polars for corpus shard scanning
-    - transformers.AutoTokenizer for 1024-subword, 128-overlap chunking
-
-Outputs (data/processed/baseline/):
-    corpus_chunks.jsonl        — one row per chunk (opinion_id, chunk_index, text)
-    gold_pairs_val.jsonl       — 2K val pairs (stratified by source_court)
-    gold_pairs_test.jsonl      — 45K test pairs (stratified by source_court)
-    chunking_checkpoint.json   — per-shard resume state (atomic via os.replace)
-    summary.json               — BaselinePrepSummary (Pydantic-validated)
-
-Two split functions are provided:
-  - _stratified_split: legacy cl_ids-based path (splits by source_id)
-  - _stratified_split_verified: cluster-aware path for verified subset
+Two split paths:
+  - main(): legacy cl_ids-based path (splits by source_id)
+  - main_verified(): cluster-aware path for verified subset
     (splits by source_cluster_id to prevent retrieval-eval leakage)
 """
 
@@ -48,6 +36,15 @@ DEFAULT_CL_IDS = Path("data/processed/cl_ids.txt.gz")
 DEFAULT_COURT_MAP = Path("data/processed/cl_matched_courts.json")
 DEFAULT_OUT_DIR = Path("data/processed/baseline")
 
+REQUIRED_VERIFIED_FIELDS = (
+    "source_id",
+    "source_cluster_id",
+    "source_court",
+    "dest_id",
+    "quote",
+    "destination_context",
+)
+
 
 def _get_logger() -> logging.Logger:
     lg = logging.getLogger("baseline_prep")
@@ -67,14 +64,12 @@ logger = _get_logger()
 
 
 def _load_cl_ids(path: Path) -> set[int]:
-    """Load CL opinion id universe from gzipped or plain text."""
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8") as f:
         return {int(line.strip()) for line in f if line.strip()}
 
 
 def _load_court_map(path: Path) -> dict[int, str]:
-    """Load {opinion_id: court_id} from JSON (keys serialized as strings)."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     return {int(k): v for k, v in raw.items()}
 
@@ -83,7 +78,6 @@ def _iter_usable_gold(
     lepard_path: Path,
     cl_ids: set[int],
 ) -> Iterator[dict[str, Any]]:
-    """Stream LePaRD pairs, yielding only those where both endpoints are in CL."""
     with lepard_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
@@ -97,11 +91,18 @@ def _annotate_source_court(
     pairs: list[dict[str, Any]],
     court_map: dict[int, str],
 ) -> list[dict[str, Any]]:
-    """Add source_court from the matched-courts lookup."""
     return [
         {**p, "source_court": court_map.get(p["source_id"], "unknown")}
         for p in pairs
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n",
+        encoding="utf-8",
+    )
 
 
 # ---------- stratified split ----------
@@ -112,7 +113,6 @@ def _largest_remainder(
     weights: dict[str, float],
     caps: dict[str, int],
 ) -> dict[str, int]:
-    """Largest-remainder apportionment respecting per-stratum caps."""
     if budget == 0 or not weights:
         return dict.fromkeys(weights, 0)
     wsum = sum(weights.values()) or 1.0
@@ -137,14 +137,6 @@ def _stratified_split(
     test_size: int,
     seed: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Minority-preserving proportional stratified split by source_court.
-
-    Guarantees every stratum with >=2 members appears in val or test.
-    Algorithm: reserve a minority floor (1 slot in test for each stratum
-    with >=2 members), then distribute remaining val/test budget
-    proportionally using largest-remainder apportionment. Final shuffle
-    is seed-deterministic.
-    """
     rng = random.Random(seed)
     by_court: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for pair in pairs:
@@ -160,31 +152,24 @@ def _stratified_split(
     val_alloc: dict[str, int] = dict.fromkeys(by_court, 0)
     test_alloc: dict[str, int] = dict.fromkeys(by_court, 0)
 
-    # Minority floor: 1 slot in test for each stratum with >=2 members
     for court, members in strata:
         if len(members) >= 2 and test_size > 0:
             test_alloc[court] = 1
 
     weights = {c: float(len(by_court[c])) for c in by_court}
-
-    # Proportional val allocation, capped at stratum size
     val_caps = {c: len(by_court[c]) for c in by_court}
     add_val = _largest_remainder(val_size, weights, val_caps)
     for c in val_alloc:
         val_alloc[c] = add_val[c]
 
-    # Test caps respect val allocation; clamp minority floor to cap
     test_caps = {c: len(by_court[c]) - val_alloc[c] for c in by_court}
     for c in test_alloc:
         test_alloc[c] = min(test_alloc[c], test_caps[c])
 
-    # Remaining test budget distributed proportionally
     remaining_test = max(0, test_size - sum(test_alloc.values()))
     test_caps_after_floor = {c: test_caps[c] - test_alloc[c] for c in test_alloc}
     add_test = _largest_remainder(
-        remaining_test,
-        weights,
-        test_caps_after_floor,
+        remaining_test, weights, test_caps_after_floor
     )
     for c in test_alloc:
         test_alloc[c] += add_test[c]
@@ -206,9 +191,7 @@ def _stratified_split(
 
 
 def _get_tokenizer() -> Any:
-    """Load BAAI/bge-m3 tokenizer. Network call — mock in unit tests."""
     from transformers import AutoTokenizer
-
     return AutoTokenizer.from_pretrained(ENCODER_MODEL)
 
 
@@ -218,15 +201,10 @@ def _chunk_text(
     opinion_id: int,
     tok: Any,
 ) -> list[dict[str, Any]]:
-    """Chunk text into 1024-subword windows with 128-subword overlap.
-
-    Matches README chunking policy (Revision 4). Returns list of
-    {opinion_id, chunk_index, text} dicts.
-    """
     tokens = tok.encode(text, add_special_tokens=False)
     if not tokens:
         return []
-    stride = CHUNK_SIZE_SUBWORDS - CHUNK_OVERLAP_SUBWORDS  # 896
+    stride = CHUNK_SIZE_SUBWORDS - CHUNK_OVERLAP_SUBWORDS
     chunks: list[dict[str, Any]] = []
     idx = 0
     start = 0
@@ -235,11 +213,7 @@ def _chunk_text(
         chunk_tokens = tokens[start:end]
         chunk_text = tok.decode(chunk_tokens, skip_special_tokens=True)
         chunks.append(
-            {
-                "opinion_id": opinion_id,
-                "chunk_index": idx,
-                "text": chunk_text,
-            }
+            {"opinion_id": opinion_id, "chunk_index": idx, "text": chunk_text}
         )
         idx += 1
         if end >= len(tokens):
@@ -248,7 +222,7 @@ def _chunk_text(
     return chunks
 
 
-# ---------- checkpoint (atomic) ----------
+# ---------- checkpoint ----------
 
 
 def _load_checkpoint(path: Path) -> set[str]:
@@ -258,7 +232,6 @@ def _load_checkpoint(path: Path) -> set[str]:
 
 
 def _save_checkpoint(path: Path, completed: set[str]) -> None:
-    """Atomic write: tempfile.mkstemp + os.replace (repo convention)."""
     data = json.dumps({"completed": sorted(completed)}, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".json.tmp")
@@ -307,18 +280,12 @@ def _chunk_corpus(
     resume: bool,
     tok: Any,
 ) -> tuple[int, int]:
-    """Stream CL shards, chunk every opinion, write corpus_chunks.jsonl.
-
-    Returns (n_chunks, n_opinions). Resumes from last checkpoint if
-    resume=True; idempotent: counts pre-existing chunks from prior runs.
-    """
     completed = _load_checkpoint(ckpt_path) if resume else set()
     shards = sorted(shard_dir.glob("shard_*.jsonl"))
     mode = "a" if completed else "w"
     n_chunks = 0
     n_opinions = 0
 
-    # Idempotency: count pre-existing chunks from prior resumed runs
     if completed and out_path.exists():
         seen_opinions: set[int] = set()
         with out_path.open(encoding="utf-8") as fin:
@@ -356,11 +323,10 @@ def _chunk_corpus(
 
 
 def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
-    """Single consolidated wandb.log call. Repo isolation contract."""
     try:
         import wandb
     except ImportError:
-        logger.info("  wandb unavailable — skipping telemetry")
+        logger.info("  wandb unavailable")
         return
     run = wandb.init(
         entity="phl690-harvard-extension-schol",
@@ -376,25 +342,26 @@ def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
     run.finish()
 
 
-# ---------- verified-subset consumer (lepard-eda branch port) -------------
+# ---------- verified-subset consumer ----------
 
 
 def _iter_verified_subset(path: Path) -> Iterator[dict[str, Any]]:
-    """Stream rows from data/processed/lepard_cl_verified_subset.jsonl.
-
-    Output of scripts/build_lepard_cl_subset.py: each row has
-    source_id, source_cluster_id, source_court, dest_id, quote,
-    destination_context, quote_fuzzy_score.
-
-    Raises json.JSONDecodeError on malformed lines (fail-fast — repo
-    convention; matches _iter_usable_gold above).
-    """
+    """Stream rows from lepard_cl_verified_subset.jsonl. Fail-fast on malformed JSON."""
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             yield json.loads(line)
+
+
+def _validate_verified_row(row: dict[str, Any], line_no: int) -> None:
+    """Raise ValueError if required keys missing."""
+    missing = [k for k in REQUIRED_VERIFIED_FIELDS if k not in row]
+    if missing:
+        raise ValueError(
+            f"missing required key(s) {missing} in verified subset line {line_no}"
+        )
 
 
 def _stratified_split_verified(
@@ -404,25 +371,11 @@ def _stratified_split_verified(
     test_size: int,
     seed: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split verified pairs with cluster-aware leakage prevention.
-
-    Critical retrieval-eval contract: same source_cluster_id (cited opinion)
-    must NEVER appear in both val and test. Multiple LePaRD pairs cite the
-    same opinion — without group-aware splitting, the same opinion text
-    leaks across train/eval, inflating retrieval metrics.
-
-    Algorithm (sklearn GroupShuffleSplit + stratification composition):
-      1. Group pairs by source_cluster_id.
-      2. Stratify groups (each cluster as one unit) by majority
-         source_court within the group, using existing _stratified_split.
-      3. Expand groups → flat pair lists, truncated to val_size / test_size.
-    """
-    # 1. Group pairs by source_cluster_id
+    """Cluster-aware split: same source_cluster_id never in both val and test."""
     groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for pair in pairs:
         groups[int(pair["source_cluster_id"])].append(pair)
 
-    # 2. Build group-level records: stratum = majority court in group
     group_records: list[dict[str, Any]] = []
     for cluster_id, members in groups.items():
         court_counts = Counter(m["source_court"] for m in members)
@@ -435,17 +388,13 @@ def _stratified_split_verified(
             }
         )
 
-    # 3. Convert pair-budgets to group-budgets (avg group size)
     n_groups = len(group_records)
     avg_group_size = max(1, len(pairs) // max(1, n_groups))
     group_val_size = (
         min(n_groups, max(1, val_size // avg_group_size)) if val_size else 0
     )
     group_test_size = (
-        min(
-            n_groups - group_val_size,
-            max(1, test_size // avg_group_size),
-        )
+        min(n_groups - group_val_size, max(1, test_size // avg_group_size))
         if test_size
         else 0
     )
@@ -457,7 +406,6 @@ def _stratified_split_verified(
         seed=seed,
     )
 
-    # 4. Expand groups → pairs, truncate to requested pair budgets
     val_pairs: list[dict[str, Any]] = []
     for g in val_groups:
         val_pairs.extend(g["_members"])
@@ -475,7 +423,7 @@ def _stratified_split_verified(
     return val_pairs, test_pairs
 
 
-# ---------- main ----------
+# ---------- main (legacy cl_ids path) ----------
 
 
 def main(
@@ -490,27 +438,25 @@ def main(
     val_size: int = VAL_SIZE,
     test_size: int = TEST_SIZE,
 ) -> dict[str, Any]:
-    """Run baseline prep pipeline. Returns summary dict."""
     from src.eda_schemas import BaselinePrepSummary
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    for label, path in [
+        ("shard_dir", shard_dir),
+        ("lepard_path", lepard_path),
+        ("cl_ids_path", cl_ids_path),
+        ("court_map_path", court_map_path),
+    ]:
+        if not Path(path).exists():
+            raise FileNotFoundError(f"missing {label}: {path}")
     logger.info("=" * 60)
-    logger.info(f"MS3 baseline prep  (seed={seed})")
+    logger.info(f"MS3 baseline prep (seed={seed})")
     logger.info("=" * 60)
-    logger.info(f"  shard_dir      : {shard_dir}")
-    logger.info(f"  lepard_path    : {lepard_path}")
-    logger.info(f"  cl_ids_path    : {cl_ids_path}")
-    logger.info(f"  court_map_path : {court_map_path}")
-    logger.info(f"  out_dir        : {out_dir}")
 
-    logger.info("\n[1/3] Loading CL id universe + court map")
     cl_ids = _load_cl_ids(cl_ids_path)
     court_map = _load_court_map(court_map_path)
-    logger.info(f"  cl_ids     : {len(cl_ids):,}")
-    logger.info(f"  court_map  : {len(court_map):,} matched ids")
 
-    logger.info("\n[2/3] Extracting usable gold pairs")
     raw_pairs = list(_iter_usable_gold(lepard_path, cl_ids))
     pairs = _annotate_source_court(raw_pairs, court_map)
     seen: set[tuple[int, int]] = set()
@@ -520,26 +466,15 @@ def main(
         if k not in seen:
             seen.add(k)
             deduped.append(p)
-    logger.info(f"  raw pairs       : {len(pairs):,}")
-    logger.info(f"  unique pairs    : {len(deduped):,}")
+    logger.info(f"  unique pairs: {len(deduped):,}")
 
     val, test = _stratified_split(
-        deduped,
-        val_size=val_size,
-        test_size=test_size,
-        seed=seed,
+        deduped, val_size=val_size, test_size=test_size, seed=seed
     )
-    logger.info(f"  val split       : {len(val):,}")
-    logger.info(f"  test split      : {len(test):,}")
+    logger.info(f"  val: {len(val):,}  test: {len(test):,}")
 
-    (out_dir / "gold_pairs_val.jsonl").write_text(
-        "\n".join(json.dumps(p) for p in val) + "\n",
-        encoding="utf-8",
-    )
-    (out_dir / "gold_pairs_test.jsonl").write_text(
-        "\n".join(json.dumps(p) for p in test) + "\n",
-        encoding="utf-8",
-    )
+    _write_jsonl(out_dir / "gold_pairs_val.jsonl", val)
+    _write_jsonl(out_dir / "gold_pairs_test.jsonl", test)
 
     val_dist: dict[str, int] = defaultdict(int)
     test_dist: dict[str, int] = defaultdict(int)
@@ -548,19 +483,12 @@ def main(
     for p in test:
         test_dist[p["source_court"]] += 1
 
-    logger.info("\n[3/3] Chunking CL corpus")
     tok = _get_tokenizer()
     corpus_path = out_dir / "corpus_chunks.jsonl"
     ckpt_path = out_dir / "chunking_checkpoint.json"
     n_chunks, n_opinions = _chunk_corpus(
-        shard_dir,
-        corpus_path,
-        ckpt_path,
-        resume=resume,
-        tok=tok,
+        shard_dir, corpus_path, ckpt_path, resume=resume, tok=tok
     )
-    logger.info(f"  chunks written  : {n_chunks:,}")
-    logger.info(f"  opinions        : {n_opinions:,}")
 
     gold_pair_hashes = {
         fname: hashlib.sha256((out_dir / fname).read_bytes()).hexdigest()
@@ -587,11 +515,109 @@ def main(
         json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
         encoding="utf-8",
     )
-    logger.info(f"\nWrote summary.json -> {summary_path}")
 
     if log_to_wandb:
         _log_to_wandb(summary_data, out_dir)
     return summary_data
+
+
+# ---------- main_verified (cluster-aware path with polars streaming) ----------
+
+
+def main_verified(
+    verified_subset_path: Path,
+    out_dir: Path = DEFAULT_OUT_DIR,
+    seed: int = 0,
+    val_size: int = VAL_SIZE,
+    test_size: int = TEST_SIZE,
+) -> dict[str, Any]:
+    """Cluster-aware split using polars streaming load (handles 3.4GB JSONL)."""
+    if not verified_subset_path.exists():
+        raise FileNotFoundError(f"verified subset not found: {verified_subset_path}")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("=" * 60)
+    logger.info(f"MS3 baseline prep VERIFIED (seed={seed})")
+    logger.info("=" * 60)
+    logger.info(f"  verified_subset : {verified_subset_path}")
+    logger.info(f"  val_size        : {val_size}")
+    logger.info(f"  test_size       : {test_size}")
+
+    import polars as pl
+
+    df = pl.read_ndjson(verified_subset_path)
+    missing_cols = [c for c in REQUIRED_VERIFIED_FIELDS if c not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"verified subset missing required columns: {missing_cols}"
+        )
+
+    pairs = df.select(list(REQUIRED_VERIFIED_FIELDS)).to_dicts()
+    logger.info(f"  loaded pairs: {len(pairs):,}")
+
+    needed = val_size + test_size
+    if len(pairs) < needed:
+        raise ValueError(
+            f"insufficient verified pairs: have {len(pairs):,}, "
+            f"need >= {needed:,} (val={val_size} + test={test_size})"
+        )
+
+    val, test = _stratified_split_verified(
+        pairs, val_size=val_size, test_size=test_size, seed=seed
+    )
+    logger.info(f"  val: {len(val):,}  test: {len(test):,}")
+
+    val_clusters = {p["source_cluster_id"] for p in val}
+    test_clusters = {p["source_cluster_id"] for p in test}
+    leaked = val_clusters & test_clusters
+    if leaked:
+        raise RuntimeError(
+            f"FATAL: source_cluster_id leakage: {len(leaked)} clusters in both"
+        )
+
+    _write_jsonl(out_dir / "gold_pairs_val.jsonl", val)
+    _write_jsonl(out_dir / "gold_pairs_test.jsonl", test)
+
+    val_dist: dict[str, int] = defaultdict(int)
+    test_dist: dict[str, int] = defaultdict(int)
+    for p in val:
+        val_dist[p["source_court"]] += 1
+    for p in test:
+        test_dist[p["source_court"]] += 1
+
+    gold_pair_hashes = {
+        fname: hashlib.sha256((out_dir / fname).read_bytes()).hexdigest()
+        for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl")
+    }
+    summary_data = {
+        "schema_version": SCHEMA_VERSION,
+        "verified_subset_path": str(verified_subset_path),
+        "verified_subset_sha": hashlib.sha256(
+            verified_subset_path.read_bytes()
+        ).hexdigest(),
+        "n_pairs_loaded": len(pairs),
+        "gold_pairs_val": len(val),
+        "gold_pairs_test": len(test),
+        "val_court_distribution": dict(val_dist),
+        "test_court_distribution": dict(test_dist),
+        "n_unique_clusters_val": len(val_clusters),
+        "n_unique_clusters_test": len(test_clusters),
+        "n_clusters_leaked": 0,
+        "gold_pair_hashes": gold_pair_hashes,
+        "seed": seed,
+        "git_sha": _git_sha(),
+    }
+    summary_path = out_dir / "verified_split_summary.json"
+    summary_path.write_text(
+        json.dumps(summary_data, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    logger.info(f"  Wrote {summary_path}")
+    return summary_data
+
+
+# ---------- CLI ----------
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -601,33 +627,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cl-ids-path", type=Path, default=DEFAULT_CL_IDS)
     ap.add_argument("--court-map-path", type=Path, default=DEFAULT_COURT_MAP)
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument(
+        "--verified-subset",
+        type=Path,
+        default=None,
+        help="If set, use cluster-aware verified path",
+    )
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--resume", action="store_true", default=True)
     ap.add_argument("--no-resume", dest="resume", action="store_false")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-size", type=int, default=VAL_SIZE)
     ap.add_argument("--test-size", type=int, default=TEST_SIZE)
-    ap.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Validate inputs + print fingerprint without running pipeline",
-    )
+    ap.add_argument("--dry-run", action="store_true")
     return ap
 
 
 if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     if args.dry_run:
-        print("[baseline_prep] DRY RUN")
-        print(f"  schema_version : {SCHEMA_VERSION}")
-        print(f"  CHUNK_SIZE     : {CHUNK_SIZE_SUBWORDS}")
-        print(f"  CHUNK_OVERLAP  : {CHUNK_OVERLAP_SUBWORDS}")
-        print(f"  ENCODER_MODEL  : {ENCODER_MODEL}")
-        print(f"  VAL_SIZE       : {VAL_SIZE}")
-        print(f"  TEST_SIZE      : {TEST_SIZE}")
-        print(f"  python         : {sys.version.split()[0]}")
-        print(f"  git_sha        : {_git_sha()}")
-        print(f"  args           : {vars(args)}")
+        print(f"[baseline_prep] DRY RUN  args={vars(args)}")
+        sys.exit(0)
+    if args.verified_subset is not None:
+        main_verified(
+            verified_subset_path=args.verified_subset,
+            out_dir=args.out_dir,
+            seed=args.seed,
+            val_size=args.val_size,
+            test_size=args.test_size,
+        )
         sys.exit(0)
     main(
         shard_dir=args.shard_dir,
