@@ -687,3 +687,58 @@ if __name__ == "__main__":
         val_size=args.val_size,
         test_size=args.test_size,
     )
+
+
+def enrich_corpus_with_cluster_id(
+    shard_dir: Path,
+    corpus_in_path: Path,
+    corpus_out_path: Path,
+) -> tuple[int, int, int]:
+    """Enrich existing corpus_chunks.jsonl with cluster_id from CL shards.
+
+    Reads each shard once to build opinion_id → cluster_id lookup, then
+    streams corpus chunks adding cluster_id where matched. Existing
+    cluster_id values are preserved (not overwritten).
+
+    Returns: (n_total_chunks, n_enriched, n_unmatched)
+    """
+    logger.info(f"building opinion_id → cluster_id from {shard_dir}")
+    oid_to_cid: dict[int, int] = {}
+    for shard in sorted(shard_dir.glob("shard_*.jsonl")):
+        with shard.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                if "id" in r and "cluster_id" in r:
+                    oid_to_cid[int(r["id"])] = int(r["cluster_id"])
+    logger.info(f"  opinion_id → cluster_id: {len(oid_to_cid):,} entries")
+
+    corpus_out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = corpus_out_path.with_suffix(corpus_out_path.suffix + ".tmp")
+    n_total = n_enriched = n_unmatched = 0
+    with corpus_in_path.open(encoding="utf-8") as fin, tmp.open(
+        "w", encoding="utf-8"
+    ) as fout:
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            r = json.loads(line)
+            n_total += 1
+            if "cluster_id" not in r:
+                cid = oid_to_cid.get(int(r["opinion_id"]))
+                if cid is not None:
+                    r["cluster_id"] = cid
+                    n_enriched += 1
+                else:
+                    n_unmatched += 1
+            else:
+                n_enriched += 1
+            fout.write(json.dumps(r) + "\n")
+    tmp.rename(corpus_out_path)
+    logger.info(
+        f"  total={n_total:,}  enriched={n_enriched:,}  unmatched={n_unmatched:,}"
+    )
+    return n_total, n_enriched, n_unmatched
