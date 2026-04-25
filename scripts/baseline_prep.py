@@ -290,11 +290,7 @@ def _chunk_corpus(
     resume: bool,
     tok: Any,
 ) -> tuple[int, int]:
-    """Chunk CL shards. Each chunk row carries opinion_id AND cluster_id.
-
-    Raises KeyError if a shard row is missing cluster_id (fail-fast — needed
-    for downstream cluster-aware retrieval).
-    """
+    """Chunk CL shards. Each chunk row carries opinion_id and cluster_id (if shard provides it)."""
     completed = _load_checkpoint(ckpt_path) if resume else set()
     shards = sorted(shard_dir.glob("shard_*.jsonl"))
     mode = "a" if completed else "w"
@@ -441,6 +437,123 @@ def _stratified_split_verified(
     return val_pairs, test_pairs
 
 
+# ---------- corpus enrichment with cluster_id ----------
+
+
+def enrich_corpus_with_cluster_id(
+    shard_dir: Path,
+    corpus_in_path: Path,
+    corpus_out_path: Path,
+    max_unmatched_rate: float = 1.0,
+) -> tuple[int, int, int]:
+    """Enrich existing corpus_chunks.jsonl with cluster_id from CL shards.
+
+    Reads each shard once to build opinion_id → cluster_id lookup, then
+    streams corpus chunks adding cluster_id where matched. Existing
+    cluster_id values are preserved (not overwritten).
+
+    Unmatched rows are routed to ``unmatched_chunks.jsonl`` (dead-letter)
+    alongside the output. If the unmatched rate exceeds
+    ``max_unmatched_rate`` (fraction of total), a RuntimeError is raised
+    after writing the dead-letter file.
+
+    Writes ``<corpus_out>.summary.json`` with provenance (sha256, git_sha).
+
+    Returns: (n_total_chunks, n_enriched, n_unmatched)
+    """
+    logger.info(f"building opinion_id → cluster_id from {shard_dir}")
+    oid_to_cid: dict[int, int] = {}
+    for shard in sorted(shard_dir.glob("shard_*.jsonl")):
+        with shard.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                if "id" in r and "cluster_id" in r:
+                    oid_to_cid[int(r["id"])] = int(r["cluster_id"])
+    logger.info(f"  opinion_id → cluster_id: {len(oid_to_cid):,} entries")
+
+    corpus_out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = corpus_out_path.with_suffix(corpus_out_path.suffix + ".tmp")
+    dead_letter = corpus_out_path.parent / "unmatched_chunks.jsonl"
+    dl_tmp = dead_letter.with_suffix(dead_letter.suffix + ".tmp")
+    n_total = n_enriched = n_unmatched = 0
+    with corpus_in_path.open(encoding="utf-8") as fin, tmp.open(
+        "w", encoding="utf-8"
+    ) as fout, dl_tmp.open("w", encoding="utf-8") as fdl:
+        for line in fin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            r = json.loads(line)
+            n_total += 1
+            if "cluster_id" not in r:
+                cid = oid_to_cid.get(int(r["opinion_id"]))
+                if cid is not None:
+                    r["cluster_id"] = cid
+                    n_enriched += 1
+                else:
+                    n_unmatched += 1
+                    fdl.write(json.dumps(r) + "\n")
+            else:
+                n_enriched += 1
+            if "cluster_id" in r:
+                fout.write(json.dumps(r) + "\n")
+    tmp.rename(corpus_out_path)
+    if n_unmatched > 0:
+        dl_tmp.rename(dead_letter)
+        logger.info(f"  unmatched routed to dead-letter: {dead_letter}")
+    else:
+        dl_tmp.unlink(missing_ok=True)
+    logger.info(
+        f"  total={n_total:,}  enriched={n_enriched:,}  unmatched={n_unmatched:,}"
+    )
+
+    # Sample first 20 unmatched opinion_ids from dead-letter for debugging
+    sample_unmatched: list[int] = []
+    if n_unmatched > 0 and dead_letter.exists():
+        with dead_letter.open(encoding="utf-8") as f:
+            for line in f:
+                if len(sample_unmatched) >= 20:
+                    break
+                try:
+                    sample_unmatched.append(int(json.loads(line)["opinion_id"]))
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+
+    from datetime import datetime, timezone
+    # Provenance summary
+    summary_path = corpus_out_path.with_suffix(".summary.json")
+    summary = {
+        "n_total": n_total,
+        "n_enriched": n_enriched,
+        "n_unmatched": n_unmatched,
+        "unmatched_rate": round(n_unmatched / max(n_total, 1), 6),
+        "sample_unmatched_opinion_ids": sample_unmatched,
+        "shard_dir": str(shard_dir),
+        "corpus_in_path": str(corpus_in_path),
+        "corpus_out_path": str(corpus_out_path),
+        "corpus_in_sha256": hashlib.sha256(corpus_in_path.read_bytes()).hexdigest(),
+        "corpus_out_sha256": hashlib.sha256(corpus_out_path.read_bytes()).hexdigest()
+        if corpus_out_path.stat().st_size > 0
+        else "",
+        "git_sha": _git_sha(),
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    rate = n_unmatched / max(n_total, 1)
+    if rate > max_unmatched_rate:
+        raise RuntimeError(
+            f"unmatched rate {rate:.2%} exceeds threshold {max_unmatched_rate:.2%} "
+            f"({n_unmatched:,}/{n_total:,}); see {dead_letter}"
+        )
+    return n_total, n_enriched, n_unmatched
+
+
 # ---------- main (legacy cl_ids path) ----------
 
 
@@ -558,9 +671,6 @@ def main_verified(
     logger.info("=" * 60)
     logger.info(f"MS3 baseline prep VERIFIED (seed={seed})")
     logger.info("=" * 60)
-    logger.info(f"  verified_subset : {verified_subset_path}")
-    logger.info(f"  val_size        : {val_size}")
-    logger.info(f"  test_size       : {test_size}")
 
     import polars as pl
 
@@ -651,6 +761,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="If set, use cluster-aware verified path",
     )
+    ap.add_argument(
+        "--enrich-corpus",
+        action="store_true",
+        help="Run enrich_corpus_with_cluster_id and exit",
+    )
+    ap.add_argument("--corpus-in", type=Path, default=None)
+    ap.add_argument("--corpus-out", type=Path, default=None)
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--resume", action="store_true", default=True)
     ap.add_argument("--no-resume", dest="resume", action="store_false")
@@ -665,6 +782,16 @@ if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     if args.dry_run:
         print(f"[baseline_prep] DRY RUN  args={vars(args)}")
+        sys.exit(0)
+    if args.enrich_corpus:
+        if args.corpus_in is None or args.corpus_out is None:
+            print("--enrich-corpus requires --corpus-in and --corpus-out")
+            sys.exit(2)
+        enrich_corpus_with_cluster_id(
+            shard_dir=args.shard_dir,
+            corpus_in_path=args.corpus_in,
+            corpus_out_path=args.corpus_out,
+        )
         sys.exit(0)
     if args.verified_subset is not None:
         main_verified(
@@ -687,58 +814,3 @@ if __name__ == "__main__":
         val_size=args.val_size,
         test_size=args.test_size,
     )
-
-
-def enrich_corpus_with_cluster_id(
-    shard_dir: Path,
-    corpus_in_path: Path,
-    corpus_out_path: Path,
-) -> tuple[int, int, int]:
-    """Enrich existing corpus_chunks.jsonl with cluster_id from CL shards.
-
-    Reads each shard once to build opinion_id → cluster_id lookup, then
-    streams corpus chunks adding cluster_id where matched. Existing
-    cluster_id values are preserved (not overwritten).
-
-    Returns: (n_total_chunks, n_enriched, n_unmatched)
-    """
-    logger.info(f"building opinion_id → cluster_id from {shard_dir}")
-    oid_to_cid: dict[int, int] = {}
-    for shard in sorted(shard_dir.glob("shard_*.jsonl")):
-        with shard.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                r = json.loads(line)
-                if "id" in r and "cluster_id" in r:
-                    oid_to_cid[int(r["id"])] = int(r["cluster_id"])
-    logger.info(f"  opinion_id → cluster_id: {len(oid_to_cid):,} entries")
-
-    corpus_out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = corpus_out_path.with_suffix(corpus_out_path.suffix + ".tmp")
-    n_total = n_enriched = n_unmatched = 0
-    with corpus_in_path.open(encoding="utf-8") as fin, tmp.open(
-        "w", encoding="utf-8"
-    ) as fout:
-        for line in fin:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            r = json.loads(line)
-            n_total += 1
-            if "cluster_id" not in r:
-                cid = oid_to_cid.get(int(r["opinion_id"]))
-                if cid is not None:
-                    r["cluster_id"] = cid
-                    n_enriched += 1
-                else:
-                    n_unmatched += 1
-            else:
-                n_enriched += 1
-            fout.write(json.dumps(r) + "\n")
-    tmp.rename(corpus_out_path)
-    logger.info(
-        f"  total={n_total:,}  enriched={n_enriched:,}  unmatched={n_unmatched:,}"
-    )
-    return n_total, n_enriched, n_unmatched
