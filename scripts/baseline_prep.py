@@ -4,6 +4,9 @@ Two split paths:
   - main(): legacy cl_ids-based path (splits by source_id)
   - main_verified(): cluster-aware path for verified subset
     (splits by source_cluster_id to prevent retrieval-eval leakage)
+
+Corpus chunks include cluster_id field so downstream BM25/BGE-M3 can
+retrieve directly by cluster_id (the verified gold key).
 """
 
 from __future__ import annotations
@@ -199,8 +202,10 @@ def _chunk_text(
     text: str,
     *,
     opinion_id: int,
+    cluster_id: int,
     tok: Any,
 ) -> list[dict[str, Any]]:
+    """Chunk text. Output includes both opinion_id and cluster_id."""
     tokens = tok.encode(text, add_special_tokens=False)
     if not tokens:
         return []
@@ -213,7 +218,12 @@ def _chunk_text(
         chunk_tokens = tokens[start:end]
         chunk_text = tok.decode(chunk_tokens, skip_special_tokens=True)
         chunks.append(
-            {"opinion_id": opinion_id, "chunk_index": idx, "text": chunk_text}
+            {
+                "opinion_id": opinion_id,
+                "cluster_id": cluster_id,
+                "chunk_index": idx,
+                "text": chunk_text,
+            }
         )
         idx += 1
         if end >= len(tokens):
@@ -280,6 +290,11 @@ def _chunk_corpus(
     resume: bool,
     tok: Any,
 ) -> tuple[int, int]:
+    """Chunk CL shards. Each chunk row carries opinion_id AND cluster_id.
+
+    Raises KeyError if a shard row is missing cluster_id (fail-fast — needed
+    for downstream cluster-aware retrieval).
+    """
     completed = _load_checkpoint(ckpt_path) if resume else set()
     shards = sorted(shard_dir.glob("shard_*.jsonl"))
     mode = "a" if completed else "w"
@@ -305,10 +320,18 @@ def _chunk_corpus(
                 for line in fin:
                     r = json.loads(line)
                     oid = int(r["id"])
+                    if "cluster_id" not in r:
+                        raise KeyError(
+                            f"shard row missing cluster_id (opinion_id={oid}) — "
+                            "required for cluster-aware retrieval"
+                        )
+                    cid = int(r["cluster_id"])
                     text = r.get("text", "")
                     if not text:
                         continue
-                    chunks = _chunk_text(text, opinion_id=oid, tok=tok)
+                    chunks = _chunk_text(
+                        text, opinion_id=oid, cluster_id=cid, tok=tok
+                    )
                     for c in chunks:
                         fout.write(json.dumps(c) + "\n")
                     n_chunks += len(chunks)
@@ -521,7 +544,7 @@ def main(
     return summary_data
 
 
-# ---------- main_verified (cluster-aware path with polars streaming) ----------
+# ---------- main_verified ----------
 
 
 def main_verified(
@@ -531,7 +554,7 @@ def main_verified(
     val_size: int = VAL_SIZE,
     test_size: int = TEST_SIZE,
 ) -> dict[str, Any]:
-    """Cluster-aware split using polars streaming load (handles 3.4GB JSONL)."""
+    """Cluster-aware split using polars streaming load."""
     if not verified_subset_path.exists():
         raise FileNotFoundError(f"verified subset not found: {verified_subset_path}")
     out_dir = Path(out_dir)
