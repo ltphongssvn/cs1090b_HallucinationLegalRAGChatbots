@@ -30,8 +30,6 @@ def _make_gold(path: Path, rows: list[dict]) -> None:
 
 
 class TestLoadQueriesVerified:
-    """Verified path: query_text = destination_context, key = source_cluster_id."""
-
     def test_uses_destination_context_as_query(self, tmp_path: Path) -> None:
         gold = tmp_path / "gold.jsonl"
         _make_gold(
@@ -116,7 +114,6 @@ class TestLoadQueriesVerified:
                     "source_court": "ca9",
                     "dest_id": 2,
                     "quote": "q",
-                    # no destination_context
                 }
             ],
         )
@@ -125,8 +122,6 @@ class TestLoadQueriesVerified:
 
 
 class TestAggregationByClusterId:
-    """Verified path: chunks aggregated by cluster_id, not opinion_id."""
-
     def test_max_score_per_cluster(self) -> None:
         hits = [
             {"opinion_id": 100, "chunk_index": 0, "score": 0.5},
@@ -134,7 +129,6 @@ class TestAggregationByClusterId:
             {"opinion_id": 200, "chunk_index": 0, "score": 0.7},
         ]
         agg = _aggregate_chunk_scores(hits, top_k=10)
-        # MaxP: opinion 100 → 0.9, opinion 200 → 0.7
         assert agg[0]["opinion_id"] == 100
         assert agg[0]["score"] == 0.9
         assert agg[1]["opinion_id"] == 200
@@ -148,12 +142,9 @@ class TestAggregationByClusterId:
 
 
 class TestMainVerifiedSmoke:
-    """Smoke test: main_verified writes results keyed by source_cluster_id."""
-
     def test_writes_results_with_cluster_id_key(self, tmp_path: Path) -> None:
         from baseline_bm25 import main_verified
 
-        # Tiny corpus: 3 chunks across 2 cluster_ids
         corpus = tmp_path / "corpus.jsonl"
         with corpus.open("w") as f:
             for c in [
@@ -177,7 +168,6 @@ class TestMainVerifiedSmoke:
                 },
             ]:
                 f.write(json.dumps(c) + "\n")
-
         gold = tmp_path / "gold.jsonl"
         _make_gold(
             gold,
@@ -192,7 +182,6 @@ class TestMainVerifiedSmoke:
                 }
             ],
         )
-
         out_dir = tmp_path / "out"
         summary = main_verified(
             corpus_path=corpus,
@@ -203,10 +192,150 @@ class TestMainVerifiedSmoke:
         assert (out_dir / "bm25_results.jsonl").exists()
         assert (out_dir / "bm25_summary.json").exists()
         assert summary["n_queries"] == 1
-
-        # Verify result row uses cluster_id (not opinion_id) as retrieved key
         row = json.loads((out_dir / "bm25_results.jsonl").read_text().strip())
         assert "source_cluster_id" in row
         assert row["source_cluster_id"] == 1000
-        # Top-1 should be cluster 1000 (its text matches query)
         assert row["retrieved"][0]["cluster_id"] == 1000
+
+
+class TestMainVerifiedCLI:
+    def test_cli_verified_flag_exposed(self) -> None:
+        import importlib
+
+        mod = importlib.import_module("baseline_bm25")
+        parser = mod._build_arg_parser()
+        args = parser.parse_args(["--verified"])
+        assert args.verified is True
+
+
+class TestRetrievalFailureLog:
+    def test_writes_failures_jsonl(self, tmp_path: Path) -> None:
+        from baseline_bm25 import main_verified
+
+        corpus = tmp_path / "corpus.jsonl"
+        with corpus.open("w") as f:
+            for c in [
+                {"opinion_id": 100, "cluster_id": 1000, "chunk_index": 0, "text": "consent decree binding"},
+                {"opinion_id": 200, "cluster_id": 2000, "chunk_index": 0, "text": "antitrust merger"},
+            ]:
+                f.write(json.dumps(c) + "\n")
+        gold = tmp_path / "gold.jsonl"
+        _make_gold(
+            gold,
+            [
+                {
+                    "source_id": 1,
+                    "source_cluster_id": 9999,
+                    "source_court": "ca9",
+                    "dest_id": 2,
+                    "quote": "irrelevant",
+                    "destination_context": "antitrust merger",
+                }
+            ],
+        )
+        out_dir = tmp_path / "out"
+        main_verified(
+            corpus_path=corpus,
+            gold_pairs_path=gold,
+            out_dir=out_dir,
+            top_k=2,
+        )
+        failures = out_dir / "bm25_failures.jsonl"
+        assert failures.exists()
+        rows = [json.loads(line) for line in failures.open()]
+        assert len(rows) == 1
+        assert rows[0]["source_cluster_id"] == 9999
+        assert rows[0]["gold_in_top_k"] is False
+        assert "top_retrieved" in rows[0]
+
+
+class TestIndexPersistence:
+    def test_save_and_load_index_skips_rebuild(self, tmp_path: Path) -> None:
+        from baseline_bm25 import main_verified
+
+        corpus = tmp_path / "corpus.jsonl"
+        with corpus.open("w") as f:
+            for c in [
+                {"opinion_id": 100, "cluster_id": 1000, "chunk_index": 0, "text": "test text"},
+            ]:
+                f.write(json.dumps(c) + "\n")
+        gold = tmp_path / "gold.jsonl"
+        _make_gold(
+            gold,
+            [
+                {
+                    "source_id": 1,
+                    "source_cluster_id": 1000,
+                    "source_court": "ca9",
+                    "dest_id": 2,
+                    "quote": "q",
+                    "destination_context": "test",
+                }
+            ],
+        )
+        out_dir = tmp_path / "out"
+        index_dir = tmp_path / "bm25_index"
+        s1 = main_verified(
+            corpus_path=corpus,
+            gold_pairs_path=gold,
+            out_dir=out_dir,
+            top_k=1,
+            index_dir=index_dir,
+        )
+        assert index_dir.exists()
+        first_build_secs = s1["index_build_seconds"]
+        s2 = main_verified(
+            corpus_path=corpus,
+            gold_pairs_path=gold,
+            out_dir=out_dir,
+            top_k=1,
+            index_dir=index_dir,
+        )
+        assert s2["index_build_seconds"] < first_build_secs or s2["index_build_seconds"] < 0.1
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not Path("data/processed/baseline/corpus_chunks_enriched.jsonl").exists(),
+    reason="requires enriched corpus produced by enrich_corpus_with_cluster_id",
+)
+class TestRealDataIntegration:
+    """Slow (~5-10 min) — guarded by integration marker.
+
+    Provides regression signal that BM25 hits non-trivial Hit@100 on real pipeline output.
+    Run explicitly with: pytest -m integration
+    """
+
+    def test_hit_at_100_above_threshold_on_500_query_slice(self, tmp_path: Path) -> None:
+        from baseline_bm25 import main_verified
+
+        corpus = Path("data/processed/baseline/corpus_chunks_enriched.jsonl")
+        gold = Path("data/processed/baseline/gold_pairs_test.jsonl")
+        slice_path = tmp_path / "gold_slice.jsonl"
+        with gold.open() as fin, slice_path.open("w") as fout:
+            for i, line in enumerate(fin):
+                if i >= 500:
+                    break
+                fout.write(line)
+        out_dir = tmp_path / "out"
+        summary = main_verified(
+            corpus_path=corpus,
+            gold_pairs_path=slice_path,
+            out_dir=out_dir,
+            top_k=100,
+        )
+        assert summary["n_queries"] == 500
+        results_path = out_dir / "bm25_results.jsonl"
+        n_hits = 0
+        n_total = 0
+        with slice_path.open() as fg, results_path.open() as fr:
+            for gline, rline in zip(fg, fr, strict=True):
+                g = json.loads(gline)
+                r = json.loads(rline)
+                gold_cid = int(g["source_cluster_id"])
+                top_cids = {int(x["cluster_id"]) for x in r["retrieved"]}
+                if gold_cid in top_cids:
+                    n_hits += 1
+                n_total += 1
+        hit_at_100 = n_hits / n_total
+        assert hit_at_100 >= 0.10, f"BM25 Hit@100 = {hit_at_100:.4f} on 500-query slice; expected >= 0.10."
