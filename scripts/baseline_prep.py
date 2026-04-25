@@ -12,15 +12,10 @@ Outputs (data/processed/baseline/):
     chunking_checkpoint.json   — per-shard resume state (atomic via os.replace)
     summary.json               — BaselinePrepSummary (Pydantic-validated)
 
-Checkpoint semantics: per-shard completion recorded atomically via
-tempfile.mkstemp + os.replace (matches scripts/ingest_lepard.py:578 +
-src/bulk_download.py:141 repo convention). Crashed runs resume from
-last completed shard.
-
-Stratification: source_court key (via cl_matched_courts.json lookup),
-minority-group-preserving largest-remainder allocation. Guarantees every
-stratum with >=2 members appears in val or test. Matches inference-time
-query distribution (a user's question comes from a specific circuit).
+Two split functions are provided:
+  - _stratified_split: legacy cl_ids-based path (splits by source_id)
+  - _stratified_split_verified: cluster-aware path for verified subset
+    (splits by source_cluster_id to prevent retrieval-eval leakage)
 """
 
 from __future__ import annotations
@@ -35,7 +30,7 @@ import random
 import subprocess
 import sys
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -103,7 +98,10 @@ def _annotate_source_court(
     court_map: dict[int, str],
 ) -> list[dict[str, Any]]:
     """Add source_court from the matched-courts lookup."""
-    return [{**p, "source_court": court_map.get(p["source_id"], "unknown")} for p in pairs]
+    return [
+        {**p, "source_court": court_map.get(p["source_id"], "unknown")}
+        for p in pairs
+    ]
 
 
 # ---------- stratified split ----------
@@ -378,6 +376,105 @@ def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
     run.finish()
 
 
+# ---------- verified-subset consumer (lepard-eda branch port) -------------
+
+
+def _iter_verified_subset(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream rows from data/processed/lepard_cl_verified_subset.jsonl.
+
+    Output of scripts/build_lepard_cl_subset.py: each row has
+    source_id, source_cluster_id, source_court, dest_id, quote,
+    destination_context, quote_fuzzy_score.
+
+    Raises json.JSONDecodeError on malformed lines (fail-fast — repo
+    convention; matches _iter_usable_gold above).
+    """
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def _stratified_split_verified(
+    pairs: list[dict[str, Any]],
+    *,
+    val_size: int,
+    test_size: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split verified pairs with cluster-aware leakage prevention.
+
+    Critical retrieval-eval contract: same source_cluster_id (cited opinion)
+    must NEVER appear in both val and test. Multiple LePaRD pairs cite the
+    same opinion — without group-aware splitting, the same opinion text
+    leaks across train/eval, inflating retrieval metrics.
+
+    Algorithm (sklearn GroupShuffleSplit + stratification composition):
+      1. Group pairs by source_cluster_id.
+      2. Stratify groups (each cluster as one unit) by majority
+         source_court within the group, using existing _stratified_split.
+      3. Expand groups → flat pair lists, truncated to val_size / test_size.
+    """
+    # 1. Group pairs by source_cluster_id
+    groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for pair in pairs:
+        groups[int(pair["source_cluster_id"])].append(pair)
+
+    # 2. Build group-level records: stratum = majority court in group
+    group_records: list[dict[str, Any]] = []
+    for cluster_id, members in groups.items():
+        court_counts = Counter(m["source_court"] for m in members)
+        majority_court = court_counts.most_common(1)[0][0]
+        group_records.append(
+            {
+                "source_id": cluster_id,
+                "source_court": majority_court,
+                "_members": members,
+            }
+        )
+
+    # 3. Convert pair-budgets to group-budgets (avg group size)
+    n_groups = len(group_records)
+    avg_group_size = max(1, len(pairs) // max(1, n_groups))
+    group_val_size = (
+        min(n_groups, max(1, val_size // avg_group_size)) if val_size else 0
+    )
+    group_test_size = (
+        min(
+            n_groups - group_val_size,
+            max(1, test_size // avg_group_size),
+        )
+        if test_size
+        else 0
+    )
+
+    val_groups, test_groups = _stratified_split(
+        group_records,
+        val_size=group_val_size,
+        test_size=group_test_size,
+        seed=seed,
+    )
+
+    # 4. Expand groups → pairs, truncate to requested pair budgets
+    val_pairs: list[dict[str, Any]] = []
+    for g in val_groups:
+        val_pairs.extend(g["_members"])
+        if len(val_pairs) >= val_size:
+            break
+    val_pairs = val_pairs[:val_size]
+
+    test_pairs: list[dict[str, Any]] = []
+    for g in test_groups:
+        test_pairs.extend(g["_members"])
+        if len(test_pairs) >= test_size:
+            break
+    test_pairs = test_pairs[:test_size]
+
+    return val_pairs, test_pairs
+
+
 # ---------- main ----------
 
 
@@ -398,7 +495,6 @@ def main(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     logger.info("=" * 60)
     logger.info(f"MS3 baseline prep  (seed={seed})")
     logger.info("=" * 60)
@@ -466,18 +562,16 @@ def main(
     logger.info(f"  chunks written  : {n_chunks:,}")
     logger.info(f"  opinions        : {n_opinions:,}")
 
-    # SHA256 roundtrip for provenance (matches figure_hashes in EDA suites)
     gold_pair_hashes = {
         fname: hashlib.sha256((out_dir / fname).read_bytes()).hexdigest()
         for fname in ("gold_pairs_val.jsonl", "gold_pairs_test.jsonl")
     }
-
     summary_data = {
         "schema_version": SCHEMA_VERSION,
         "corpus_chunks": n_chunks,
         "n_opinions_chunked": n_opinions,
         "gold_pairs_total": len(deduped),
-        "gold_pairs_train": 0,  # zero-shot baselines per MS3 plan
+        "gold_pairs_train": 0,
         "gold_pairs_val": len(val),
         "gold_pairs_test": len(test),
         "val_court_distribution": dict(val_dist),
@@ -497,7 +591,6 @@ def main(
 
     if log_to_wandb:
         _log_to_wandb(summary_data, out_dir)
-
     return summary_data
 
 
@@ -515,7 +608,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--val-size", type=int, default=VAL_SIZE)
     ap.add_argument("--test-size", type=int, default=TEST_SIZE)
     ap.add_argument(
-        "--dry-run", action="store_true", help="Validate inputs + print fingerprint without running pipeline"
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs + print fingerprint without running pipeline",
     )
     return ap
 
@@ -523,8 +618,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     if args.dry_run:
-        import sys as _sys
-
         print("[baseline_prep] DRY RUN")
         print(f"  schema_version : {SCHEMA_VERSION}")
         print(f"  CHUNK_SIZE     : {CHUNK_SIZE_SUBWORDS}")
@@ -532,10 +625,10 @@ if __name__ == "__main__":
         print(f"  ENCODER_MODEL  : {ENCODER_MODEL}")
         print(f"  VAL_SIZE       : {VAL_SIZE}")
         print(f"  TEST_SIZE      : {TEST_SIZE}")
-        print(f"  python         : {_sys.version.split()[0]}")
+        print(f"  python         : {sys.version.split()[0]}")
         print(f"  git_sha        : {_git_sha()}")
         print(f"  args           : {vars(args)}")
-        _sys.exit(0)
+        sys.exit(0)
     main(
         shard_dir=args.shard_dir,
         lepard_path=args.lepard_path,
