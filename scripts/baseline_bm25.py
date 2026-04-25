@@ -315,3 +315,162 @@ if __name__ == "__main__":
         log_to_wandb=args.log_to_wandb,
         seed=args.seed,
     )
+
+
+# ---------- verified-subset path ----------
+
+
+REQUIRED_VERIFIED_QUERY_FIELDS = (
+    "source_id",
+    "source_cluster_id",
+    "dest_id",
+    "destination_context",
+)
+
+
+def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
+    """Load queries directly from verified gold pairs.
+
+    Verified contract:
+      - query_text = destination_context (citing context, not the cited quote)
+      - corpus key = source_cluster_id (cluster-aware retrieval)
+
+    Unlike _load_queries, no LePaRD join needed — the verified gold file
+    already contains all required fields in-line.
+    """
+    queries: list[dict[str, Any]] = []
+    with gold_path.open(encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            missing = [k for k in REQUIRED_VERIFIED_QUERY_FIELDS if k not in r]
+            if missing:
+                raise ValueError(
+                    f"verified gold line {line_no} missing required fields: {missing}"
+                )
+            queries.append({
+                "source_id": int(r["source_id"]),
+                "source_cluster_id": int(r["source_cluster_id"]),
+                "dest_id": int(r["dest_id"]),
+                "query_text": r["destination_context"],
+            })
+    return queries
+
+
+def main_verified(
+    corpus_path: Path = DEFAULT_CORPUS,
+    gold_pairs_path: Path = DEFAULT_GOLD,
+    out_dir: Path = DEFAULT_OUT_DIR,
+    top_k: int = TOP_K,
+    log_to_wandb: bool = False,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """BM25 retrieval keyed by source_cluster_id with destination_context queries.
+
+    Verified contract:
+      - corpus chunks must have cluster_id field
+      - queries are loaded directly from verified gold (no LePaRD join)
+      - aggregation produces cluster_id keys (not opinion_id)
+    """
+    from src.eda_schemas import BaselineBM25Summary
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("=" * 60)
+    logger.info(
+        f"MS3 BM25 baseline VERIFIED (k1={BM25_K1}, b={BM25_B}, top_k={top_k}, seed={seed})"
+    )
+    logger.info("=" * 60)
+
+    # --- Load corpus chunks ---
+    chunks: list[dict[str, Any]] = list(_iter_corpus(corpus_path))
+    chunk_texts = [c["text"] for c in chunks]
+    # Verified path: store cluster_id as primary key, opinion_id as secondary
+    chunk_meta = [
+        (
+            int(c["cluster_id"]),
+            int(c.get("opinion_id", 0)),
+            int(c["chunk_index"]),
+        )
+        for c in chunks
+    ]
+    unique_clusters = len({m[0] for m in chunk_meta})
+    logger.info(f"  chunks: {len(chunks):,}  unique clusters: {unique_clusters:,}")
+
+    # --- Build BM25 index ---
+    t0 = time.perf_counter()
+    tokenized_corpus = bm25s.tokenize(chunk_texts, stopwords="en")
+    retriever = bm25s.BM25(k1=BM25_K1, b=BM25_B)
+    retriever.index(tokenized_corpus)
+    index_build_seconds = time.perf_counter() - t0
+    logger.info(f"  index built in {index_build_seconds:.2f}s")
+
+    # --- Load queries from verified gold ---
+    queries = _load_queries_verified(gold_pairs_path)
+    logger.info(f"  queries: {len(queries):,}")
+
+    # --- Retrieval ---
+    t0 = time.perf_counter()
+    retrieval_k = min(top_k * RETRIEVAL_K_MULTIPLIER, len(chunks))
+    query_texts = [q["query_text"] for q in queries]
+    batched_tokens = bm25s.tokenize(query_texts, stopwords="en")
+    all_indices, all_scores = retriever.retrieve(
+        batched_tokens, k=retrieval_k, n_threads=16, show_progress=False
+    )
+
+    # Aggregate by cluster_id (not opinion_id)
+    results_path = out_dir / "bm25_results.jsonl"
+    with results_path.open("w", encoding="utf-8") as fout:
+        for qi, q in enumerate(queries):
+            best_per_cluster: dict[int, float] = {}
+            for idx, score in zip(all_indices[qi], all_scores[qi], strict=False):
+                cid = chunk_meta[int(idx)][0]
+                s = float(score)
+                if cid not in best_per_cluster or s > best_per_cluster[cid]:
+                    best_per_cluster[cid] = s
+            ranked = sorted(
+                ({"cluster_id": cid, "score": sc} for cid, sc in best_per_cluster.items()),
+                key=lambda x: x["score"],
+                reverse=True,
+            )[:top_k]
+            fout.write(
+                json.dumps(
+                    {
+                        "source_id": q["source_id"],
+                        "source_cluster_id": q["source_cluster_id"],
+                        "dest_id": q["dest_id"],
+                        "retrieved": ranked,
+                    }
+                )
+                + "\n"
+            )
+    retrieval_seconds = time.perf_counter() - t0
+    logger.info(f"  retrieval done in {retrieval_seconds:.2f}s")
+
+    results_hash = hashlib.sha256(results_path.read_bytes()).hexdigest()
+    summary_data = {
+        "schema_version": SCHEMA_VERSION,
+        "n_queries": len(queries),
+        "n_corpus_chunks": len(chunks),
+        "n_unique_opinions": unique_clusters,
+        "top_k": top_k,
+        "bm25_k1": BM25_K1,
+        "bm25_b": BM25_B,
+        "index_build_seconds": round(index_build_seconds, 3),
+        "retrieval_seconds": round(retrieval_seconds, 3),
+        "seed": seed,
+        "git_sha": _git_sha(),
+        "results_hash": results_hash,
+    }
+    validated = BaselineBM25Summary.model_validate(summary_data)
+    summary_path = out_dir / "bm25_summary.json"
+    summary_path.write_text(
+        json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    if log_to_wandb:
+        _log_to_wandb(summary_data, out_dir)
+    return summary_data
