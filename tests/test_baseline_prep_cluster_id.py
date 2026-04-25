@@ -1,4 +1,5 @@
 """TDD: corpus_chunks.jsonl must include cluster_id field."""
+
 from __future__ import annotations
 
 import json
@@ -35,8 +36,11 @@ class TestChunkCorpusIncludesClusterId:
         ckpt_path = tmp_path / "ckpt.json"
 
         n_chunks, n_opinions = _chunk_corpus(
-            shard_dir, out_path, ckpt_path,
-            resume=False, tok=self._mock_tokenizer(),
+            shard_dir,
+            out_path,
+            ckpt_path,
+            resume=False,
+            tok=self._mock_tokenizer(),
         )
         rows = [json.loads(line) for line in out_path.open()]
         assert len(rows) >= 1
@@ -44,16 +48,23 @@ class TestChunkCorpusIncludesClusterId:
         assert rows[0]["cluster_id"] == 555
         assert rows[0]["opinion_id"] == 100
 
-    def test_missing_cluster_id_in_shard_raises(self, tmp_path: Path) -> None:
-        import pytest
+    def test_missing_cluster_id_omitted_silently(self, tmp_path: Path) -> None:
+        """When shard lacks cluster_id, chunk dict omits it (backward-compat)."""
         shard_dir = tmp_path / "shards"
         shard_dir.mkdir()
         self._make_shard(
             shard_dir / "shard_0000.jsonl",
             [{"id": 100, "text": "no cluster_id here"}],
         )
-        with pytest.raises((KeyError, ValueError)):
-            _chunk_corpus(
-                shard_dir, tmp_path / "out.jsonl", tmp_path / "ckpt.json",
-                resume=False, tok=self._mock_tokenizer(),
-            )
+        out_path = tmp_path / "out.jsonl"
+        _chunk_corpus(
+            shard_dir,
+            out_path,
+            tmp_path / "ckpt.json",
+            resume=False,
+            tok=self._mock_tokenizer(),
+        )
+        rows = [json.loads(line) for line in out_path.open()]
+        assert len(rows) >= 1
+        assert "cluster_id" not in rows[0]
+        assert rows[0]["opinion_id"] == 100

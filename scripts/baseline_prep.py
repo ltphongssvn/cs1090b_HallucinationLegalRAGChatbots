@@ -202,10 +202,10 @@ def _chunk_text(
     text: str,
     *,
     opinion_id: int,
-    cluster_id: int,
+    cluster_id: int | None = None,
     tok: Any,
 ) -> list[dict[str, Any]]:
-    """Chunk text. Output includes both opinion_id and cluster_id."""
+    """Chunk text. Output includes opinion_id and (if provided) cluster_id."""
     tokens = tok.encode(text, add_special_tokens=False)
     if not tokens:
         return []
@@ -217,14 +217,14 @@ def _chunk_text(
         end = min(start + CHUNK_SIZE_SUBWORDS, len(tokens))
         chunk_tokens = tokens[start:end]
         chunk_text = tok.decode(chunk_tokens, skip_special_tokens=True)
-        chunks.append(
-            {
-                "opinion_id": opinion_id,
-                "cluster_id": cluster_id,
-                "chunk_index": idx,
-                "text": chunk_text,
-            }
-        )
+        chunk_dict: dict[str, Any] = {
+            "opinion_id": opinion_id,
+            "chunk_index": idx,
+            "text": chunk_text,
+        }
+        if cluster_id is not None:
+            chunk_dict["cluster_id"] = cluster_id
+        chunks.append(chunk_dict)
         idx += 1
         if end >= len(tokens):
             break
@@ -320,12 +320,7 @@ def _chunk_corpus(
                 for line in fin:
                     r = json.loads(line)
                     oid = int(r["id"])
-                    if "cluster_id" not in r:
-                        raise KeyError(
-                            f"shard row missing cluster_id (opinion_id={oid}) — "
-                            "required for cluster-aware retrieval"
-                        )
-                    cid = int(r["cluster_id"])
+                    cid = int(r["cluster_id"]) if "cluster_id" in r else None
                     text = r.get("text", "")
                     if not text:
                         continue
