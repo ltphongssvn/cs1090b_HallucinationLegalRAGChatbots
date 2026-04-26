@@ -1483,6 +1483,7 @@ dependencies = [
     { name = "pillow" },
     { name = "polars" },
     { name = "pydantic" },
+    { name = "pyre2" },
     { name = "python-dotenv" },
     { name = "rapidfuzz" },
     { name = "requests" },
@@ -1543,6 +1544,7 @@ requires-dist = [
     { name = "pillow" },
     { name = "polars", specifier = ">=1.39.3" },
     { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pyre2", specifier = ">=0.3.10" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rapidfuzz", specifier = ">=3.14.5" },
     { name = "requests" },
@@ -3405,6 +3407,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pyre2"
+version = "0.3.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/0c/860068ea3bbeca4de5b65fb00eaded2170ac5f7086976d08e13ccbe8ab08/pyre2-0.3.10.tar.gz", hash = "sha256:91803818ec15e75d0dfdfe588282f28f46fff5eef9a2c893cac95327f443c585", size = 1917556, upload-time = "2025-10-08T15:08:43.914Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/27/659ba6600363d8e725d886414aa53cc7d5fdfa2e8f09ebaeb27581597a4a/pyre2-0.3.10-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:f6e1ee8205d0ff103e6835841a642220a185478b33d8870e99de850db53e133a", size = 778834, upload-time = "2025-10-08T15:08:28.905Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/30/fe9740dbaf2907fcc2ac03f90773e18cece2a42a39288c9da5a7e9bcb170/pyre2-0.3.10-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:aa7bfbc86c93cc1b5603d91ee1847da722fe5ebcd4d2b201b82ea3d70a6fde68", size = 1075343, upload-time = "2025-10-08T15:08:30.263Z" },
+    { url = "https://files.pythonhosted.org/packages/07/d4/43445250a650009d42fd2056369937e6371dfee5d8d2a024e055d589d807/pyre2-0.3.10-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3e03e47cc9f36503502d75fccd8d2a5b7883d5f5941817dd4c82470df55ec533", size = 1076040, upload-time = "2025-10-08T15:08:31.679Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/d0/2ebf5b60d368c69bae86dcea754f782eb843e2dd72bb4f9a4c355752be96/pyre2-0.3.10-cp311-cp311-win_amd64.whl", hash = "sha256:99a190fdcffcf46fb3763fffefd3f6643825d9dec941d9b4190be6968bd9e497", size = 1446241, upload-time = "2025-10-08T15:08:32.971Z" },
 ]
 
 [[package]]

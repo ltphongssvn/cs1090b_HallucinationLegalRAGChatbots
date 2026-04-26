@@ -40,6 +40,7 @@ dependencies = [
   "eyecite>=2.7.6",
   "rapidfuzz>=3.14.5",
   "hyperscan>=0.8.2",
+  "pyre2>=0.3.10",
 ]
 [dependency-groups]
 dev = [
