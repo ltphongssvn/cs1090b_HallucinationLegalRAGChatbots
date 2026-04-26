@@ -200,3 +200,5 @@ class BaselineEvalSummary(BaseModel):
     # Provenance
     git_sha: str = Field(pattern=r"^[a-f0-9]{12}$")
     seed: int = Field(ge=0)
+    
+    case_names_redacted: bool = False

@@ -2564,6 +2564,8 @@ As MS3 rubric states accuracy is not the grading focus; methodology and reasonin
 - `data/processed/baseline/eval_comparison.json` — per-query win/tie counts
 - Current git SHA at time of this report: `02177cb61d99`
 
+**Case Name Redaction**: All retrieval summaries (`bm25_summary.json`, `bge_m3_summary.json`, `eval_summary.json`) include a `case_names_redacted` boolean flag indicating whether case names were redacted from `destination_context` queries before retrieval. When Cell 12.5 runs redaction via `scripts/redact_gold_pairs.py --in-place`, it creates a `.redacted` marker file. Downstream baseline scripts (Cells 13-14) automatically detect this marker and set `--case-names-redacted` flag, which propagates to all summary JSONs. This ensures retrieval metrics are transparently labeled as testing legal reasoning vs. lexical case-name matching.
+
 ---
 
 ## Cell 16 - MS3 Pipeline Diagrams (Conceptual + Infrastructure)
