@@ -217,3 +217,36 @@ class TestCleanCorpusCLIWorkers:
         )
         assert result.returncode != 0
         assert "workers" in result.stderr.lower()
+
+
+@pytest.mark.unit
+class TestCleanCorpusShardedParallel:
+    """Sharded parallel: split input → N processes → concat outputs.
+
+    Avoids the imap_unordered IPC bottleneck and per-worker eyecite warmup
+    by giving each worker a contiguous file shard.
+    """
+
+    def test_sharded_workers_produces_complete_output(self, make_corpus) -> None:
+        rows = [_chunk(i, 100 + i, 0, f"Brown v. Board, 347 U.S. {i}") for i in range(50)]
+        in_path, out_path = make_corpus(rows)
+        main(in_path=in_path, out_path=out_path, workers=4, mode="sharded")
+        rows_out = [json.loads(line) for line in out_path.open()]
+        assert len(rows_out) == 50
+        for row in rows_out:
+            assert "347 U.S." not in row["text"]
+
+    def test_sharded_preserves_input_order(self, make_corpus) -> None:
+        """Sharded mode concatenates shards in order → input order preserved."""
+        rows = [_chunk(i, 100 + i, 0, f"Plain text {i}.") for i in range(30)]
+        in_path, out_path = make_corpus(rows)
+        main(in_path=in_path, out_path=out_path, workers=4, mode="sharded")
+        rows_out = [json.loads(line) for line in out_path.open()]
+        assert [r["opinion_id"] for r in rows_out] == list(range(30))
+
+    def test_sharded_default_mode_is_pool(self, make_corpus) -> None:
+        """Default mode is still imap (backward compat)."""
+        in_path, out_path = make_corpus([_chunk(1, 100, 0, "Brown v. Board, 347 U.S. 483")])
+        main(in_path=in_path, out_path=out_path, workers=2)
+        rows_out = [json.loads(line) for line in out_path.open()]
+        assert len(rows_out) == 1
