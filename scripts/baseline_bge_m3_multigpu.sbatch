@@ -45,6 +45,12 @@ ENCODE_BATCH_SIZE="${ENCODE_BATCH_SIZE:-32}"
 QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-8}"
 WORLD_SIZE=4
 
+# Check for redaction marker
+REDACTED_FLAG=""
+if [[ -f "data/processed/baseline/.redacted" ]]; then
+    REDACTED_FLAG="--case-names-redacted"
+fi
+
 echo "=== SLURM BGE-M3 multi-GPU job (corpus-shard) ==="
 echo "  job_id     : $SLURM_JOB_ID"
 echo "  node       : $(hostname)"
@@ -97,6 +103,7 @@ for rank in 0 1 2 3; do
             --query-batch-size "$QUERY_BATCH_SIZE" \
             --rank "$rank" \
             --world-size "$WORLD_SIZE" \
+            $REDACTED_FLAG \
             > "logs/bge_m3_rank${rank}_${SLURM_JOB_ID}.log" 2>&1
     ) &
     pids+=($!)

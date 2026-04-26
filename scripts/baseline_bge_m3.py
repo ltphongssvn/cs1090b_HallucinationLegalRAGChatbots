@@ -325,6 +325,7 @@ def main(
     query_batch_size: int = QUERY_BATCH_SIZE,
     rank: int = 0,
     world_size: int = 1,
+    case_names_redacted: bool = False,
 ) -> Any:
     """Run BGE-M3 dense baseline on corpus shard [rank/world_size] with resume."""
     import faiss
@@ -609,6 +610,7 @@ def main(
         shard_rank=rank,
         git_sha=_git_sha(),
         results_hash=results_hash,
+        case_names_redacted=case_names_redacted,
     )
     summary_path.write_text(
         json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
@@ -632,6 +634,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--query-batch-size", type=int, default=QUERY_BATCH_SIZE)
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--case-names-redacted", action="store_true", help="Flag indicating gold pairs have been redacted")
     ap.add_argument("--rank", type=int, default=0, help="shard rank for multi-GPU")
     ap.add_argument("--world-size", type=int, default=1, help="total shard count")
     ap.add_argument("--dry-run", action="store_true")
@@ -659,4 +662,5 @@ if __name__ == "__main__":
         query_batch_size=args.query_batch_size,
         rank=args.rank,
         world_size=args.world_size,
+        case_names_redacted=args.case_names_redacted,
     )

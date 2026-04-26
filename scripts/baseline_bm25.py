@@ -158,6 +158,7 @@ def main(
     top_k: int = TOP_K,
     log_to_wandb: bool = False,
     seed: int = 0,
+    case_names_redacted: bool = False,
 ) -> dict[str, Any]:
     from src.eda_schemas import BaselineBM25Summary
 
@@ -257,6 +258,7 @@ def main(
         "seed": seed,
         "git_sha": _git_sha(),
         "results_hash": results_hash,
+        "case_names_redacted": case_names_redacted,
     }
     validated = BaselineBM25Summary.model_validate(summary_data)
     summary_path = out_dir / "bm25_summary.json"
@@ -280,6 +282,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--top-k", type=int, default=TOP_K)
     ap.add_argument("--log-to-wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--case-names-redacted", action="store_true", help="Flag indicating gold pairs have been redacted")
     ap.add_argument("--dry-run", action="store_true")
     return ap
 
@@ -300,4 +303,5 @@ if __name__ == "__main__":
         top_k=args.top_k,
         log_to_wandb=args.log_to_wandb,
         seed=args.seed,
+        case_names_redacted=args.case_names_redacted,
     )

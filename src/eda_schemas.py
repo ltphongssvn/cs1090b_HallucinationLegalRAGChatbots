@@ -105,6 +105,7 @@ class BaselineBM25Summary(BaseModel):
     seed: int
     git_sha: str
     results_hash: str = Field(min_length=64, max_length=64)
+    case_names_redacted: bool = False
 
 
 class BaselineBM25ResultLine(BaseModel):
@@ -143,6 +144,7 @@ class BaselineBgeM3Summary(BaseModel):
     seed: int
     git_sha: str = Field(pattern=r"^[a-f0-9]{12}$")
     results_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    case_names_redacted: bool = False
 
     @model_validator(mode="after")
     def _unique_opinions_le_chunks(self) -> BaselineBgeM3Summary:

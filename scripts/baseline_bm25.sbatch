@@ -37,6 +37,12 @@ OUT_DIR="${OUT_DIR:-data/processed/baseline}"
 TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
 
+# Check for redaction marker
+REDACTED_FLAG=""
+if [[ -f "data/processed/baseline/.redacted" ]]; then
+    REDACTED_FLAG="--case-names-redacted"
+fi
+
 echo "=== SLURM BM25 job ==="
 echo "  job_id        : $SLURM_JOB_ID"
 echo "  node          : $(hostname)"
@@ -74,6 +80,7 @@ uv run --locked python scripts/baseline_bm25.py \
     --out-dir "$OUT_DIR" \
     --top-k "$TOP_K" \
     --seed "$SEED" \
+    $REDACTED_FLAG \
     --dry-run
 
 echo "=== full run ==="
@@ -82,7 +89,8 @@ uv run --locked python scripts/baseline_bm25.py \
     --gold-pairs-path "$GOLD_PATH" \
     --out-dir "$OUT_DIR" \
     --top-k "$TOP_K" \
-    --seed "$SEED"
+    --seed "$SEED" \
+    $REDACTED_FLAG
 
 # Final artifact + schema validation
 if uv run --locked python -c "
