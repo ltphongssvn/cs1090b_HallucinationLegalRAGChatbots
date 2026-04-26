@@ -65,10 +65,22 @@ def clean_destination_context(text: str) -> str:
 
     try:
         from eyecite import get_citations
+        from eyecite.tokenizers import HyperscanTokenizer
     except ImportError as e:
         raise RuntimeError("eyecite required — run: uv add eyecite") from e
 
-    citations = get_citations(plain_text=text)
+    # Hyperscan: linear-time NFA, immune to catastrophic backtracking.
+    # Cache compiled database to repo root (eyecite recompiles on first use ~5s).
+    global _HYPERSCAN_TOKENIZER
+    try:
+        _HYPERSCAN_TOKENIZER  # noqa: F821
+    except NameError:
+        from pathlib import Path as _P
+        cache = _P(__file__).resolve().parent.parent / ".hyperscan_cache"
+        cache.mkdir(exist_ok=True)
+        _HYPERSCAN_TOKENIZER = HyperscanTokenizer(cache_dir=str(cache))
+
+    citations = get_citations(plain_text=text, tokenizer=_HYPERSCAN_TOKENIZER)
 
     # Collect spans to remove: citation spans + case-name spans
     spans: list[tuple[int, int]] = []
