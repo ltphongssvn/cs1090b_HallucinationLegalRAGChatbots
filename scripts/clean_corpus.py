@@ -4,19 +4,14 @@ Strips citations, case names, supra/id refs from every chunk's text via
 clean_query.clean_destination_context. Preserves opinion_id, cluster_id,
 chunk_index. Writes summary JSON with sha256 + git_sha provenance.
 
-Two parallel modes:
-  - pool (default): mp.Pool.imap_unordered; main process reads + writes.
-    Bottleneck on large corpora due to single-writer serialization.
-  - sharded: split input into N contiguous file shards, each worker
-    processes its shard independently, results concatenated in order.
-    Better for 27GB+ corpora; preserves input order.
-
-Usage
------
-    uv run python scripts/clean_corpus.py \\
-        --in-path data/processed/baseline/corpus_chunks_enriched.jsonl \\
-        --out-path data/processed/baseline/corpus_chunks_cleaned.jsonl \\
-        --workers 32 --mode sharded
+Three parallel modes:
+  - pool (default): mp.Pool.imap_unordered. Single-writer bottleneck.
+  - sharded: split→N mp processes→concat. Hangs on eyecite catastrophic
+    backtracking (cpython#96062 — Pool deadlocks on hung workers).
+  - subprocess: each shard runs as independent OS subprocess with
+    subprocess.run(timeout=N). Hung shards killed cleanly via SIGKILL;
+    other shards unaffected. Industry pattern for fault-tolerant batch
+    text cleaning at scale.
 """
 from __future__ import annotations
 
@@ -36,6 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from clean_query import clean_destination_context  # noqa: E402
+
+WORKER_SCRIPT = REPO_ROOT / "scripts" / "clean_corpus_worker.py"
+DEFAULT_SHARD_TIMEOUT_SEC = 300.0
+DEFAULT_ROWS_PER_SHARD = 50_000
 
 
 def _get_logger() -> logging.Logger:
@@ -75,10 +74,6 @@ def _sha256(path: Path) -> str:
 
 
 def _clean_one_line(line: str) -> str:
-    """Worker function: parse, clean text, dump.
-
-    Module-level so multiprocessing.Pool can pickle it.
-    """
     line = line.rstrip("\n")
     if not line:
         return ""
@@ -89,7 +84,6 @@ def _clean_one_line(line: str) -> str:
 
 
 def _process_shard(args: tuple[Path, Path]) -> int:
-    """Worker: read shard JSONL, write cleaned shard JSONL. Returns row count."""
     in_shard, out_shard = args
     n = 0
     with in_shard.open(encoding="utf-8") as fin, out_shard.open(
@@ -106,7 +100,6 @@ def _process_shard(args: tuple[Path, Path]) -> int:
 def _split_into_shards(
     in_path: Path, shard_dir: Path, n_shards: int
 ) -> list[tuple[Path, Path]]:
-    """Split input JSONL into n_shards contiguous files."""
     shard_dir.mkdir(parents=True, exist_ok=True)
     with in_path.open(encoding="utf-8") as f:
         total = sum(1 for _ in f)
@@ -126,6 +119,56 @@ def _split_into_shards(
     return shards
 
 
+def _split_by_rows_per_shard(
+    in_path: Path, shard_dir: Path, rows_per_shard: int
+) -> list[tuple[Path, Path]]:
+    """Split input into shards of fixed row count. Returns list of (in, out) shards."""
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shards: list[tuple[Path, Path]] = []
+    with in_path.open(encoding="utf-8") as fin:
+        shard_idx = 0
+        current_in: Path | None = None
+        current_fout = None
+        rows_in_current = 0
+        for line in fin:
+            if current_fout is None or rows_in_current >= rows_per_shard:
+                if current_fout is not None:
+                    current_fout.close()
+                in_shard = shard_dir / f"in_{shard_idx:04d}.jsonl"
+                out_shard = shard_dir / f"out_{shard_idx:04d}.jsonl"
+                shards.append((in_shard, out_shard))
+                current_fout = in_shard.open("w", encoding="utf-8")
+                rows_in_current = 0
+                shard_idx += 1
+            current_fout.write(line)
+            rows_in_current += 1
+        if current_fout is not None:
+            current_fout.close()
+    return shards
+
+
+def _run_shard_subprocess(
+    in_shard: Path,
+    out_shard: Path,
+    timeout_sec: float,
+) -> tuple[bool, str]:
+    """Run worker subprocess on one shard. Returns (success, error_msg)."""
+    try:
+        subprocess.run(
+            [sys.executable, str(WORKER_SCRIPT), str(in_shard), str(out_shard)],
+            timeout=timeout_sec,
+            check=True,
+            capture_output=True,
+        )
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, f"timeout after {timeout_sec}s"
+    except subprocess.CalledProcessError as e:
+        return False, f"exit {e.returncode}: {e.stderr.decode()[:200]}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 def main(
     in_path: Path,
     out_path: Path,
@@ -134,13 +177,16 @@ def main(
     log_every: int = 100_000,
     chunksize: int = 256,
     mode: str = "pool",
+    shard_timeout_sec: float = DEFAULT_SHARD_TIMEOUT_SEC,
+    rows_per_shard: int | None = None,
 ) -> dict:
     """Clean text field on every chunk row, stream JSONL → JSONL atomically.
 
-    workers=1 (default): serial, deterministic order.
-    workers>1, mode="pool": parallel via mp.Pool.imap_unordered; order NOT preserved.
-    workers>1, mode="sharded": split input → N independent procs → concat in order.
-        Best for large corpora where eyecite warmup + IPC dominate.
+    workers=1 (default): serial, deterministic.
+    workers>1, mode="pool": mp.Pool.imap_unordered.
+    workers>1, mode="sharded": split → N mp.Pool procs → concat (deadlock risk).
+    workers>1, mode="subprocess": split → N OS subprocesses with timeout
+        (recommended for production; fault-tolerant via SIGKILL).
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -148,8 +194,10 @@ def main(
         raise FileNotFoundError(f"missing input: {in_path}")
     if workers < 1:
         raise ValueError(f"workers must be >= 1, got {workers}")
-    if mode not in ("pool", "sharded"):
-        raise ValueError(f"mode must be 'pool' or 'sharded', got {mode!r}")
+    if mode not in ("pool", "sharded", "subprocess"):
+        raise ValueError(
+            f"mode must be 'pool', 'sharded', or 'subprocess', got {mode!r}"
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.info("=" * 60)
@@ -161,16 +209,61 @@ def main(
 
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     n_total = 0
+    shards_failed = 0
+    failed_shard_paths: list[str] = []
+    n_shards_used = 0
 
-    if workers > 1 and mode == "sharded":
+    if workers > 1 and mode == "subprocess":
+        rps = rows_per_shard if rows_per_shard is not None else DEFAULT_ROWS_PER_SHARD
+        with tempfile.TemporaryDirectory(dir=out_path.parent) as shard_root:
+            shard_dir = Path(shard_root)
+            shards = _split_by_rows_per_shard(in_path, shard_dir, rps)
+            n_shards_used = len(shards)
+            logger.info(
+                f"  split into {n_shards_used} shards (rows_per_shard={rps}); "
+                f"running {workers}-way subprocess pool with "
+                f"shard_timeout={shard_timeout_sec}s"
+            )
+            # Use ThreadPoolExecutor to manage subprocess concurrency cleanly
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            shard_results: dict[Path, tuple[bool, str]] = {}
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {
+                    ex.submit(
+                        _run_shard_subprocess, in_s, out_s, shard_timeout_sec
+                    ): (in_s, out_s)
+                    for in_s, out_s in shards
+                }
+                for fut in as_completed(futures):
+                    in_s, out_s = futures[fut]
+                    ok, err = fut.result()
+                    shard_results[in_s] = (ok, err)
+                    if not ok:
+                        logger.warning(f"  shard {in_s.name} FAILED: {err}")
+                        shards_failed += 1
+                        failed_shard_paths.append(str(in_s))
+
+            # Concat successful out shards in original order
+            with tmp.open("w", encoding="utf-8") as fout:
+                for in_s, out_s in shards:
+                    ok, _ = shard_results.get(in_s, (False, "missing"))
+                    if not ok or not out_s.exists():
+                        continue
+                    with out_s.open(encoding="utf-8") as fin:
+                        for line in fin:
+                            fout.write(line)
+                            n_total += 1
+        tmp.rename(out_path)
+    elif workers > 1 and mode == "sharded":
         with tempfile.TemporaryDirectory(dir=out_path.parent) as shard_root:
             shard_dir = Path(shard_root)
             shards = _split_into_shards(in_path, shard_dir, workers)
-            logger.info(f"  split into {len(shards)} shards; processing in parallel")
+            n_shards_used = len(shards)
+            logger.info(f"  split into {n_shards_used} shards")
             with mp.Pool(processes=workers) as pool:
                 counts = pool.map(_process_shard, shards)
             n_total = sum(counts)
-            logger.info(f"  shards complete: {n_total:,} rows total; concatenating")
             with tmp.open("w", encoding="utf-8") as fout:
                 for _, out_shard in shards:
                     if out_shard.exists():
@@ -212,6 +305,10 @@ def main(
         "total_rows": n_total,
         "workers": workers,
         "mode": mode,
+        "shard_timeout_sec": shard_timeout_sec,
+        "n_shards": n_shards_used,
+        "shards_failed": shards_failed,
+        "failed_shard_paths": failed_shard_paths,
         "input_sha256": _sha256(in_path),
         "output_sha256": _sha256(out_path),
         "git_sha": _git_sha(),
@@ -220,7 +317,9 @@ def main(
     summary_path.write_text(
         json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
     )
-    logger.info(f"  total: {n_total:,} rows")
+    logger.info(
+        f"  total: {n_total:,} rows  shards_failed: {shards_failed}/{n_shards_used}"
+    )
     logger.info(f"  summary -> {summary_path}")
     return summary
 
@@ -237,9 +336,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--mode",
-        choices=["pool", "sharded"],
+        choices=["pool", "sharded", "subprocess"],
         default="pool",
-        help="pool=mp.Pool.imap_unordered (default); sharded=split→N procs→concat",
+        help="pool (default), sharded (mp.Pool deadlock risk), "
+        "subprocess (recommended; fault-tolerant via timeout).",
+    )
+    ap.add_argument(
+        "--shard-timeout-sec",
+        type=float,
+        default=DEFAULT_SHARD_TIMEOUT_SEC,
+        help=f"Per-shard subprocess timeout (default {DEFAULT_SHARD_TIMEOUT_SEC}s).",
+    )
+    ap.add_argument(
+        "--rows-per-shard",
+        type=int,
+        default=None,
+        help=f"Rows per shard for subprocess mode (default {DEFAULT_ROWS_PER_SHARD}).",
     )
     ap.add_argument("--dry-run", action="store_true")
     return ap
@@ -249,12 +361,14 @@ if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     if args.dry_run:
         print("[clean_corpus] DRY RUN")
-        print(f"  in_path  : {args.in_path}")
-        print(f"  out_path : {args.out_path}")
-        print(f"  workers  : {args.workers}")
-        print(f"  mode     : {args.mode}")
-        print(f"  cpu_count: {os.cpu_count()}")
-        print(f"  git_sha  : {_git_sha()}")
+        print(f"  in_path           : {args.in_path}")
+        print(f"  out_path          : {args.out_path}")
+        print(f"  workers           : {args.workers}")
+        print(f"  mode              : {args.mode}")
+        print(f"  shard_timeout_sec : {args.shard_timeout_sec}")
+        print(f"  rows_per_shard    : {args.rows_per_shard}")
+        print(f"  cpu_count         : {os.cpu_count()}")
+        print(f"  git_sha           : {_git_sha()}")
         sys.exit(0)
     try:
         main(
@@ -262,6 +376,8 @@ if __name__ == "__main__":
             out_path=args.out_path,
             workers=args.workers,
             mode=args.mode,
+            shard_timeout_sec=args.shard_timeout_sec,
+            rows_per_shard=args.rows_per_shard,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
