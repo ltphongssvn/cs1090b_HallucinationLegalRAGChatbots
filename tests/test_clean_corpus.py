@@ -124,3 +124,96 @@ class TestCleanCorpusCLI:
         assert result.returncode == 0, result.stderr
         assert "DRY RUN" in result.stdout
         assert not out_path.exists()
+
+
+@pytest.mark.unit
+class TestCleanCorpusParallel:
+    """Parallel cleaning via multiprocessing — required for 27GB corpus."""
+
+    @pytest.mark.parametrize("workers", [2, 4, 8])
+    def test_accepts_workers_param_and_cleans_data(self, make_corpus, workers: int) -> None:
+        """Cleaner accepts --workers and produces correct output across worker counts.
+
+        NOTE: this test verifies correctness, NOT wall-clock speedup. Performance
+        regression testing belongs in a separate benchmark suite (pytest-benchmark)
+        with realistic data sizes; multiprocessing overhead on 20 rows would make
+        any timing assertion misleading.
+        """
+        rows = [_chunk(i, 100 + i, 0, f"Brown v. Board, 347 U.S. {i}") for i in range(20)]
+        in_path, out_path = make_corpus(rows)
+        main(in_path=in_path, out_path=out_path, workers=workers)
+        rows_out = [json.loads(line) for line in out_path.open()]
+        assert len(rows_out) == 20
+        # Cleaning applied
+        for row in rows_out:
+            assert "347 U.S." not in row["text"]
+            assert "Brown" not in row["text"]
+        # IDs preserved (sort by opinion_id since imap_unordered)
+        rows_out.sort(key=lambda r: r["opinion_id"])
+        for i, row in enumerate(rows_out):
+            assert row["opinion_id"] == i
+            assert row["cluster_id"] == 100 + i
+
+    def test_parallel_output_matches_serial(self, make_corpus, tmp_path: Path) -> None:
+        """Parallel and serial output must produce identical row content (order may differ)."""
+        rows = [_chunk(i, 100 + i, 0, f"See Brown v. Board, 347 U.S. {i}") for i in range(10)]
+        in_path, out_serial = make_corpus(rows)
+        out_parallel = tmp_path / "parallel.jsonl"
+
+        main(in_path=in_path, out_path=out_serial, workers=1)
+        main(in_path=in_path, out_path=out_parallel, workers=4)
+
+        # Sort both by opinion_id for stable comparison
+        rows_s = sorted(
+            (json.loads(line) for line in out_serial.open()),
+            key=lambda r: r["opinion_id"],
+        )
+        rows_p = sorted(
+            (json.loads(line) for line in out_parallel.open()),
+            key=lambda r: r["opinion_id"],
+        )
+        assert rows_s == rows_p
+
+    def test_workers_default_is_one_for_backward_compat(self, make_corpus) -> None:
+        """Calling main() without workers must still work (default = 1, serial)."""
+        in_path, out_path = make_corpus([_chunk(1, 100, 0, "Brown v. Board, 347 U.S. 483")])
+        main(in_path=in_path, out_path=out_path)
+        rows_out = [json.loads(line) for line in out_path.open()]
+        assert len(rows_out) == 1
+        assert "347 U.S." not in rows_out[0]["text"]
+
+
+@pytest.mark.integration
+class TestCleanCorpusCLIWorkers:
+    """CLI accepts --workers flag and produces correct output (subprocess smoke)."""
+
+    def test_cli_accepts_workers_param(self, make_corpus) -> None:
+        in_path, out_path = make_corpus(
+            [
+                _chunk(1, 100, 0, "Brown v. Board, 347 U.S. 483"),
+                _chunk(2, 200, 0, "Roe v. Wade, 410 U.S. 113"),
+            ]
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--in-path", str(in_path), "--out-path", str(out_path), "--workers", "4"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert out_path.exists()
+        rows = [json.loads(line) for line in out_path.open()]
+        assert len(rows) == 2
+        for row in rows:
+            assert "U.S." not in row["text"]
+
+    def test_cli_rejects_invalid_workers(self, make_corpus) -> None:
+        in_path, out_path = make_corpus([_chunk(1, 1, 0, "Plain text.")])
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--in-path", str(in_path), "--out-path", str(out_path), "--workers", "0"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "workers" in result.stderr.lower()
