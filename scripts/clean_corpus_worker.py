@@ -1,11 +1,11 @@
-"""Worker: clean one JSONL shard. Invoked as `python scripts/clean_corpus_worker.py IN OUT`.
+"""Worker: clean one JSONL shard via RE2 linear-time citation stripper.
 
-Standalone subprocess design (per cpython#96062): mp.Pool deadlocks when
-workers hang. Each shard runs as independent OS process; orchestrator
-uses subprocess.run(timeout=N) for clean kill semantics.
+Eyecite hangs on pathological corpus inputs (cpython#96062 + catastrophic
+backtracking in supra/id chain resolution). RE2 is mathematically immune
+to backtracking → guaranteed throughput on 7.8M-row corpus.
 
-Test-only: rows containing "__HANG_SENTINEL__" trigger time.sleep(60) so
-TDD can simulate a hung worker.
+Case-name extraction is sacrificed here; that concern is handled
+query-side via clean_query.py (45K queries can afford eyecite).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from clean_query import clean_destination_context  # noqa: E402
+from strip_citations_simple import strip_citations  # noqa: E402
 
 HANG_SENTINEL = "__HANG_SENTINEL__"
 
@@ -28,11 +28,10 @@ def _clean_line(line: str) -> str:
         return ""
     row = json.loads(line)
     text = row.get("text") or ""
-    # TDD hook: simulate hung worker
     if HANG_SENTINEL in text:
         time.sleep(60)
     if "text" in row:
-        row["text"] = clean_destination_context(text)
+        row["text"] = strip_citations(text)
     return json.dumps(row)
 
 
