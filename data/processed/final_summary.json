@@ -1,0 +1,658 @@
+{
+  "hallucination": {
+    "rows": [
+      {
+        "ablation": "none",
+        "faithful_rate": 0.0,
+        "hallucinated_rate": 1.0,
+        "n_judged": 2500,
+        "partial_rate": 0.0,
+        "retrieval_hit_at_10": null,
+        "retrieval_mrr": null,
+        "retrieval_ndcg_at_10": null,
+        "retriever_eval": "\u2014"
+      },
+      {
+        "ablation": "bm25",
+        "faithful_rate": 0.0916,
+        "hallucinated_rate": 0.626,
+        "n_judged": 2500,
+        "partial_rate": 0.2824,
+        "retrieval_hit_at_10": null,
+        "retrieval_mrr": null,
+        "retrieval_ndcg_at_10": null,
+        "retriever_eval": "bm25_results.eval.json"
+      },
+      {
+        "ablation": "bge_m3",
+        "faithful_rate": 0.0828,
+        "hallucinated_rate": 0.6444,
+        "n_judged": 2500,
+        "partial_rate": 0.2728,
+        "retrieval_hit_at_10": null,
+        "retrieval_mrr": null,
+        "retrieval_ndcg_at_10": null,
+        "retriever_eval": "bge_m3_results.eval.json"
+      },
+      {
+        "ablation": "rrf",
+        "faithful_rate": 0.0952,
+        "hallucinated_rate": 0.6152,
+        "n_judged": 2500,
+        "partial_rate": 0.2896,
+        "retrieval_hit_at_10": 0.15572160751065767,
+        "retrieval_mrr": 0.0769341504762876,
+        "retrieval_ndcg_at_10": 0.08936588479284006,
+        "retriever_eval": "rrf_results.eval.json"
+      },
+      {
+        "ablation": "reranker",
+        "faithful_rate": 0.1184,
+        "hallucinated_rate": 0.5576,
+        "n_judged": 2500,
+        "partial_rate": 0.324,
+        "retrieval_hit_at_10": 0.3597739138765148,
+        "retrieval_mrr": 0.32748042584526793,
+        "retrieval_ndcg_at_10": 0.3348686566409884,
+        "retriever_eval": "finetuned/reranker_results.eval.json"
+      }
+    ]
+  },
+  "ms3_eval_summary": {
+    "bge_m3_hit_at_k": {
+      "1": 0.0243808976385496,
+      "10": 0.08617138477750634,
+      "100": 0.2215835608564449,
+      "5": 0.06313167600708915
+    },
+    "bge_m3_mrr": 0.045666853971831144,
+    "bge_m3_ndcg_at_10": 0.05161740936549756,
+    "bge_m3_results_hash": "b4c308d99910afe9cf88b927e3448fa9839c864330c015afb5a6fc0a1b8cad12",
+    "bge_m3_wins": 3372,
+    "bm25_hit_at_k": {
+      "1": 0.025051492072615797,
+      "10": 0.1459021890118312,
+      "100": 0.33318963452603345,
+      "5": 0.10274464721942808
+    },
+    "bm25_mrr": 0.0642157639215921,
+    "bm25_ndcg_at_10": 0.0783378055212023,
+    "bm25_results_hash": "74e6263308b4a9e3f922fb7d12b05a0f5b2a842176252bdb9f29aa6e7a2407f5",
+    "bm25_wins": 5819,
+    "git_sha": "c5853c949d04",
+    "k_values": [
+      1,
+      5,
+      10,
+      100
+    ],
+    "n_queries": 20877,
+    "ndcg_k": 10,
+    "schema_version": "1.0.0",
+    "seed": 0,
+    "ties": 11686
+  },
+  "paired_comparisons": {
+    "paired_BM25_vs_RRF": {
+      "a_wins": 4901,
+      "b_wins": 3565,
+      "gold_field": "source_cluster_id",
+      "label_a": "BM25",
+      "label_b": "RRF",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12411,
+      "top_k": 100
+    },
+    "paired_bge_m3_vs_reranker": {
+      "a_wins": 3210,
+      "b_wins": 5008,
+      "gold_field": "source_cluster_id",
+      "label_a": "bge_m3",
+      "label_b": "reranker",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12659,
+      "top_k": 100
+    },
+    "paired_bge_m3_vs_rrf": {
+      "a_wins": 2525,
+      "b_wins": 5460,
+      "gold_field": "source_cluster_id",
+      "label_a": "bge_m3",
+      "label_b": "rrf",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12892,
+      "top_k": 100
+    },
+    "paired_bm25_vs_reranker": {
+      "a_wins": 5387,
+      "b_wins": 3284,
+      "gold_field": "source_cluster_id",
+      "label_a": "bm25",
+      "label_b": "reranker",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12206,
+      "top_k": 100
+    },
+    "paired_bm25_vs_reranker_finetuned": {
+      "a_wins": 1368,
+      "b_wins": 6945,
+      "gold_field": "source_cluster_id",
+      "label_a": "bm25",
+      "label_b": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12564,
+      "top_k": 100
+    },
+    "paired_bm25_vs_rrf": {
+      "a_wins": 4901,
+      "b_wins": 3565,
+      "gold_field": "source_cluster_id",
+      "label_a": "bm25",
+      "label_b": "rrf",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 12411,
+      "top_k": 100
+    },
+    "paired_reranker_concat_vs_reranker_finetuned": {
+      "a_wins": 224,
+      "b_wins": 7041,
+      "gold_field": "source_cluster_id",
+      "label_a": "reranker_concat",
+      "label_b": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13612,
+      "top_k": 100
+    },
+    "paired_rrf_vs_reranker": {
+      "a_wins": 5024,
+      "b_wins": 2603,
+      "gold_field": "source_cluster_id",
+      "label_a": "rrf",
+      "label_b": "reranker",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13250,
+      "top_k": 100
+    },
+    "paired_rrf_vs_reranker_concat": {
+      "a_wins": 4652,
+      "b_wins": 2943,
+      "gold_field": "source_cluster_id",
+      "label_a": "rrf",
+      "label_b": "reranker_concat",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13282,
+      "top_k": 100
+    },
+    "paired_rrf_vs_reranker_finetuned": {
+      "a_wins": 415,
+      "b_wins": 6701,
+      "gold_field": "source_cluster_id",
+      "label_a": "rrf",
+      "label_b": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13761,
+      "top_k": 100
+    }
+  },
+  "retrieval": {
+    "reranker_concat": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.028356564640513483,
+        "10": 0.10983378837955644,
+        "100": 0.3751975858600374,
+        "5": 0.07869904679791158
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "reranker_concat",
+      "match_field": "cluster_id",
+      "mrr": 0.05752716605068653,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.06390816560587302,
+      "ndcg_k": 10,
+      "results_hash": "b23a301c07e4ef5d0997b414669005a88dedbdab640c37e6cf20adc03f2be25f"
+    },
+    "reranker_finetuned": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.30694065239258517,
+        "10": 0.3597739138765148,
+        "100": 0.3751975858600374,
+        "5": 0.3516309814628539
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "mrr": 0.32748042584526793,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.3348686566409884,
+      "ndcg_k": 10,
+      "results_hash": "439629d85016a359799a52806cbe6c694ca9badf182dd276eed216e6cf743327"
+    },
+    "rrf": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.03908607558557264,
+        "10": 0.15572160751065767,
+        "100": 0.3751975858600374,
+        "5": 0.10806150308952436
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "RRF_k60",
+      "match_field": "cluster_id",
+      "mrr": 0.0769341504762876,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.08936588479284006,
+      "ndcg_k": 10,
+      "results_hash": "1d0a112826cfa739929ab2a2a52f0e9066935b5b710b40b7558d47147645ca77"
+    }
+  },
+  "retrieval_stratified": {
+    "bge_m3": {
+      "git_sha": "c5853c949d04",
+      "gold_field": "source_cluster_id",
+      "label": "bge_m3",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.0243808976385496,
+          "10": 0.08617138477750634,
+          "100": 0.2215835608564449,
+          "5": 0.06313167600708915
+        },
+        "mrr": 0.045666853971831144,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.05161740936549756
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.020233840189010723,
+            "10": 0.07936027140001212,
+            "100": 0.21887684012843037,
+            "5": 0.05688495789664991
+          },
+          "mrr": 0.04068967816954033,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.046098942353376665
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.05214723926380368,
+            "10": 0.13190184049079753,
+            "100": 0.24233128834355827,
+            "5": 0.11349693251533742
+          },
+          "mrr": 0.08011355900935012,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.0895183055920097
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.036556603773584904,
+            "10": 0.10613207547169812,
+            "100": 0.22877358490566038,
+            "5": 0.07900943396226415
+          },
+          "mrr": 0.0599561710242263,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.06754496197739375
+        }
+      },
+      "results_hash": "b4c308d99910afe9cf88b927e3448fa9839c864330c015afb5a6fc0a1b8cad12",
+      "schema_version": "1.0.0"
+    },
+    "bm25": {
+      "git_sha": "c5853c949d04",
+      "gold_field": "source_cluster_id",
+      "label": "bm25",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.025051492072615797,
+          "10": 0.1459021890118312,
+          "100": 0.33318963452603345,
+          "5": 0.10274464721942808
+        },
+        "mrr": 0.0642157639215921,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.0783378055212023
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.02217241170412552,
+            "10": 0.13176228266795906,
+            "100": 0.32047010359241535,
+            "5": 0.09062821833161688
+          },
+          "mrr": 0.05760662659508354,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.0699325610617769
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.05214723926380368,
+            "10": 0.2392638036809816,
+            "100": 0.39263803680981596,
+            "5": 0.18711656441717792
+          },
+          "mrr": 0.114782197503245,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.14037866462335008
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.03125,
+            "10": 0.1877948113207547,
+            "100": 0.3779481132075472,
+            "5": 0.13738207547169812
+          },
+          "mrr": 0.08179921256717947,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.10135355142032137
+        }
+      },
+      "results_hash": "74e6263308b4a9e3f922fb7d12b05a0f5b2a842176252bdb9f29aa6e7a2407f5",
+      "schema_version": "1.0.0"
+    },
+    "reranker_concat": {
+      "git_sha": "c5853c949d04",
+      "gold_field": "source_cluster_id",
+      "label": "reranker",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.028356564640513483,
+          "10": 0.10983378837955644,
+          "100": 0.3751975858600374,
+          "5": 0.07869904679791158
+        },
+        "mrr": 0.05752716605068653,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.06390816560587302
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.01908281335191131,
+            "10": 0.09135518264978494,
+            "100": 0.3636033198037196,
+            "5": 0.06336705640031502
+          },
+          "mrr": 0.04553863847773111,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.05038691554139783
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.0869120654396728,
+            "10": 0.2065439672801636,
+            "100": 0.42535787321063395,
+            "5": 0.1656441717791411
+          },
+          "mrr": 0.12728205107641485,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.1405506205423256
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.05660377358490566,
+            "10": 0.171875,
+            "100": 0.41715801886792453,
+            "5": 0.12824292452830188
+          },
+          "mrr": 0.09575663158477078,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.10761068738843142
+        }
+      },
+      "results_hash": "b23a301c07e4ef5d0997b414669005a88dedbdab640c37e6cf20adc03f2be25f",
+      "schema_version": "1.0.0"
+    },
+    "reranker_finetuned": {
+      "git_sha": "c5853c949d04",
+      "gold_field": "source_cluster_id",
+      "label": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.30694065239258517,
+          "10": 0.3597739138765148,
+          "100": 0.3751975858600374,
+          "5": 0.3516309814628539
+        },
+        "mrr": 0.32748042584526793,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.3348686566409884
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.32761858605440114,
+            "10": 0.35960501605379536,
+            "100": 0.3636033198037196,
+            "5": 0.3563942569818865
+          },
+          "mrr": 0.3408870583473286,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.34541552865556824
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.18098159509202455,
+            "10": 0.3292433537832311,
+            "100": 0.42535787321063395,
+            "5": 0.2852760736196319
+          },
+          "mrr": 0.2327891131649022,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.2528072173487599
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.2426297169811321,
+            "10": 0.36939858490566035,
+            "100": 0.41715801886792453,
+            "5": 0.3475825471698113
+          },
+          "mrr": 0.2895396301760143,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.30720322954284346
+        }
+      },
+      "results_hash": "439629d85016a359799a52806cbe6c694ca9badf182dd276eed216e6cf743327",
+      "schema_version": "1.0.0"
+    },
+    "rrf": {
+      "git_sha": "c5853c949d04",
+      "gold_field": "source_cluster_id",
+      "label": "rrf",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.03908607558557264,
+          "10": 0.15572160751065767,
+          "100": 0.3751975858600374,
+          "5": 0.10806150308952436
+        },
+        "mrr": 0.0769341504762876,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.08936588479284006
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.034470224753135034,
+            "10": 0.14272732780032713,
+            "100": 0.3636033198037196,
+            "5": 0.09765554007390805
+          },
+          "mrr": 0.06975374081807587,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.08085667147649929
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.07259713701431493,
+            "10": 0.24028629856850717,
+            "100": 0.42535787321063395,
+            "5": 0.17280163599182005
+          },
+          "mrr": 0.12261494614181911,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.14455514630760688
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.05188679245283019,
+            "10": 0.1945754716981132,
+            "100": 0.41715801886792453,
+            "5": 0.14003537735849056
+          },
+          "mrr": 0.09870632148667358,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.11486308009100657
+        }
+      },
+      "results_hash": "1d0a112826cfa739929ab2a2a52f0e9066935b5b710b40b7558d47147645ca77",
+      "schema_version": "1.0.0"
+    }
+  },
+  "training": {
+    "hard_negatives_mining": {
+      "max_chunks_per_cluster": 2,
+      "n_neg_per_pos": 7,
+      "n_train": 7442,
+      "n_val": 391,
+      "neg_rank_range": [
+        2,
+        100
+      ],
+      "schema_version": "1.0.0",
+      "seed": 0,
+      "train_hash": "86d3a743e26ee52ed2703c9437f095d9730adc311142610759abc73c76246f13",
+      "val_hash": "922f66da8c9ecc0fdf34a38994471abe0394a3baacd4797061c62cc8f0916052"
+    },
+    "parade_training": {
+      "batch_size": 4,
+      "encoder_dir": "data/processed/finetune/bge_reranker_legal",
+      "epochs": 3,
+      "git_sha": "c5853c949d04",
+      "grad_accum": 8,
+      "hidden_size": 1024,
+      "lr": 5e-05,
+      "max_length": 512,
+      "max_passages": 8,
+      "n_agg_layers": 2,
+      "n_heads": 8,
+      "n_train_rows": 7442,
+      "n_val_rows": 391,
+      "schema_version": "1.0.0",
+      "seed": 0,
+      "train_seconds": 4042.669
+    },
+    "reranker_finetuning": {
+      "base_model": "BAAI/bge-reranker-v2-m3",
+      "batch_size": 4,
+      "device": "cuda:0",
+      "device_name": "NVIDIA L4",
+      "epochs": 2,
+      "git_sha": "c5853c949d04",
+      "grad_accum": 8,
+      "lr": 2e-05,
+      "max_length": 1024,
+      "n_train_pairs": 59536,
+      "n_val_pairs": 3128,
+      "schema_version": "1.0.0",
+      "seed": 0,
+      "train_seconds": 20294.282,
+      "warmup_ratio": 0.1,
+      "weight_decay": 0.01,
+      "world_size": 4
+    }
+  }
+}

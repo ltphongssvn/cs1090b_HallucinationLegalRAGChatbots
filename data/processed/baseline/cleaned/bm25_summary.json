@@ -1,0 +1,14 @@
+{
+  "bm25_b": 0.75,
+  "bm25_k1": 1.5,
+  "git_sha": "c5853c949d04",
+  "index_build_seconds": 2174.466,
+  "n_corpus_chunks": 7813273,
+  "n_queries": 20877,
+  "n_unique_opinions": 1360665,
+  "results_hash": "74e6263308b4a9e3f922fb7d12b05a0f5b2a842176252bdb9f29aa6e7a2407f5",
+  "retrieval_seconds": 6591.554,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "top_k": 100
+}

@@ -1,0 +1,23 @@
+{
+  "ablation": "reranker",
+  "ablation_label": "reranker_rag",
+  "batch_size": 4,
+  "device": "cuda",
+  "device_name": "NVIDIA L4",
+  "encoder_load_seconds": 90.56,
+  "generation_seconds": 35210.706,
+  "generator_model": "Qwen/Qwen2.5-7B-Instruct",
+  "git_sha": "c5853c949d04",
+  "max_chunks_per_cluster": 2,
+  "max_length": 1536,
+  "max_new_tokens": 256,
+  "n_generated_total": 20877,
+  "n_queries_total": 20877,
+  "n_total_tokens_out": 5226763,
+  "results_hash": "889f8e8c0ca88f002884dc3d503a64581ba70c41c2eb2431716dbbd4df27cfd6",
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "text_index_seconds": 72.954,
+  "top_k_context": 5,
+  "world_size": 4
+}

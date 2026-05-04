@@ -1,0 +1,18 @@
+{
+  "ablation": "bm25",
+  "ablation_label": "bm25_rag",
+  "faithful_rate": 0.0916,
+  "git_sha": "c5853c949d04",
+  "hallucinated_rate": 0.626,
+  "judge_model": "gpt-4o-mini",
+  "judging_seconds": 0.0,
+  "limit": null,
+  "max_chunks_per_cluster": 2,
+  "n_judged": 2500,
+  "n_total": 2500,
+  "n_unknown": 0,
+  "partial_rate": 0.2824,
+  "results_hash": "d90de7dd2a498ae09b3b14f6cd1ac9334abca01f4b922aaa23183a7a6d97e7f8",
+  "schema_version": "1.0.0",
+  "top_k_context": 5
+}

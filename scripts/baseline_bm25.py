@@ -1,3 +1,4 @@
+# scripts/baseline_bm25.py
 """MS3 BM25 baseline retrieval.
 
 Two paths:
@@ -229,8 +230,17 @@ REQUIRED_VERIFIED_QUERY_FIELDS = (
 
 
 def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
-    """Load queries directly from verified gold (no LePaRD join)."""
+    """Load queries directly from verified gold (no LePaRD join).
+
+    Dedups on (source_id, dest_id): the cleaned gold file may contain multiple
+    rows with the same (source_id, dest_id) but different surrounding contexts.
+    Each unique citation pair becomes a single query — first occurrence wins.
+    This matches the dedup contract in
+    scripts/baseline_bge_m3.py::_load_queries_verified so paired comparison in
+    Cell 15 sees aligned row counts across both baselines.
+    """
     queries: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
     with gold_path.open(encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
             line = line.strip()
@@ -242,10 +252,14 @@ def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
                 raise ValueError(
                     f"verified gold line {line_no} missing required fields: {missing}"
                 )
+            key = (int(r["source_id"]), int(r["dest_id"]))
+            if key in seen:
+                continue
+            seen.add(key)
             queries.append({
-                "source_id": int(r["source_id"]),
+                "source_id": key[0],
                 "source_cluster_id": int(r["source_cluster_id"]),
-                "dest_id": int(r["dest_id"]),
+                "dest_id": key[1],
                 "query_text": r["destination_context"],
             })
     return queries

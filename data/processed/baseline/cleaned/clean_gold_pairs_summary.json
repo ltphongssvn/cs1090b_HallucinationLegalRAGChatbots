@@ -1,0 +1,17 @@
+{
+  "field_cleaned": "destination_context",
+  "files_processed": [
+    "gold_pairs_test.jsonl",
+    "gold_pairs_val.jsonl"
+  ],
+  "git_sha": "bdb46eb09027",
+  "input_sha256": {
+    "gold_pairs_test.jsonl": "bdd37bdf126b7d464e0cb353c8c18465841e01deddac0670f02f5cd9c95f19da",
+    "gold_pairs_val.jsonl": "ae326d2b319619d4c5ba6d82d237cac88985130f57e0a1dcb1f130715e6446e3"
+  },
+  "output_sha256": {
+    "gold_pairs_test.jsonl": "ca21045c82f13de4c0a87e48c020747073c733a106d701e2fc5160e7bb531d8f",
+    "gold_pairs_val.jsonl": "ba1b1032f44a93a2105552a4a810d52e042d3d996683111bf70d4aec67c07638"
+  },
+  "total_rows_cleaned": 46692
+}

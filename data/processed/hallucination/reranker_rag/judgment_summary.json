@@ -1,0 +1,18 @@
+{
+  "ablation": "reranker",
+  "ablation_label": "reranker_rag",
+  "faithful_rate": 0.1184,
+  "git_sha": "c5853c949d04",
+  "hallucinated_rate": 0.5576,
+  "judge_model": "gpt-4o-mini",
+  "judging_seconds": 5099.449,
+  "limit": 2500,
+  "max_chunks_per_cluster": 2,
+  "n_judged": 2500,
+  "n_total": 2500,
+  "n_unknown": 0,
+  "partial_rate": 0.324,
+  "results_hash": "d433264d9d9e064d950c9b1f55df71940de5a18f44d7eed0d6fbdc6b4e8f0bd3",
+  "schema_version": "1.0.0",
+  "top_k_context": 5
+}

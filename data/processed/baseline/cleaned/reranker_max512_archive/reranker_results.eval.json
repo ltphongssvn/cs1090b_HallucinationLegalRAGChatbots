@@ -1,0 +1,23 @@
+{
+  "gold_field": "source_cluster_id",
+  "hit_at_k": {
+    "1": 0.01930353978061982,
+    "10": 0.07913014321981128,
+    "100": 0.3751975858600374,
+    "5": 0.052593763471763186
+  },
+  "k_values": [
+    1,
+    5,
+    10,
+    100
+  ],
+  "label": "reranker_bge_v2_m3",
+  "match_field": "cluster_id",
+  "mrr": 0.042639886343351745,
+  "n_queries": 20877,
+  "n_skipped": 0,
+  "ndcg_at_10": 0.04462286131528451,
+  "ndcg_k": 10,
+  "results_hash": "27ea226023d36f7450e2c21193b8a73c7253e89d73a17defdb74ad345cbc7f7b"
+}

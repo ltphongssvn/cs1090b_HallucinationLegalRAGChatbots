@@ -1,0 +1,18 @@
+{
+  "ablation": "bge_m3",
+  "ablation_label": "bge_m3_rag",
+  "faithful_rate": 0.0828,
+  "git_sha": "c5853c949d04",
+  "hallucinated_rate": 0.6444,
+  "judge_model": "gpt-4o-mini",
+  "judging_seconds": 6570.969,
+  "limit": 2500,
+  "max_chunks_per_cluster": 2,
+  "n_judged": 2500,
+  "n_total": 2500,
+  "n_unknown": 0,
+  "partial_rate": 0.2728,
+  "results_hash": "732a3be25d244847e0bc42c4bfb169b87021c6815b7f1a60ad8fcb5551f7c9bd",
+  "schema_version": "1.0.0",
+  "top_k_context": 5
+}

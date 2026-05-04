@@ -1,0 +1,5 @@
+outs:
+- md5: 3106c96d17cfba1fdcbb35f6fe15938f
+  size: 27474462641
+  hash: md5
+  path: corpus_chunks_enriched.jsonl

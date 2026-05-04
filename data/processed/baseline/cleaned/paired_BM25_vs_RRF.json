@@ -1,0 +1,11 @@
+{
+  "a_wins": 4901,
+  "b_wins": 3565,
+  "gold_field": "source_cluster_id",
+  "label_a": "BM25",
+  "label_b": "RRF",
+  "match_field": "cluster_id",
+  "n_queries": 20877,
+  "ties": 12411,
+  "top_k": 100
+}

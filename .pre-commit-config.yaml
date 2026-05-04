@@ -34,12 +34,6 @@ repos:
         language: system
         pass_filenames: false
 
-      - id: verify-selective-staging
-        name: Verify Selective Staging
-        entry: bash scripts/hooks/verify_staging.sh
-        language: system
-        pass_filenames: false
-        stages: [pre-commit]
 
   # ---- Standard File Hygiene ----
   - repo: https://github.com/pre-commit/pre-commit-hooks

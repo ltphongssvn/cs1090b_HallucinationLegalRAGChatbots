@@ -1,0 +1,11 @@
+{
+  "a_wins": 415,
+  "b_wins": 6701,
+  "gold_field": "source_cluster_id",
+  "label_a": "rrf",
+  "label_b": "reranker_finetuned",
+  "match_field": "cluster_id",
+  "n_queries": 20877,
+  "ties": 13761,
+  "top_k": 100
+}

@@ -1,0 +1,18 @@
+{
+  "ablation": "none",
+  "ablation_label": "no_rag",
+  "faithful_rate": 0.0,
+  "git_sha": "c5853c949d04",
+  "hallucinated_rate": 1.0,
+  "judge_model": "gpt-4o-mini",
+  "judging_seconds": 3138.217,
+  "limit": 2500,
+  "max_chunks_per_cluster": 2,
+  "n_judged": 2500,
+  "n_total": 2500,
+  "n_unknown": 0,
+  "partial_rate": 0.0,
+  "results_hash": "3c9c1d7d676a519e70313ca3fbed3113674f7da01ca1249220a1929d8bd1ba72",
+  "schema_version": "1.0.0",
+  "top_k_context": 5
+}

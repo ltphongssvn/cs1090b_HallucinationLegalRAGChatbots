@@ -1,0 +1,18 @@
+{
+  "batch_size": 4,
+  "encoder_dir": "data/processed/finetune/bge_reranker_legal",
+  "epochs": 3,
+  "git_sha": "c5853c949d04",
+  "grad_accum": 8,
+  "hidden_size": 1024,
+  "lr": 5e-05,
+  "max_length": 512,
+  "max_passages": 8,
+  "n_agg_layers": 2,
+  "n_heads": 8,
+  "n_train_rows": 7442,
+  "n_val_rows": 391,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "train_seconds": 4042.669
+}

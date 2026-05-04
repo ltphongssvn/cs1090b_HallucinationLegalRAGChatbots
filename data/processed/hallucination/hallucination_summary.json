@@ -1,0 +1,59 @@
+{
+  "rows": [
+    {
+      "ablation": "none",
+      "faithful_rate": 0.0,
+      "hallucinated_rate": 1.0,
+      "n_judged": 2500,
+      "partial_rate": 0.0,
+      "retrieval_hit_at_10": null,
+      "retrieval_mrr": null,
+      "retrieval_ndcg_at_10": null,
+      "retriever_eval": "\u2014"
+    },
+    {
+      "ablation": "bm25",
+      "faithful_rate": 0.0916,
+      "hallucinated_rate": 0.626,
+      "n_judged": 2500,
+      "partial_rate": 0.2824,
+      "retrieval_hit_at_10": null,
+      "retrieval_mrr": null,
+      "retrieval_ndcg_at_10": null,
+      "retriever_eval": "bm25_results.eval.json"
+    },
+    {
+      "ablation": "bge_m3",
+      "faithful_rate": 0.0828,
+      "hallucinated_rate": 0.6444,
+      "n_judged": 2500,
+      "partial_rate": 0.2728,
+      "retrieval_hit_at_10": null,
+      "retrieval_mrr": null,
+      "retrieval_ndcg_at_10": null,
+      "retriever_eval": "bge_m3_results.eval.json"
+    },
+    {
+      "ablation": "rrf",
+      "faithful_rate": 0.0952,
+      "hallucinated_rate": 0.6152,
+      "n_judged": 2500,
+      "partial_rate": 0.2896,
+      "retrieval_hit_at_10": 0.15572160751065767,
+      "retrieval_mrr": 0.0769341504762876,
+      "retrieval_ndcg_at_10": 0.08936588479284006,
+      "retriever_eval": "rrf_results.eval.json"
+    },
+    {
+      "ablation": "reranker",
+      "faithful_rate": 0.1184,
+      "hallucinated_rate": 0.5576,
+      "n_judged": 2500,
+      "partial_rate": 0.324,
+      "retrieval_hit_at_10": 0.3597739138765148,
+      "retrieval_mrr": 0.32748042584526793,
+      "retrieval_ndcg_at_10": 0.3348686566409884,
+      "retriever_eval": "finetuned/reranker_results.eval.json"
+    }
+  ]
+}

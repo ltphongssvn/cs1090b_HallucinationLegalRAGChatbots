@@ -1,0 +1,20 @@
+{
+  "batch_size": 32,
+  "device": "cuda",
+  "device_name": "NVIDIA L4",
+  "encoder_load_seconds": 20.694,
+  "git_sha": "c5853c949d04",
+  "max_chunks_per_cluster": 2,
+  "max_length": 1024,
+  "n_pairs_scored_total": 2087700,
+  "n_queries_total": 20877,
+  "rerank_seconds": 26669.649,
+  "reranker_model": "BAAI/bge-reranker-v2-m3",
+  "results_hash": "439629d85016a359799a52806cbe6c694ca9badf182dd276eed216e6cf743327",
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "text_index_seconds": 72.169,
+  "top_k_input": 100,
+  "top_k_output": 100,
+  "world_size": 4
+}

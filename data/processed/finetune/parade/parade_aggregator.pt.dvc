@@ -1,0 +1,5 @@
+outs:
+- md5: 0444e1a9dc2b0c8b1990933aa6a78dc5
+  size: 100825149
+  hash: md5
+  path: parade_aggregator.pt

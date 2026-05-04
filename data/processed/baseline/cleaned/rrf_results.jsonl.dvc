@@ -1,0 +1,5 @@
+outs:
+- md5: a08ef65f4ac8438fcb1b99d9f18e673a
+  size: 115548263
+  hash: md5
+  path: rrf_results.jsonl

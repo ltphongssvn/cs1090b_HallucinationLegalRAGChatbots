@@ -1,0 +1,19 @@
+{
+  "base_model": "BAAI/bge-reranker-v2-m3",
+  "batch_size": 4,
+  "device": "cuda:0",
+  "device_name": "NVIDIA L4",
+  "epochs": 2,
+  "git_sha": "c5853c949d04",
+  "grad_accum": 8,
+  "lr": 2e-05,
+  "max_length": 1024,
+  "n_train_pairs": 59536,
+  "n_val_pairs": 3128,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "train_seconds": 20294.282,
+  "warmup_ratio": 0.1,
+  "weight_decay": 0.01,
+  "world_size": 4
+}

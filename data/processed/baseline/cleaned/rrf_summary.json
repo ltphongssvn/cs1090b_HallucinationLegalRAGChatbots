@@ -1,0 +1,11 @@
+{
+  "bge_m3_input_hash": "b4c308d99910afe9cf88b927e3448fa9839c864330c015afb5a6fc0a1b8cad12",
+  "bm25_input_hash": "74e6263308b4a9e3f922fb7d12b05a0f5b2a842176252bdb9f29aa6e7a2407f5",
+  "git_sha": "c5853c949d04",
+  "n_queries": 20877,
+  "results_hash": "1d0a112826cfa739929ab2a2a52f0e9066935b5b710b40b7558d47147645ca77",
+  "rrf_k": 60,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "top_k": 100
+}

@@ -44,6 +44,7 @@ TOP_K="${TOP_K:-100}"
 SEED="${SEED:-0}"
 ENCODE_BATCH_SIZE="${ENCODE_BATCH_SIZE:-32}"
 QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-8}"
+VERIFIED="${VERIFIED:-0}"
 WORLD_SIZE=4
 
 echo "=== SLURM BGE-M3 multi-GPU job (corpus-shard) ==="
@@ -54,13 +55,18 @@ echo "  utc_start  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  git_sha    : $(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
-for p in "$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH"; do
+if [[ "$VERIFIED" == "1" ]]; then
+    PREFLIGHT_PATHS=("$CORPUS_PATH" "$GOLD_PATH")
+else
+    PREFLIGHT_PATHS=("$CORPUS_PATH" "$GOLD_PATH" "$LEPARD_PATH")
+fi
+for p in "${PREFLIGHT_PATHS[@]}"; do
     if [[ ! -f "$p" ]]; then
         echo "FAIL: missing input: $p" >&2
         exit 2
     fi
 done
-echo "OK preflight"
+echo "OK preflight (verified=$VERIFIED)"
 
 # Idempotency
 SUMMARY="$OUT_DIR/bge_m3_summary.json"
@@ -88,6 +94,10 @@ pids=()
 for rank in 0 1 2 3; do
     (
         export CUDA_VISIBLE_DEVICES=$rank
+        VERIFIED_FLAG=""
+        if [[ "$VERIFIED" == "1" ]]; then
+            VERIFIED_FLAG="--verified"
+        fi
         uv run --locked python scripts/baseline_bge_m3.py \
             --corpus-path "$CORPUS_PATH" \
             --gold-pairs-path "$GOLD_PATH" \
@@ -99,6 +109,7 @@ for rank in 0 1 2 3; do
             --query-batch-size "$QUERY_BATCH_SIZE" \
             --rank "$rank" \
             --world-size "$WORLD_SIZE" \
+            $VERIFIED_FLAG \
             > "logs/bge_m3_rank${rank}_${SLURM_JOB_ID}.log" 2>&1
     ) &
     pids+=($!)
@@ -118,72 +129,19 @@ if [[ $fail -ne 0 ]]; then
 fi
 echo "=== all 4 workers completed ==="
 
-# Merge per-rank results into unified top-k via cross-shard MaxP
+# Merge per-rank results (delegated to scripts/merge_bge_m3_shards.py for testability)
 echo "=== merging shards ==="
-uv run --locked python -c "
-import hashlib
-import json
-from pathlib import Path
-from scripts.baseline_bge_m3 import (
-    _merge_shard_results, SCHEMA_VERSION, _git_sha,
-    ENCODER_MODEL, EMBEDDING_DIM, MAX_LENGTH, SIMILARITY_METRIC,
-    NORMALIZE_EMBEDDINGS, DTYPE,
-)
-from src.eda_schemas import BaselineBgeM3Summary
+VERIFIED_FLAG_MERGE=""
+if [[ "$VERIFIED" == "1" ]]; then
+    VERIFIED_FLAG_MERGE="--verified"
+fi
+uv run --locked python scripts/merge_bge_m3_shards.py \
+    --out-dir "$OUT_DIR" \
+    --world-size "$WORLD_SIZE" \
+    --top-k "$TOP_K" \
+    --encode-batch-size "$ENCODE_BATCH_SIZE" \
+    --seed "$SEED" \
+    $VERIFIED_FLAG_MERGE
 
-out_dir = Path('$OUT_DIR')
-shard_paths = sorted(out_dir.glob('bge_m3_results.rank*.jsonl'))
-assert len(shard_paths) == $WORLD_SIZE, f'expected $WORLD_SIZE shards, got {len(shard_paths)}'
-merged = out_dir / 'bge_m3_results.jsonl'
-_merge_shard_results(shard_paths, merged, top_k=$TOP_K)
-
-# Aggregate summary: take one rank's timings + corpus totals + recomputed hash
-rank_summaries = sorted(out_dir.glob('bge_m3_summary.rank*.json'))
-rank0 = json.loads(rank_summaries[0].read_text())
-n_chunks_total = sum(
-    json.loads(p.read_text())['n_corpus_chunks'] for p in rank_summaries
-)
-# Unique opinions across shards requires reading all meta files
-all_opinions: set[int] = set()
-for m in sorted(out_dir.glob('bge_m3_index_meta.rank*.jsonl')):
-    with m.open() as f:
-        for line in f:
-            all_opinions.add(json.loads(line)['opinion_id'])
-
-n_queries = sum(1 for _ in merged.open())
-results_hash = hashlib.sha256(merged.read_bytes()).hexdigest()
-
-merged_summary = {
-    'schema_version': SCHEMA_VERSION,
-    'n_queries': n_queries,
-    'n_corpus_chunks': n_chunks_total,
-    'n_unique_opinions': len(all_opinions),
-    'top_k': $TOP_K,
-    'encoder_model': ENCODER_MODEL,
-    'embedding_dim': EMBEDDING_DIM,
-    'device': rank0['device'],
-    'device_name': rank0['device_name'],
-    'encode_batch_size': $ENCODE_BATCH_SIZE,
-    'similarity_metric': SIMILARITY_METRIC,
-    'normalize_embeddings': NORMALIZE_EMBEDDINGS,
-    'max_length': MAX_LENGTH,
-    'dtype': DTYPE,
-    'encoder_load_seconds': max(json.loads(p.read_text())['encoder_load_seconds'] for p in rank_summaries),
-    'index_build_seconds': max(json.loads(p.read_text())['index_build_seconds'] for p in rank_summaries),
-    'query_encode_seconds': max(json.loads(p.read_text())['query_encode_seconds'] for p in rank_summaries),
-    'retrieval_seconds': max(json.loads(p.read_text())['retrieval_seconds'] for p in rank_summaries),
-    'seed': $SEED,
-    'world_size': $WORLD_SIZE,
-    'shard_rank': 0,
-    'git_sha': _git_sha(),
-    'results_hash': results_hash,
-}
-validated = BaselineBgeM3Summary.model_validate(merged_summary)
-(out_dir / 'bge_m3_summary.json').write_text(
-    json.dumps(validated.model_dump(), sort_keys=True, indent=2, allow_nan=False),
-    encoding='utf-8',
-)
-print(f'merged: n_queries={n_queries:,}  n_corpus_chunks={n_chunks_total:,}  hash={results_hash[:16]}')
-"
 
 echo "=== done utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="

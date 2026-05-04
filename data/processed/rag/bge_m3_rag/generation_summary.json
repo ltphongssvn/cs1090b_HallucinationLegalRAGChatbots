@@ -1,0 +1,23 @@
+{
+  "ablation": "bge_m3",
+  "ablation_label": "bge_m3_rag",
+  "batch_size": 4,
+  "device": "cuda",
+  "device_name": "NVIDIA L4",
+  "encoder_load_seconds": 99.201,
+  "generation_seconds": 35313.904,
+  "generator_model": "Qwen/Qwen2.5-7B-Instruct",
+  "git_sha": "c5853c949d04",
+  "max_chunks_per_cluster": 2,
+  "max_length": 1536,
+  "max_new_tokens": 256,
+  "n_generated_total": 20877,
+  "n_queries_total": 20877,
+  "n_total_tokens_out": 5046059,
+  "results_hash": "a1d3b7b488627c28771f4e7229ca40f4cc285905596910f609b892335e9e301c",
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "text_index_seconds": 68.36,
+  "top_k_context": 5,
+  "world_size": 4
+}

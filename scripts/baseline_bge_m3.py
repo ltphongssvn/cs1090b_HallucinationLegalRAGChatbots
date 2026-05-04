@@ -1,3 +1,4 @@
+# scripts/baseline_bge_m3.py
 """MS3 BGE-M3 dense baseline retrieval (corpus-sharded, resume-safe).
 
 Architecture (corpus sharding):
@@ -115,17 +116,55 @@ def _load_queries(gold_path: Path, lepard_path: Path) -> list[dict[str, Any]]:
     return queries
 
 
+def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
+    """Verified-mode query loader for cleaned-corpus pipeline.
+
+    Reads cleaned gold pairs (which carry quote + source_cluster_id + dest_id
+    directly), so no LePaRD lookup is required. Each (source_id, dest_id)
+    pair is a distinct query — a single source opinion typically cites many
+    dest opinions, each with its own quote. The source_cluster_id is carried
+    alongside as the cluster-level match target for retrieval evaluation.
+    """
+    queries: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    with gold_path.open(encoding="utf-8") as f:
+        for line in f:
+            r = json.loads(line)
+            key = (int(r["source_id"]), int(r["dest_id"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(
+                {
+                    "source_id": key[0],
+                    "dest_id": key[1],
+                    "source_cluster_id": int(r["source_cluster_id"]),
+                    "query_text": r.get("quote", ""),
+                }
+            )
+    return queries
+
+
 # ---------- aggregation ----------
 
 
-def _aggregate_chunk_scores(raw_hits: list[dict[str, Any]], *, top_k: int) -> list[dict[str, Any]]:
+def _aggregate_chunk_scores(
+    raw_hits: list[dict[str, Any]],
+    *,
+    top_k: int,
+    match_field: str = "opinion_id",
+) -> list[dict[str, Any]]:
+    """MaxP aggregation over chunk-level hits keyed by match_field.
+
+    match_field="opinion_id" (legacy) or "cluster_id" (verified).
+    """
     best: dict[int, float] = {}
     for h in raw_hits:
-        oid = h["opinion_id"]
+        oid = h[match_field]
         s = h["score"]
         if oid not in best or s > best[oid]:
             best[oid] = s
-    ranked = [{"opinion_id": oid, "score": sc} for oid, sc in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))]
+    ranked = [{match_field: oid, "score": sc} for oid, sc in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))]
     return ranked[:top_k]
 
 
@@ -151,11 +190,26 @@ def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
     return start, end
 
 
-def _merge_shard_results(shard_paths: list[Path], merged_path: Path, *, top_k: int = TOP_K) -> None:
-    """Corpus-shard merge: combine per-query hits across shards via MaxP + top-k."""
+def _merge_shard_results(
+    shard_paths: list[Path],
+    merged_path: Path,
+    *,
+    top_k: int = TOP_K,
+    verified: bool = False,
+) -> None:
+    """Corpus-shard merge: combine per-query hits across shards via MaxP + top-k.
+
+    verified=False (legacy): query key = (source_id, dest_id), hit field = opinion_id.
+    verified=True            : query key = (source_id, dest_id), hit field = cluster_id;
+                               source_cluster_id is carried through as a per-query
+                               match-target field for downstream evaluation.
+    """
+    match_field = "cluster_id" if verified else "opinion_id"
+
     per_query: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
     key_order: list[tuple[int, int]] = []
     seen_keys: set[tuple[int, int]] = set()
+    cluster_ids: dict[tuple[int, int], int] = {}  # verified-mode only
 
     for shard in sorted(shard_paths):
         with shard.open(encoding="utf-8") as fin:
@@ -165,8 +219,10 @@ def _merge_shard_results(shard_paths: list[Path], merged_path: Path, *, top_k: i
                 if key not in seen_keys:
                     seen_keys.add(key)
                     key_order.append(key)
+                    if verified:
+                        cluster_ids[key] = int(row["source_cluster_id"])
                 for hit in row["retrieved"]:
-                    oid = int(hit["opinion_id"])
+                    oid = int(hit[match_field])
                     sc = float(hit["score"])
                     prev = per_query[key].get(oid)
                     if prev is None or sc > prev:
@@ -176,15 +232,22 @@ def _merge_shard_results(shard_paths: list[Path], merged_path: Path, *, top_k: i
         for key in key_order:
             scores = per_query[key]
             ranked = [
-                {"opinion_id": oid, "score": sc} for oid, sc in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+                {match_field: oid, "score": sc} for oid, sc in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
             ][:top_k]
-            fout.write(
-                json.dumps(
-                    {"source_id": key[0], "dest_id": key[1], "retrieved": ranked},
-                    allow_nan=False,
-                )
-                + "\n"
-            )
+            if verified:
+                out_row = {
+                    "source_id": key[0],
+                    "dest_id": key[1],
+                    "source_cluster_id": cluster_ids[key],
+                    "retrieved": ranked,
+                }
+            else:
+                out_row = {
+                    "source_id": key[0],
+                    "dest_id": key[1],
+                    "retrieved": ranked,
+                }
+            fout.write(json.dumps(out_row, allow_nan=False) + "\n")
 
 
 # ---------- checkpointing (resume-safe corpus encoding) ----------
@@ -331,6 +394,7 @@ def main(
     query_batch_size: int = QUERY_BATCH_SIZE,
     rank: int = 0,
     world_size: int = 1,
+    verified: bool = False,
 ) -> Any:
     """Run BGE-M3 dense baseline on corpus shard [rank/world_size] with resume."""
     import faiss
@@ -349,7 +413,8 @@ def main(
         raise ValueError(f"world_size must be >= 1, got {world_size}")
     if rank < 0 or rank >= world_size:
         raise ValueError(f"rank {rank} out of range [0, {world_size})")
-    for path in (corpus_path, gold_pairs_path, lepard_path):
+    required_inputs = (corpus_path, gold_pairs_path) if verified else (corpus_path, gold_pairs_path, lepard_path)
+    for path in required_inputs:
         if not Path(path).is_file():
             raise FileNotFoundError(f"input missing: {path}")
 
@@ -386,10 +451,12 @@ def main(
     logger.info(f"  corpus (total)   : {n_total:,}")
     logger.info(f"  shard range      : [{shard_start:,}, {shard_end:,})  ({shard_end - shard_start:,} chunks)")
 
+    # In verified mode chunk_meta stores (cluster_id, chunk_index); else (opinion_id, chunk_index).
+    id_field = "cluster_id" if verified else "opinion_id"
     chunk_meta: list[tuple[int, int]] = []
     for i, c in enumerate(_iter_corpus(corpus_path)):
         if shard_start <= i < shard_end:
-            chunk_meta.append((c["opinion_id"], c["chunk_index"]))
+            chunk_meta.append((c[id_field], c["chunk_index"]))
         elif i >= shard_end:
             break
     n_chunks = len(chunk_meta)
@@ -504,7 +571,7 @@ def main(
         faiss.write_index(index, str(index_path))
         with meta_path.open("w", encoding="utf-8") as f:
             for oid, ci in chunk_meta:
-                f.write(json.dumps({"opinion_id": oid, "chunk_index": ci}) + "\n")
+                f.write(json.dumps({id_field: oid, "chunk_index": ci}) + "\n")
         if partial_index_path.exists():
             partial_index_path.unlink()
         if ckpt_path.exists():
@@ -512,7 +579,7 @@ def main(
 
     # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
-    queries = _load_queries(gold_pairs_path, lepard_path)
+    queries = _load_queries_verified(gold_pairs_path) if verified else _load_queries(gold_pairs_path, lepard_path)
     logger.info(f"  queries          : {len(queries):,}")
     query_texts = [q["query_text"] for q in queries]
     t0 = time.perf_counter()
@@ -538,14 +605,14 @@ def main(
             scores, indices = index.search(q_emb, current_k)
             raw_hits = [
                 {
-                    "opinion_id": chunk_meta[int(idx)][0],
+                    id_field: chunk_meta[int(idx)][0],
                     "chunk_index": chunk_meta[int(idx)][1],
                     "score": float(score),
                 }
                 for idx, score in zip(indices[0], scores[0], strict=False)
                 if idx != -1
             ]
-            aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
+            aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k, match_field=id_field)
             if len(aggregated) >= top_k or current_k >= n_chunks:
                 return aggregated
             current_k = min(current_k * 2, n_chunks)
@@ -559,7 +626,7 @@ def main(
                 q = queries[qi_global]
                 raw_hits = [
                     {
-                        "opinion_id": chunk_meta[int(idx)][0],
+                        id_field: chunk_meta[int(idx)][0],
                         "chunk_index": chunk_meta[int(idx)][1],
                         "score": float(score),
                     }
@@ -570,20 +637,23 @@ def main(
                     )
                     if idx != -1
                 ]
-                aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k)
+                aggregated = _aggregate_chunk_scores(raw_hits, top_k=top_k, match_field=id_field)
                 if len(aggregated) < top_k and initial_k < n_chunks:
                     aggregated = _retrieve_and_aggregate(query_embeddings[qi_global : qi_global + 1])
-                fout.write(
-                    json.dumps(
-                        {
-                            "source_id": q["source_id"],
-                            "dest_id": q["dest_id"],
-                            "retrieved": aggregated,
-                        },
-                        allow_nan=False,
-                    )
-                    + "\n"
-                )
+                if verified:
+                    out_row = {
+                        "source_id": q["source_id"],
+                        "dest_id": q["dest_id"],
+                        "source_cluster_id": q["source_cluster_id"],
+                        "retrieved": aggregated,
+                    }
+                else:
+                    out_row = {
+                        "source_id": q["source_id"],
+                        "dest_id": q["dest_id"],
+                        "retrieved": aggregated,
+                    }
+                fout.write(json.dumps(out_row, allow_nan=False) + "\n")
 
     os.replace(results_tmp, results_path)
     retrieval_seconds = time.perf_counter() - t0
@@ -642,6 +712,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--rank", type=int, default=0, help="shard rank for multi-GPU")
     ap.add_argument("--world-size", type=int, default=1, help="total shard count")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--verified",
+        action="store_true",
+        help="verified pipeline: cleaned gold (no lepard lookup), match by cluster_id",
+    )
     return ap
 
 
@@ -667,4 +742,5 @@ if __name__ == "__main__":
         query_batch_size=args.query_batch_size,
         rank=args.rank,
         world_size=args.world_size,
+        verified=args.verified,
     )

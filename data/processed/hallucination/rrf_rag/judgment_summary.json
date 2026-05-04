@@ -1,0 +1,18 @@
+{
+  "ablation": "rrf",
+  "ablation_label": "rrf_rag",
+  "faithful_rate": 0.0952,
+  "git_sha": "c5853c949d04",
+  "hallucinated_rate": 0.6152,
+  "judge_model": "gpt-4o-mini",
+  "judging_seconds": 0.0,
+  "limit": null,
+  "max_chunks_per_cluster": 2,
+  "n_judged": 2500,
+  "n_total": 2500,
+  "n_unknown": 0,
+  "partial_rate": 0.2896,
+  "results_hash": "31b1bc0787b2ccb5223e1ac317efe6fa7f3f277dae43fdec345267c14f947222",
+  "schema_version": "1.0.0",
+  "top_k_context": 5
+}

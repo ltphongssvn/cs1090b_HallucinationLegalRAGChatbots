@@ -1,0 +1,53 @@
+{
+  "git_sha": "85964efbdf98",
+  "gold_pair_hashes": {
+    "gold_pairs_test.jsonl": "bdd37bdf126b7d464e0cb353c8c18465841e01deddac0670f02f5cd9c95f19da",
+    "gold_pairs_val.jsonl": "ae326d2b319619d4c5ba6d82d237cac88985130f57e0a1dcb1f130715e6446e3"
+  },
+  "gold_pairs_test": 45000,
+  "gold_pairs_val": 1692,
+  "n_clusters_leaked": 0,
+  "n_pairs_loaded": 2429533,
+  "n_unique_clusters_test": 1460,
+  "n_unique_clusters_val": 71,
+  "schema_version": "1.0.0",
+  "seed": 0,
+  "test_court_distribution": {
+    "Judicial Council of the Seventh Circuit": 15,
+    "United States Circuit Court of the District of Columbia": 10,
+    "United States Court of Appeals for the District of Columbia": 54,
+    "United States Court of Appeals for the District of Columbia Circuit": 2479,
+    "United States Court of Appeals for the Eighth Circuit": 2761,
+    "United States Court of Appeals for the Eleventh Circuit": 2160,
+    "United States Court of Appeals for the Federal Circuit": 5680,
+    "United States Court of Appeals for the Fifth Circuit": 3042,
+    "United States Court of Appeals for the First Circuit": 1920,
+    "United States Court of Appeals for the Fourth Circuit": 1823,
+    "United States Court of Appeals for the Ninth Circuit": 4869,
+    "United States Court of Appeals for the Second Circuit": 6905,
+    "United States Court of Appeals for the Seventh Circuit": 4055,
+    "United States Court of Appeals for the Six Circuit": 18,
+    "United States Court of Appeals for the Sixth Circuit": 3407,
+    "United States Court of Appeals for the Tenth Circuit": 2655,
+    "United States Court of Appeals for the Third Circuit": 3118,
+    "United States Court of Claims": 13,
+    "United States District Court for the District of Columbia": 16
+  },
+  "val_court_distribution": {
+    "United States Court of Appeals for the District of Columbia Circuit": 115,
+    "United States Court of Appeals for the Eighth Circuit": 112,
+    "United States Court of Appeals for the Eleventh Circuit": 160,
+    "United States Court of Appeals for the Federal Circuit": 31,
+    "United States Court of Appeals for the Fifth Circuit": 128,
+    "United States Court of Appeals for the First Circuit": 56,
+    "United States Court of Appeals for the Fourth Circuit": 37,
+    "United States Court of Appeals for the Ninth Circuit": 134,
+    "United States Court of Appeals for the Second Circuit": 156,
+    "United States Court of Appeals for the Seventh Circuit": 82,
+    "United States Court of Appeals for the Sixth Circuit": 123,
+    "United States Court of Appeals for the Tenth Circuit": 317,
+    "United States Court of Appeals for the Third Circuit": 241
+  },
+  "verified_subset_path": "data/processed/lepard_cl_verified_subset.jsonl",
+  "verified_subset_sha": "7a3ca53691332364cf077233e4312c4e30c3198111fab52941fcabe1876ad58a"
+}

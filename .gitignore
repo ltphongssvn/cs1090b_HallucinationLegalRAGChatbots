@@ -29,6 +29,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
 # IDE
 .windsurf/
 
@@ -45,7 +46,13 @@ data/**
 !data/**/*.dvc
 !data/**/.gitignore
 !data/**/summary.json
-!data/**/bm25_summary.json
+!data/**/*_summary.json
+!data/**/*.eval.json
+!data/**/*.stratified.json
+!data/**/paired_*.json
 
 wandb/
 /lepard_train_4000000_rev0194f95.jsonl
+
+# Hyperscan cache (local, regenerable)
+.hyperscan_cache/

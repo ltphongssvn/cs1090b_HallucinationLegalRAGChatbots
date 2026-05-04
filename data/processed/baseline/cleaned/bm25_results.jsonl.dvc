@@ -1,0 +1,5 @@
+outs:
+- md5: f9ec90a2e52346758c9b65c203f97a9d
+  size: 110777174
+  hash: md5
+  path: bm25_results.jsonl
