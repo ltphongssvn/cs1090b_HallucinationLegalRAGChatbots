@@ -277,7 +277,7 @@
   },
   "retrieval_stratified": {
     "bge_m3": {
-      "git_sha": "c5853c949d04",
+      "git_sha": "545233693f85",
       "gold_field": "source_cluster_id",
       "label": "bge_m3",
       "match_field": "cluster_id",
@@ -342,7 +342,7 @@
       "schema_version": "1.0.0"
     },
     "bm25": {
-      "git_sha": "c5853c949d04",
+      "git_sha": "545233693f85",
       "gold_field": "source_cluster_id",
       "label": "bm25",
       "match_field": "cluster_id",
@@ -407,7 +407,7 @@
       "schema_version": "1.0.0"
     },
     "reranker_concat": {
-      "git_sha": "c5853c949d04",
+      "git_sha": "545233693f85",
       "gold_field": "source_cluster_id",
       "label": "reranker",
       "match_field": "cluster_id",
@@ -472,7 +472,7 @@
       "schema_version": "1.0.0"
     },
     "reranker_finetuned": {
-      "git_sha": "c5853c949d04",
+      "git_sha": "545233693f85",
       "gold_field": "source_cluster_id",
       "label": "reranker_finetuned",
       "match_field": "cluster_id",
@@ -537,7 +537,7 @@
       "schema_version": "1.0.0"
     },
     "rrf": {
-      "git_sha": "c5853c949d04",
+      "git_sha": "545233693f85",
       "gold_field": "source_cluster_id",
       "label": "rrf",
       "match_field": "cluster_id",

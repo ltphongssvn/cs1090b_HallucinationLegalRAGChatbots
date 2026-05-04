@@ -1,5 +1,5 @@
 {
-  "git_sha": "c5853c949d04",
+  "git_sha": "545233693f85",
   "gold_field": "source_cluster_id",
   "label": "bge_m3",
   "match_field": "cluster_id",
