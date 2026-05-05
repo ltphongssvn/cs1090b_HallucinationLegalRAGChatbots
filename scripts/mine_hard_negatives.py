@@ -166,6 +166,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return ap
 
 
+
+def _git_sha() -> str:
+    """Return current git HEAD short SHA, or empty string if unavailable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=5,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
@@ -252,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         "neg_rank_range": [args.neg_rank_min, args.neg_rank_max],
         "max_chunks_per_cluster": args.max_chunks_per_cluster,
         "seed": args.seed,
+        "git_sha": _git_sha(),
         "train_hash": hashlib.sha256(train_path.read_bytes()).hexdigest(),
         "val_hash": hashlib.sha256(val_path.read_bytes()).hexdigest() if val_path.exists() else "",
     }

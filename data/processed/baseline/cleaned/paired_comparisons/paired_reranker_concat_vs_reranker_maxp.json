@@ -1,11 +1,11 @@
 {
-  "a_wins": 224,
-  "b_wins": 7041,
+  "a_wins": 3623,
+  "b_wins": 3622,
   "gold_field": "source_cluster_id",
   "label_a": "reranker_concat",
-  "label_b": "reranker_finetuned",
+  "label_b": "reranker_maxp",
   "match_field": "cluster_id",
   "n_queries": 20877,
-  "ties": 13612,
+  "ties": 13632,
   "top_k": 100
 }

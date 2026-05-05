@@ -436,7 +436,27 @@ def main(
 
     # --- Resume from existing .tmp if present ---
     already_done: set[tuple[int, int]] = set()
-    if results_tmp.is_file():
+    # Resume from merged .jsonl if present (yesterday's completed run deleted .tmp)
+    if results_path.is_file() and not results_tmp.is_file():
+        try:
+            with results_path.open(encoding="utf-8") as fin:
+                for line in fin:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    already_done.add((int(row["source_id"]), int(row["dest_id"])))
+            logger.info(
+                f"  RESUMING from merged: {len(already_done):,} queries already in {results_path.name}, will skip"
+            )
+            # Seed .tmp from merged so subsequent appends preserve full history
+            with results_path.open(encoding="utf-8") as fin, results_tmp.open("w", encoding="utf-8") as fout:
+                for line in fin:
+                    fout.write(line)
+        except Exception as e:
+            logger.info(f"  could not parse merged {results_path}: {e}; starting fresh")
+            already_done = set()
+    if results_tmp.is_file() and not already_done:
         try:
             with results_tmp.open(encoding="utf-8") as fin:
                 for line in fin:

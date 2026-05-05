@@ -1,0 +1,11 @@
+{
+  "cap": 4000000,
+  "created_utc": "2026-05-05T11:33:40.320871+00:00",
+  "dataset": "rmahari/LePaRD",
+  "n_lines": 4000000,
+  "path": "lepard_train_4000000_rev0194f95.jsonl",
+  "provenance_reconstructed": true,
+  "revision": "0194f95c3091acceab3b887c9b09ef432cf84052",
+  "sha256": "abe787c01e379447f1d7f6eb8bf4f41ea4565f6ffe58fa740fec98679c6b25b4",
+  "size_bytes": 5778401221
+}

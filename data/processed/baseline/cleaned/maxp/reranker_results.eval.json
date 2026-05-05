@@ -1,0 +1,23 @@
+{
+  "gold_field": "source_cluster_id",
+  "hit_at_k": {
+    "1": 0.042630646165636825,
+    "10": 0.1470038798677971,
+    "100": 0.3751975858600374,
+    "5": 0.10394213728026057
+  },
+  "k_values": [
+    1,
+    5,
+    10,
+    100
+  ],
+  "label": "reranker_maxp",
+  "match_field": "cluster_id",
+  "mrr": 0.07778129595655202,
+  "n_queries": 20877,
+  "n_skipped": 0,
+  "ndcg_at_10": 0.08812074650321944,
+  "ndcg_k": 10,
+  "results_hash": "12500b152e783cd6004e62b8177d06a215ad3703808d6262eabdd8e0f839adc1"
+}

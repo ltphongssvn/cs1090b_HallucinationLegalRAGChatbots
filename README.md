@@ -2227,10 +2227,10 @@ The full pipeline is green end-to-end:
 # [MS3] EDA, Baseline Modeling, and Pipeline Development [4/11-4/24]
 
 Milestone 3: EDA and Baseline Modeling [20 pts]
-Key dates: 
+Key dates:
 Slides and accompanying Notebook: due at your presentation time (if earlier) or by April 24 at 9:59pm, whichever comes first.
 Presentation with TF: by Sunday, April 26th EOD (or earlier in the week).  Time to be arranged with your TF.
-Note that submissions are due at 9:59pm the day of the deadline (submission window closes at 10pm sharp). There are no late days for any of the project milestones. 
+Note that submissions are due at 9:59pm the day of the deadline (submission window closes at 10pm sharp). There are no late days for any of the project milestones.
 
 ---
 
@@ -2831,4 +2831,3 @@ Additional flags:
 - **Audit trail:** Each DVC pointer in git is versioned alongside the code that produced it, tying every dataset revision to a specific git SHA.
 
 ---
-

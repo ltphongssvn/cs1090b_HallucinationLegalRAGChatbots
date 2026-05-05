@@ -1,11 +1,54 @@
 {
   "hallucination": {
+    "rag_ablation_matrix": [
+      {
+        "ablation": "none",
+        "ci_halfwidth": 0.008602782111625653,
+        "faithful_rate": 0.0006164753024581952,
+        "hallucinated_rate": 0.9993835246975418,
+        "n_judged": 12977,
+        "partial_rate": 0.0
+      },
+      {
+        "ablation": "bm25",
+        "ci_halfwidth": 0.011773098973141072,
+        "faithful_rate": 0.09149949487660557,
+        "hallucinated_rate": 0.6292394284889594,
+        "n_judged": 6929,
+        "partial_rate": 0.279261076634435
+      },
+      {
+        "ablation": "bge_m3",
+        "ci_halfwidth": 0.011629641290312104,
+        "faithful_rate": 0.09069145190818195,
+        "hallucinated_rate": 0.6399098718490354,
+        "n_judged": 7101,
+        "partial_rate": 0.2693986762427827
+      },
+      {
+        "ablation": "rrf",
+        "ci_halfwidth": 0.011699043005287273,
+        "faithful_rate": 0.09491235570756734,
+        "hallucinated_rate": 0.602679207638592,
+        "n_judged": 7017,
+        "partial_rate": 0.30240843665384065
+      },
+      {
+        "ablation": "reranker",
+        "ci_halfwidth": 0.0196,
+        "faithful_rate": 0.1184,
+        "hallucinated_rate": 0.5576,
+        "n_judged": 2500,
+        "partial_rate": 0.324
+      }
+    ],
     "rows": [
       {
         "ablation": "none",
-        "faithful_rate": 0.0,
-        "hallucinated_rate": 1.0,
-        "n_judged": 2500,
+        "ci_halfwidth": 0.008602782111625653,
+        "faithful_rate": 0.0006164753024581952,
+        "hallucinated_rate": 0.9993835246975418,
+        "n_judged": 12977,
         "partial_rate": 0.0,
         "retrieval_hit_at_10": null,
         "retrieval_mrr": null,
@@ -14,32 +57,35 @@
       },
       {
         "ablation": "bm25",
-        "faithful_rate": 0.0916,
-        "hallucinated_rate": 0.626,
-        "n_judged": 2500,
-        "partial_rate": 0.2824,
-        "retrieval_hit_at_10": null,
-        "retrieval_mrr": null,
-        "retrieval_ndcg_at_10": null,
+        "ci_halfwidth": 0.011773098973141072,
+        "faithful_rate": 0.09149949487660557,
+        "hallucinated_rate": 0.6292394284889594,
+        "n_judged": 6929,
+        "partial_rate": 0.279261076634435,
+        "retrieval_hit_at_10": 0.1459021890118312,
+        "retrieval_mrr": 0.0642157639215921,
+        "retrieval_ndcg_at_10": 0.0783378055212023,
         "retriever_eval": "bm25_results.eval.json"
       },
       {
         "ablation": "bge_m3",
-        "faithful_rate": 0.0828,
-        "hallucinated_rate": 0.6444,
-        "n_judged": 2500,
-        "partial_rate": 0.2728,
-        "retrieval_hit_at_10": null,
-        "retrieval_mrr": null,
-        "retrieval_ndcg_at_10": null,
+        "ci_halfwidth": 0.011629641290312104,
+        "faithful_rate": 0.09069145190818195,
+        "hallucinated_rate": 0.6399098718490354,
+        "n_judged": 7101,
+        "partial_rate": 0.2693986762427827,
+        "retrieval_hit_at_10": 0.08617138477750634,
+        "retrieval_mrr": 0.045666853971831144,
+        "retrieval_ndcg_at_10": 0.05161740936549756,
         "retriever_eval": "bge_m3_results.eval.json"
       },
       {
         "ablation": "rrf",
-        "faithful_rate": 0.0952,
-        "hallucinated_rate": 0.6152,
-        "n_judged": 2500,
-        "partial_rate": 0.2896,
+        "ci_halfwidth": 0.011699043005287273,
+        "faithful_rate": 0.09491235570756734,
+        "hallucinated_rate": 0.602679207638592,
+        "n_judged": 7017,
+        "partial_rate": 0.30240843665384065,
         "retrieval_hit_at_10": 0.15572160751065767,
         "retrieval_mrr": 0.0769341504762876,
         "retrieval_ndcg_at_10": 0.08936588479284006,
@@ -47,6 +93,7 @@
       },
       {
         "ablation": "reranker",
+        "ci_halfwidth": 0.0196,
         "faithful_rate": 0.1184,
         "hallucinated_rate": 0.5576,
         "n_judged": 2500,
@@ -170,6 +217,28 @@
       "ties": 13612,
       "top_k": 100
     },
+    "paired_reranker_concat_vs_reranker_maxp": {
+      "a_wins": 3623,
+      "b_wins": 3622,
+      "gold_field": "source_cluster_id",
+      "label_a": "reranker_concat",
+      "label_b": "reranker_maxp",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13632,
+      "top_k": 100
+    },
+    "paired_reranker_maxp_vs_reranker_finetuned": {
+      "a_wins": 427,
+      "b_wins": 6667,
+      "gold_field": "source_cluster_id",
+      "label_a": "reranker_maxp",
+      "label_b": "reranker_finetuned",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13783,
+      "top_k": 100
+    },
     "paired_rrf_vs_reranker": {
       "a_wins": 5024,
       "b_wins": 2603,
@@ -202,9 +271,66 @@
       "n_queries": 20877,
       "ties": 13761,
       "top_k": 100
+    },
+    "paired_rrf_vs_reranker_maxp": {
+      "a_wins": 3908,
+      "b_wins": 3569,
+      "gold_field": "source_cluster_id",
+      "label_a": "rrf",
+      "label_b": "reranker_maxp",
+      "match_field": "cluster_id",
+      "n_queries": 20877,
+      "ties": 13400,
+      "top_k": 100
     }
   },
   "retrieval": {
+    "bge_m3": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.0243808976385496,
+        "10": 0.08617138477750634,
+        "100": 0.2215835608564449,
+        "5": 0.06313167600708915
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "bge_m3",
+      "match_field": "cluster_id",
+      "mrr": 0.045666853971831144,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.05161740936549756,
+      "ndcg_k": 10,
+      "results_hash": "b4c308d99910afe9cf88b927e3448fa9839c864330c015afb5a6fc0a1b8cad12"
+    },
+    "bm25": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.025051492072615797,
+        "10": 0.1459021890118312,
+        "100": 0.33318963452603345,
+        "5": 0.10274464721942808
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "bm25",
+      "match_field": "cluster_id",
+      "mrr": 0.0642157639215921,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.0783378055212023,
+      "ndcg_k": 10,
+      "results_hash": "74e6263308b4a9e3f922fb7d12b05a0f5b2a842176252bdb9f29aa6e7a2407f5"
+    },
     "reranker_concat": {
       "gold_field": "source_cluster_id",
       "hit_at_k": {
@@ -251,6 +377,29 @@
       "ndcg_k": 10,
       "results_hash": "439629d85016a359799a52806cbe6c694ca9badf182dd276eed216e6cf743327"
     },
+    "reranker_maxp": {
+      "gold_field": "source_cluster_id",
+      "hit_at_k": {
+        "1": 0.042630646165636825,
+        "10": 0.1470038798677971,
+        "100": 0.3751975858600374,
+        "5": 0.10394213728026057
+      },
+      "k_values": [
+        1,
+        5,
+        10,
+        100
+      ],
+      "label": "reranker_maxp",
+      "match_field": "cluster_id",
+      "mrr": 0.07778129595655202,
+      "n_queries": 20877,
+      "n_skipped": 0,
+      "ndcg_at_10": 0.08812074650321944,
+      "ndcg_k": 10,
+      "results_hash": "12500b152e783cd6004e62b8177d06a215ad3703808d6262eabdd8e0f839adc1"
+    },
     "rrf": {
       "gold_field": "source_cluster_id",
       "hit_at_k": {
@@ -277,7 +426,7 @@
   },
   "retrieval_stratified": {
     "bge_m3": {
-      "git_sha": "545233693f85",
+      "git_sha": "6c5a17b83bdf",
       "gold_field": "source_cluster_id",
       "label": "bge_m3",
       "match_field": "cluster_id",
@@ -342,7 +491,7 @@
       "schema_version": "1.0.0"
     },
     "bm25": {
-      "git_sha": "545233693f85",
+      "git_sha": "6c5a17b83bdf",
       "gold_field": "source_cluster_id",
       "label": "bm25",
       "match_field": "cluster_id",
@@ -407,7 +556,7 @@
       "schema_version": "1.0.0"
     },
     "reranker_concat": {
-      "git_sha": "545233693f85",
+      "git_sha": "6c5a17b83bdf",
       "gold_field": "source_cluster_id",
       "label": "reranker",
       "match_field": "cluster_id",
@@ -472,7 +621,7 @@
       "schema_version": "1.0.0"
     },
     "reranker_finetuned": {
-      "git_sha": "545233693f85",
+      "git_sha": "6c5a17b83bdf",
       "gold_field": "source_cluster_id",
       "label": "reranker_finetuned",
       "match_field": "cluster_id",
@@ -536,8 +685,73 @@
       "results_hash": "439629d85016a359799a52806cbe6c694ca9badf182dd276eed216e6cf743327",
       "schema_version": "1.0.0"
     },
+    "reranker_maxp": {
+      "git_sha": "6c5a17b83bdf",
+      "gold_field": "source_cluster_id",
+      "label": "reranker_maxp",
+      "match_field": "cluster_id",
+      "n_buckets": 3,
+      "overall": {
+        "hit_at_k": {
+          "1": 0.042630646165636825,
+          "10": 0.1470038798677971,
+          "100": 0.3751975858600374,
+          "5": 0.10394213728026057
+        },
+        "mrr": 0.07778129595655202,
+        "n_queries": 20877,
+        "n_skipped": 0,
+        "ndcg_at_10": 0.08812074650321944
+      },
+      "per_bucket": {
+        "head": {
+          "gold_freq_max": 2596,
+          "gold_freq_min": 21,
+          "hit_at_k": {
+            "1": 0.03022959956382141,
+            "10": 0.12273580905070576,
+            "100": 0.3636033198037196,
+            "5": 0.08057187859695887
+          },
+          "mrr": 0.06134423840551936,
+          "n_clusters_in_bucket": 486,
+          "n_queries": 16507,
+          "ndcg_at_10": 0.0696259172325666
+        },
+        "tail": {
+          "gold_freq_max": 5,
+          "gold_freq_min": 1,
+          "hit_at_k": {
+            "1": 0.12065439672801637,
+            "10": 0.27505112474437626,
+            "100": 0.42535787321063395,
+            "5": 0.2280163599182004
+          },
+          "mrr": 0.16996430056096387,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 978,
+          "ndcg_at_10": 0.19042462251045755
+        },
+        "torso": {
+          "gold_freq_max": 20,
+          "gold_freq_min": 5,
+          "hit_at_k": {
+            "1": 0.08048349056603774,
+            "10": 0.22818396226415094,
+            "100": 0.41715801886792453,
+            "5": 0.18189858490566038
+          },
+          "mrr": 0.131192714143995,
+          "n_clusters_in_bucket": 487,
+          "n_queries": 3392,
+          "ndcg_at_10": 0.1486281038250229
+        }
+      },
+      "results_hash": "12500b152e783cd6004e62b8177d06a215ad3703808d6262eabdd8e0f839adc1",
+      "schema_version": "1.0.0"
+    },
     "rrf": {
-      "git_sha": "545233693f85",
+      "git_sha": "6c5a17b83bdf",
       "gold_field": "source_cluster_id",
       "label": "rrf",
       "match_field": "cluster_id",
@@ -604,6 +818,7 @@
   },
   "training": {
     "hard_negatives_mining": {
+      "git_sha": "6c5a17b",
       "max_chunks_per_cluster": 2,
       "n_neg_per_pos": 7,
       "n_train": 7442,
