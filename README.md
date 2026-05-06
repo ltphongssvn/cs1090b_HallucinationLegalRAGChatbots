@@ -2831,3 +2831,69 @@ Additional flags:
 - **Audit trail:** Each DVC pointer in git is versioned alongside the code that produced it, tying every dataset revision to a specific git SHA.
 
 ---
+
+## [MS4] Final Modeling + Deliverables [4/24-5/12]
+
+---
+
+## What changed from MS3 to MS4
+
+### Scope expansion
+- **Gold pool**: 47,247 numeric-id pairs (2.6%) → **2,429,533 semantically-verified pairs (60.7%)** via `eyecite` parallel-citation bridge + `rapidfuzz` quote validation. **51× expansion.**
+- **Evaluation universe**: 45,000 raw test pairs → **20,877 unique cleaned queries** (after symmetric leakage cleaning + cluster-level dedup).
+- **Corpus matching**: opinion-id matching → **cluster-level matching** on `cluster_id` (deduplicates concurrences/lower-court records).
+
+### New retrieval architectures
+- **MS3**: BM25 + BGE-M3 only.
+- **MS4 adds**: RRF fusion (k=60), 3 cross-encoder reranker variants (hub-concat, hub-MaxP, **fine-tuned**), PARADE-Transformer aggregator.
+
+### Advanced method 
+- **Hard-negative mining** from RRF ranks 2–100 (7,442 train / 391 val queries → 59,536 train pairs).
+- **Cross-encoder fine-tuning** of `bge-reranker-v2-m3` on legal hard negatives (4× L4 DDP, 22 GPU-hours).
+- **PARADE-Transformer** long-document aggregator (Li et al. SIGIR 2020 / TOIS 2023).
+
+### Headline retrieval gains (Hit@1)
+| Stage | MS3 | MS4 |
+|---|---:|---:|
+| BM25 (floor) | 0.0251 | 0.0251 |
+| BGE-M3 | 0.0244 | 0.0244 |
+| RRF | — | 0.0391 |
+| Reranker (hub concat) | — | 0.0284 |
+| Reranker (hub MaxP) | — | 0.0426 |
+| **Reranker (fine-tuned)** | — | **0.3069** |
+
+**+980% Hit@1** vs hub concat; **12.2× above BM25 ceiling**.
+
+### New end-to-end RAG pipeline
+- **MS3**: retrieval-only evaluation.
+- **MS4 adds**: Qwen2.5-7B-Instruct generation across 5 ablations (`none`, `bm25`, `bge_m3`, `rrf`, `reranker_finetuned`) → ~104,385 generations, ~50 GPU-hours.
+- **LLM-as-judge** hallucination evaluation via `gpt-4o-mini` (~36,524 judgments, $53/$65 budget, 95% CI ±0.86%–1.96%).
+
+### Central scientific findings (new in MS4)
+1. **Pearson r = −0.9624** between retrieval Hit@10 and hallucination rate (r² = 92.6%).
+2. **Hallucination floor at ~56%** even with SOTA fine-tuned reranker (vs 99.94% no-RAG floor) — **44.2pp absolute reduction**.
+3. **Universal inverted long-tail** across 5 hub variants (TAIL Hit@10 1.66×–2.26× HEAD); **fine-tuning flips the pattern** (HEAD ≈ TORSO > TAIL).
+
+### Resolves MS3's open question
+- **MS3 finding**: BM25 strictly dominates BGE-M3 on legal text (counter-intuitive).
+- **MS3 open question**: sparse-vs-dense fundamentals gap or domain-adaptation gap?
+- **MS4 answer**: **domain-adaptation gap.** Same architecture + same RRF candidate pool; only encoder weights differ → +980% Hit@1 from fine-tuning on 7,442 legal pairs.
+
+### Reproducibility infrastructure (extended)
+- **MS3**: SHA-256 hashes on retrieval outputs + git_sha provenance.
+- **MS4 adds**: 3-stage training provenance (`hard_negatives_mining=6c5a17b`, `reranker_finetuning=c5853c949d04`, `parade_training=c5853c949d04`), DVC tracking, 5-ablation generation hashes, **canonical artifact** `data/processed/final_summary.json` (SHA-256 `43eec4d3023f9485…`).
+
+### Stratified evaluation (new in MS4)
+- HEAD/TORSO/TAIL bucketing by gold-cluster citation frequency (Steck 2011).
+- 4×3 stratified heatmap artifact (`artifacts/ms4_stratified_heatmap.png`, 252 KB).
+- Falsifies the legal-NLP "long-tail problem" framing — replaces it with the **lexical-specificity hypothesis** + **HEAD weakness** as the deployment-relevant blind spot.
+
+### Infrastructure
+- **MS3**: single-GPU + small SLURM jobs.
+- **MS4**: 4× L4 DDP for BGE-M3 retrieval, reranker fine-tuning, PARADE training, RAG generation; resume-on-timeout SLURM orchestration; idempotent cell fast-paths (~0.2–0.4s when cached).
+
+---
+
+**For reviewers and collaborators**: To understand the project's progress and final results in depth, please read the in-line code cell output interpretations in `notebooks/cs1090b_ms4_main_group_#43_v01.ipynb` — every cell is paired with a structured interpretation (what the code does, output meaning, scientific significance, industry alignment, and downstream implications) that documents the full MS3→MS4 trajectory.
+
+---
