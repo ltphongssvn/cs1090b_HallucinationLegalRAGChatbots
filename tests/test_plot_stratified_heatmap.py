@@ -1,6 +1,8 @@
 """Tests for stratified heatmap visualization."""
+
 import importlib.util
 from pathlib import Path
+
 import pytest
 
 
@@ -20,12 +22,12 @@ def heatmap_module():
 @pytest.mark.contract
 class TestStratifiedHeatmap:
     def test_module_exists(self):
-        assert Path("scripts/viz/plot_stratified_heatmap.py").is_file(), \
+        assert Path("scripts/viz/plot_stratified_heatmap.py").is_file(), (
             "viz script must exist at scripts/viz/plot_stratified_heatmap.py"
+        )
 
     def test_has_plot_heatmap_function(self, heatmap_module):
-        assert hasattr(heatmap_module, "plot_heatmap"), \
-            "module must expose plot_heatmap()"
+        assert hasattr(heatmap_module, "plot_heatmap"), "module must expose plot_heatmap()"
 
     def test_has_default_retrievers_with_6_variants(self, heatmap_module):
         retrievers = getattr(heatmap_module, "DEFAULT_RETRIEVERS", None)
@@ -42,5 +44,4 @@ class TestStratifiedHeatmap:
         assert {b.lower() for b in buckets} == {"head", "torso", "tail"}
 
     def test_main_callable(self, heatmap_module):
-        assert callable(getattr(heatmap_module, "main", None)), \
-            "main() must be callable"
+        assert callable(getattr(heatmap_module, "main", None)), "main() must be callable"

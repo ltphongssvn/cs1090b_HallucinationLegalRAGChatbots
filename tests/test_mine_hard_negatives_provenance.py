@@ -1,5 +1,7 @@
 """Test mine_hard_negatives writes git_sha to summary."""
+
 import inspect
+
 import pytest
 
 
@@ -14,6 +16,5 @@ class TestMineHardNegativesProvenance:
         """Summary must include git_sha for provenance tracking."""
         src = inspect.getsource(mine_module)
         assert "git_sha" in src, (
-            "scripts/mine_hard_negatives.py must write git_sha to summary "
-            "for reproducibility provenance"
+            "scripts/mine_hard_negatives.py must write git_sha to summary for reproducibility provenance"
         )

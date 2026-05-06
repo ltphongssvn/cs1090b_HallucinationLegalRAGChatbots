@@ -232,6 +232,16 @@ MS3_INFRASTRUCTURE_SPEC: dict[str, Any] = {
             "kind": "data",
         },
         {
+            "id": "subsample",
+            "label": "Stratified\nSubsample\n(deterministic seed)",
+            "kind": "transform",
+        },
+        {
+            "id": "corpus_subsample",
+            "label": "Subsampled Corpus\nChunks",
+            "kind": "data",
+        },
+        {
             "id": "bge_shard_0",
             "label": "BGE-M3 Shard 0\n(GPU rank 0)",
             "kind": "model",
@@ -269,10 +279,12 @@ MS3_INFRASTRUCTURE_SPEC: dict[str, Any] = {
     ],
     "edges": [
         ("cl_bulk", "corpus_full"),
-        ("corpus_full", "bge_shard_0"),
-        ("corpus_full", "bge_shard_1"),
-        ("corpus_full", "bge_shard_2"),
-        ("corpus_full", "bge_shard_3"),
+        ("corpus_full", "subsample"),
+        ("subsample", "corpus_subsample"),
+        ("corpus_subsample", "bge_shard_0"),
+        ("corpus_subsample", "bge_shard_1"),
+        ("corpus_subsample", "bge_shard_2"),
+        ("corpus_subsample", "bge_shard_3"),
         ("bge_shard_0", "checkpoint"),
         ("bge_shard_1", "checkpoint"),
         ("bge_shard_2", "checkpoint"),
