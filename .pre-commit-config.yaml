@@ -3,7 +3,6 @@
 # Adapted for OOD GPU Cluster — Python/uv/torch stack, no frontend/Docker.
 # Install: uv run pre-commit install && uv run pre-commit install --hook-type pre-push
 # Run all: uv run pre-commit run --all-files
-
 repos:
   # ---- Secret Detection ----
   - repo: https://github.com/Yelp/detect-secrets
@@ -11,8 +10,7 @@ repos:
     hooks:
       - id: detect-secrets
         args: ['--baseline', '.secrets.baseline']
-        exclude: .*\.lock$|.*\.log$|logs/.*
-
+        exclude: .*\.lock$|.*\.log$|logs/.*|.*\.ipynb$
   # ---- Local Security Hooks ----
   - repo: local
     hooks:
@@ -21,20 +19,16 @@ repos:
         entry: bash scripts/hooks/block_large_files.sh
         language: system
         pass_filenames: false
-
       - id: check-env-files
         name: Block .env Files
         entry: bash scripts/hooks/block_env_files.sh
         language: system
         pass_filenames: false
-
       - id: block-cluster-credentials
         name: Block Cluster Credential Files
         entry: bash scripts/hooks/block_credentials.sh
         language: system
         pass_filenames: false
-
-
   # ---- Standard File Hygiene ----
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
@@ -59,7 +53,6 @@ repos:
         name: Check for Merge Conflict Markers
       - id: check-symlinks
         name: Check for Broken Symlinks
-
   # ---- Python Quality ----
   - repo: local
     hooks:
@@ -68,19 +61,16 @@ repos:
         entry: uv run ruff check src/ tests/ --fix
         language: system
         pass_filenames: false
-
       - id: ruff-format
         name: Ruff Format
         entry: uv run ruff format src/ tests/
         language: system
         pass_filenames: false
-
       - id: mypy
         name: Mypy Type Check
         entry: uv run mypy src/
         language: system
         pass_filenames: false
-
   # ---- Pre-commit: Quick Unit Tests ----
   - repo: local
     hooks:
@@ -89,7 +79,6 @@ repos:
         entry: uv run pytest tests/ -m unit -q --tb=short --no-header
         language: system
         pass_filenames: false
-
   # ---- Pre-push: Coverage + Security ----
   - repo: local
     hooks:
@@ -99,7 +88,6 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
-
       - id: security-audit-push
         name: Security Audit (pip-audit non-blocking)
         entry: bash scripts/hooks/pre_push_security.sh

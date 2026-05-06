@@ -207,14 +207,12 @@ class TestInfrastructureSpec:
         assert "edges" in spec
 
     def test_infrastructure_spec_covers_all_infra_concerns(self, viz_module: Any) -> None:
-        """Infrastructure spec must show DVC, sharding, checkpointing, subsampling."""
+        """Infrastructure spec must show DVC, sharding, checkpointing (no subsampling in MS4)."""
         spec = viz_module.MS3_INFRASTRUCTURE_SPEC
         ids = {s["id"] for s in spec["stages"]}
         required = {
             "cl_bulk",
             "corpus_full",
-            "subsample",
-            "corpus_subsample",
             "bge_shard_0",
             "bge_shard_1",
             "bge_shard_2",

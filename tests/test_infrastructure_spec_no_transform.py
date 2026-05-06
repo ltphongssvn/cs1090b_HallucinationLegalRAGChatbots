@@ -1,6 +1,8 @@
 """Test MS3_INFRASTRUCTURE_SPEC has no stale 'transform' kind or subsample stages."""
+
 import pytest
-from src.viz.pipeline_diagram import MS3_INFRASTRUCTURE_SPEC, _KIND_STYLE, build_pipeline_graph
+
+from src.viz.pipeline_diagram import _KIND_STYLE, MS3_INFRASTRUCTURE_SPEC, build_pipeline_graph
 
 
 @pytest.mark.contract

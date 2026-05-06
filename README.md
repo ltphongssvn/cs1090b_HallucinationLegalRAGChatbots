@@ -2847,7 +2847,7 @@ Additional flags:
 - **MS3**: BM25 + BGE-M3 only.
 - **MS4 adds**: RRF fusion (k=60), 3 cross-encoder reranker variants (hub-concat, hub-MaxP, **fine-tuned**), PARADE-Transformer aggregator.
 
-### Advanced method 
+### Advanced method
 - **Hard-negative mining** from RRF ranks 2–100 (7,442 train / 391 val queries → 59,536 train pairs).
 - **Cross-encoder fine-tuning** of `bge-reranker-v2-m3` on legal hard negatives (4× L4 DDP, 22 GPU-hours).
 - **PARADE-Transformer** long-document aggregator (Li et al. SIGIR 2020 / TOIS 2023).
