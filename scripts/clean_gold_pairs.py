@@ -45,17 +45,13 @@ logger = _get_logger()
 
 
 def _git_sha() -> str:
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()[:12]
-        )
-    except Exception:
-        return "unknown"
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
 
 
 def _sha256(path: Path) -> str:

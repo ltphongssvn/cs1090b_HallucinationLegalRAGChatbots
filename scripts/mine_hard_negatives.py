@@ -168,16 +168,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _git_sha() -> str:
-    """Return current git HEAD short SHA, or empty string if unavailable."""
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-        return out.stdout.strip() if out.returncode == 0 else ""
-    except Exception:
-        return ""
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -108,12 +108,14 @@ def log_run_start(
         The initialised :class:`wandb.Run` object.
     """
     import wandb
+    from src.repro import get_git_sha, get_run_group
 
     provenance = loader.get_provenance()
-    config = {**provenance, **(extra or {})}
+    config = {"git_sha": get_git_sha(short=True), "seed": 0, **provenance, **(extra or {})}
     run = wandb.init(
         project=project,
         name=run_name,
+        group=get_run_group("dataset-load"),
         tags=tags or [],
         config=config,
         reinit=True,

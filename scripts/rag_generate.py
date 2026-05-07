@@ -210,12 +210,53 @@ def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
 
 
 def _git_sha() -> str:
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
+
+
+def _link_upstream_lineage() -> None:
+    """Connect upstream retriever artifacts to this RAG run for W&B lineage.
+
+    RAG generation consumes top-k results from BM25, BGE-M3, RRF, and
+    reranker (concat / maxp / finetuned). Calls ``run.use_artifact(...)``
+    via :func:`src.wandb_lineage.link_input_artifacts` so the W&B lineage
+    graph shows every retriever feeding into RAG. No-op when wandb is
+    offline / inactive.
+    """
+    from src.wandb_lineage import link_input_artifacts
+    link_input_artifacts(
+        [
+            "baseline-bm25:latest",
+            "baseline-bge-m3:latest",
+            "baseline-rrf:latest",
+            "baseline-reranker:latest",
+        ],
+        artifact_type="dataset",
+    )
+
+
+def _log_output_artifact(out_dir: Path) -> None:
+    """Log RAG generations as W&B artifact for downstream judge lineage.
+
+    Calls ``run.log_artifact(...)`` so the hallucination judge can mark
+    these generations as input via ``use_artifact``. No-op when wandb is
+    offline / inactive.
+    """
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()[:12]
-    except Exception:
-        return "unknown"
+        import wandb
+    except ImportError:
+        return
+    run = wandb.run
+    if run is None or getattr(run, "offline", False):
+        return
+    art = wandb.Artifact("rag-generations", type="dataset")
+    art.add_dir(str(out_dir))
+    run.log_artifact(art)
 
 
 def _detect_device() -> str:
