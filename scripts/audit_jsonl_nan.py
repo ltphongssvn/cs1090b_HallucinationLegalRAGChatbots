@@ -690,18 +690,15 @@ def log_health_to_wandb(
     end-to-end traceability: correlate data-health numbers with downstream
     training dynamics and model performance across experiments.
     """
-    import subprocess
-
     try:
         import wandb
     except ImportError:
         log.warning("wandb not installed — skipping telemetry emission")
         return
 
-    try:
-        git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-    except Exception:
-        git_sha = "unknown"
+    from src.repro import get_git_sha, get_run_group
+
+    git_sha = get_git_sha(short=True)
 
     try:
         import polars as pl
@@ -710,7 +707,17 @@ def log_health_to_wandb(
     except Exception:
         polars_version = "unknown"
 
-    run = wandb.init(project=project, name=run_name, job_type="data-quality-gate")
+    run = wandb.init(
+        project=project,
+        name=run_name,
+        job_type="data-quality-gate",
+        group=get_run_group("data-quality"),
+        config={
+            "git_sha": git_sha,
+            "advisory_fields": sorted(advisory or _DEFAULT_ADVISORY_FIELDS),
+            "seed": 0,  # audit is deterministic JSON parsing; seed=0 documents no RNG
+        },
+    )
 
     metrics: dict[str, Any] = {
         "config/advisory_fields": sorted(advisory or _DEFAULT_ADVISORY_FIELDS),

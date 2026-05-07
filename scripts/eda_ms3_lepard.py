@@ -54,14 +54,13 @@ def _sha256_file(path: Path) -> str:
 
 
 def _git_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short=12", "HEAD"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
 
 
 def _validate_inputs(lepard_path: Path, cl_ids_path: Path, court_map_path: Path) -> None:
@@ -191,12 +190,19 @@ def _log_to_wandb(
         logger.warning("wandb not installed — skipping")
         return
 
+    from src.repro import get_run_group
+
     run = wandb.init(
         entity=entity,
         project=project,
         name=run_name,
         job_type="eda",
-        config={"schema_version": summary["schema_version"]},
+        group=get_run_group("ms3-eda"),
+        config={
+            "schema_version": summary["schema_version"],
+            "git_sha": summary["git_sha"],
+            "seed": 0,  # EDA is deterministic; seed=0 documents that no RNG was used
+        },
         reinit="finish_previous",
     )
     metrics: dict[str, Any] = {

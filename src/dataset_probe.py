@@ -1705,12 +1705,17 @@ def _log_report_to_wandb(
         print("[dataset_probe] W&B not installed — skipping W&B logging.")
         return
 
+    from src.repro import get_run_group
+
+    _probe_config = dict(report["provenance"]["probe_config"])
+    _probe_config["git_sha"] = report["provenance"]["git_sha"]
     _run = wandb.init(
         project=project,
         entity=entity,
         job_type="dataset_probe",
         name=name,
-        config=report["provenance"]["probe_config"],
+        group=get_run_group("dataset-probe"),
+        config=_probe_config,
         tags=["data_readiness", "courtlistener"],
     )
 
