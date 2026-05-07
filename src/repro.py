@@ -4,6 +4,7 @@
 import logging
 import os
 import random
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -105,3 +106,74 @@ def configure(project_root: Optional[Path] = None, verbose: bool = True) -> dict
         if torch.cuda.is_available():
             print(f"    torch.cuda.manual_seed_all({_RANDOM_SEED}) → {torch.cuda.device_count()} GPU(s)")
     return cfg
+
+
+# ---------- canonical git SHA + W&B run-group helpers ----------
+# Imported by every script that calls wandb.init so git_sha and run group
+# stay consistent across the pipeline. Centralizes 16 duplicated _git_sha()
+# definitions that drifted between short/full SHA conventions.
+
+
+def get_git_sha(short: bool = False) -> str:
+    """Return the current git commit SHA.
+
+    Resolution order:
+      1. ``GIT_COMMIT_SHA`` environment variable (container/CI-safe).
+      2. ``git rev-parse HEAD`` from the current working tree.
+      3. ``"unknown"`` if both fail.
+
+    Args:
+        short: If True, return the first 12 characters of the SHA.
+
+    Returns:
+        Full 40-char SHA, 12-char short SHA, or ``"unknown"``.
+    """
+    env_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
+    if env_sha:
+        return env_sha[:12] if short else env_sha
+    try:
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+    return sha[:12] if short else sha
+
+
+def get_run_group(prefix: Optional[str] = None) -> str:
+    """Return a stable W&B run group identifier.
+
+    Resolution order:
+      1. ``WANDB_RUN_GROUP`` environment variable (operator override).
+      2. ``f"{prefix}-{short_git_sha}"`` when ``prefix`` provided.
+      3. ``short_git_sha`` (12 chars) as a last resort.
+
+    Use the same prefix for related runs (e.g., ``"ms4-baselines"``) so a
+    reviewer can locate every BM25/BGE-M3/RRF/reranker run from one
+    experiment under a single W&B group page.
+    """
+    override = os.environ.get("WANDB_RUN_GROUP", "").strip()
+    if override:
+        return override
+    short_sha = get_git_sha(short=True)
+    if prefix:
+        return f"{prefix}-{short_sha}"
+    return short_sha
+
+
+def get_wandb_entity(default: Optional[str] = None) -> Optional[str]:
+    """Resolve W&B entity from ``WANDB_ENTITY`` env var.
+
+    Returns the env value if set, else ``default``. Reviewers and teammates
+    set ``WANDB_ENTITY=their-org`` to redirect runs to their workspace
+    without editing source.
+    """
+    env = os.environ.get("WANDB_ENTITY", "").strip()
+    return env or default
+
+
+def get_wandb_project(default: Optional[str] = None) -> Optional[str]:
+    """Resolve W&B project from ``WANDB_PROJECT`` env var.
+
+    Returns the env value if set, else ``default``.
+    """
+    env = os.environ.get("WANDB_PROJECT", "").strip()
+    return env or default

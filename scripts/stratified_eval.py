@@ -56,6 +56,17 @@ from scripts.baseline_eval import (
 )
 
 
+def _link_upstream_lineage(results_label: str = "retriever") -> None:
+    """Connect the upstream retrieval results artifact to this eval run.
+
+    Calls ``run.use_artifact(...)`` via :func:`src.wandb_lineage.link_input_artifacts`
+    so the W&B lineage graph shows ``<retriever> -> stratified-eval`` edge.
+    No-op when wandb is offline / inactive.
+    """
+    from src.wandb_lineage import link_input_artifacts
+    link_input_artifacts([f"baseline-{results_label}:latest"], artifact_type="dataset")
+
+
 def _get_logger() -> logging.Logger:
     lg = logging.getLogger("stratified_eval")
     lg.setLevel(logging.INFO)

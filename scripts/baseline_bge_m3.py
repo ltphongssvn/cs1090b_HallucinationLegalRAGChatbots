@@ -1,14 +1,11 @@
 # scripts/baseline_bge_m3.py
 """MS3 BGE-M3 dense baseline retrieval (corpus-sharded, resume-safe).
-
 Architecture (corpus sharding):
     - Each rank indexes a disjoint corpus slice [shard_start, shard_end)
     - Each rank searches ALL queries against its local shard
     - Merge step combines hits per-query across shards via MaxP + top-k
-
 Single-GPU mode (world_size=1): writes bge_m3_results.jsonl + bge_m3_index.faiss.
 Multi-GPU mode (world_size>1): writes per-rank files; merge handled externally.
-
 Outputs (data/processed/baseline/):
     bge_m3_results{.rank###}.jsonl    — per-query {source_id, dest_id, retrieved}
     bge_m3_summary{.rank###}.json     — BaselineBgeM3Summary
@@ -16,14 +13,12 @@ Outputs (data/processed/baseline/):
     bge_m3_index_meta{.rank###}.jsonl — parallel chunk_meta per index row
     bge_m3_ckpt{.rank###}.json        — encoding progress (deleted on success)
     bge_m3_index{.rank###}.partial.faiss — in-flight index (deleted on success)
-
 Resume semantics:
     - Encoding phase flushes the partial FAISS index + checkpoint every
       CHECKPOINT_INTERVAL_BATCHES batches (atomic: tempfile + os.replace).
     - On restart, a compatible checkpoint (same rank, world_size, shard range,
       encoder_model, dim, ntotal) triggers resume from the last recorded offset.
     - Partial artifacts are deleted only after the final index + meta are written.
-
 Hardening:
     - Lazy imports (faiss, torch, sentence_transformers inside main)
     - Streaming corpus encoding (no full (N,1024) float32 materialization)
@@ -33,9 +28,7 @@ Hardening:
     - Deterministic tie-break in MaxP: (-score, opinion_id)
     - Seed torch + numpy for determinism
 """
-
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -48,7 +41,6 @@ from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-
 SCHEMA_VERSION = "1.0.0"
 TOP_K = 100
 ENCODER_MODEL = "BAAI/bge-m3"
@@ -61,13 +53,10 @@ MAX_LENGTH = 8192
 SIMILARITY_METRIC = "cosine"
 NORMALIZE_EMBEDDINGS = True
 DTYPE = "float32"
-
 DEFAULT_CORPUS = Path("data/processed/baseline/corpus_chunks.jsonl")
 DEFAULT_GOLD = Path("data/processed/baseline/gold_pairs_test.jsonl")
 DEFAULT_LEPARD = Path("lepard_train_4000000_rev0194f95.jsonl")
 DEFAULT_OUT_DIR = Path("data/processed/baseline")
-
-
 def _get_logger() -> logging.Logger:
     lg = logging.getLogger("baseline_bge_m3")
     lg.setLevel(logging.INFO)
@@ -77,27 +66,18 @@ def _get_logger() -> logging.Logger:
         lg.addHandler(h)
     lg.propagate = False
     return lg
-
-
 logger = _get_logger()
-
-
 # ---------- I/O ----------
-
-
 def _iter_corpus(path: Path) -> Iterator[dict[str, Any]]:
     with path.open(encoding="utf-8") as f:
         for line in f:
             yield json.loads(line)
-
-
 def _load_queries(gold_path: Path, lepard_path: Path) -> list[dict[str, Any]]:
     gold_keys: set[tuple[int, int]] = set()
     with gold_path.open(encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
             gold_keys.add((int(r["source_id"]), int(r["dest_id"])))
-
     queries: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
     with lepard_path.open(encoding="utf-8") as f:
@@ -114,11 +94,8 @@ def _load_queries(gold_path: Path, lepard_path: Path) -> list[dict[str, Any]]:
                     }
                 )
     return queries
-
-
 def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
     """Verified-mode query loader for cleaned-corpus pipeline.
-
     Reads cleaned gold pairs (which carry quote + source_cluster_id + dest_id
     directly), so no LePaRD lookup is required. Each (source_id, dest_id)
     pair is a distinct query — a single source opinion typically cites many
@@ -143,11 +120,7 @@ def _load_queries_verified(gold_path: Path) -> list[dict[str, Any]]:
                 }
             )
     return queries
-
-
 # ---------- aggregation ----------
-
-
 def _aggregate_chunk_scores(
     raw_hits: list[dict[str, Any]],
     *,
@@ -155,7 +128,6 @@ def _aggregate_chunk_scores(
     match_field: str = "opinion_id",
 ) -> list[dict[str, Any]]:
     """MaxP aggregation over chunk-level hits keyed by match_field.
-
     match_field="opinion_id" (legacy) or "cluster_id" (verified).
     """
     best: dict[int, float] = {}
@@ -166,14 +138,9 @@ def _aggregate_chunk_scores(
             best[oid] = s
     ranked = [{match_field: oid, "score": sc} for oid, sc in sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))]
     return ranked[:top_k]
-
-
 # ---------- sharding ----------
-
-
 def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
     """Largest-remainder shard allocation.
-
     Guarantees:
         - sum of (end - start) across all ranks == n
         - max(size) - min(size) <= 1
@@ -188,8 +155,6 @@ def _shard_range(n: int, rank: int, world_size: int) -> tuple[int, int]:
     start = rank * base + min(rank, rem)
     end = start + base + (1 if rank < rem else 0)
     return start, end
-
-
 def _merge_shard_results(
     shard_paths: list[Path],
     merged_path: Path,
@@ -198,19 +163,16 @@ def _merge_shard_results(
     verified: bool = False,
 ) -> None:
     """Corpus-shard merge: combine per-query hits across shards via MaxP + top-k.
-
     verified=False (legacy): query key = (source_id, dest_id), hit field = opinion_id.
     verified=True            : query key = (source_id, dest_id), hit field = cluster_id;
                                source_cluster_id is carried through as a per-query
                                match-target field for downstream evaluation.
     """
     match_field = "cluster_id" if verified else "opinion_id"
-
     per_query: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
     key_order: list[tuple[int, int]] = []
     seen_keys: set[tuple[int, int]] = set()
     cluster_ids: dict[tuple[int, int], int] = {}  # verified-mode only
-
     for shard in sorted(shard_paths):
         with shard.open(encoding="utf-8") as fin:
             for line in fin:
@@ -227,7 +189,6 @@ def _merge_shard_results(
                     prev = per_query[key].get(oid)
                     if prev is None or sc > prev:
                         per_query[key][oid] = sc
-
     with merged_path.open("w", encoding="utf-8") as fout:
         for key in key_order:
             scores = per_query[key]
@@ -248,11 +209,7 @@ def _merge_shard_results(
                     "retrieved": ranked,
                 }
             fout.write(json.dumps(out_row, allow_nan=False) + "\n")
-
-
 # ---------- checkpointing (resume-safe corpus encoding) ----------
-
-
 def _write_checkpoint(
     ckpt_path: Path,
     *,
@@ -280,14 +237,9 @@ def _write_checkpoint(
         encoding="utf-8",
     )
     os.replace(tmp, ckpt_path)
-
-
 _CHECKPOINT_REQUIRED_KEYS = frozenset({"rank", "world_size", "n_encoded", "shard_start", "shard_end", "encoder_model"})
-
-
 def _load_checkpoint(ckpt_path: Path) -> dict[str, Any] | None:
     """Load checkpoint JSON. Returns None if file missing, corrupt, or incomplete.
-
     Structural incompleteness (missing required keys) is treated identically to a
     corrupt file — caller starts fresh rather than continuing from an ambiguous state.
     """
@@ -302,73 +254,59 @@ def _load_checkpoint(ckpt_path: Path) -> dict[str, Any] | None:
     if not _CHECKPOINT_REQUIRED_KEYS.issubset(data.keys()):
         return None
     return data
-
-
 # ---------- provenance ----------
-
-
 def _git_sha() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()[:12]
-    except Exception:
-        return "unknown"
-
-
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
 def _detect_device() -> str:
     try:
         import torch
-
         if torch.cuda.is_available():
             return "cuda"
     except ImportError:
         pass
     return "cpu"
-
-
 def _device_name(device: str) -> str:
     if device != "cuda":
         return device
     try:
         import torch
-
         return torch.cuda.get_device_name(0)
     except Exception:
         return "cuda-unknown"
-
-
 def _seed_all(seed: int) -> None:
     import random as _r
-
     _r.seed(seed)
     try:
         import numpy as np
-
         np.random.seed(seed)
     except ImportError:
         pass
     try:
         import torch
-
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
     except ImportError:
         pass
-
-
 # ---------- W&B ----------
-
-
 def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
     try:
         import wandb
     except ImportError:
         logger.info("  wandb unavailable — skipping telemetry")
         return
+    from src.repro import get_run_group, get_wandb_entity, get_wandb_project
+
     run = wandb.init(
-        entity="phl690-harvard-extension-schol",
-        project="cs1090b",
+        entity=get_wandb_entity("phl690-harvard-extension-schol"),
+        project=get_wandb_project("cs1090b"),
         job_type="baseline-bge-m3",
+        group=get_run_group("ms4-baselines"),
         config=summary,
         reinit=True,
     )
@@ -377,11 +315,7 @@ def _log_to_wandb(summary: dict[str, Any], out_dir: Path) -> None:
     art.add_dir(str(out_dir))
     run.log_artifact(art)
     run.finish()
-
-
 # ---------- main ----------
-
-
 def main(
     corpus_path: Path = DEFAULT_CORPUS,
     gold_pairs_path: Path = DEFAULT_GOLD,
@@ -400,9 +334,7 @@ def main(
     import faiss
     import numpy as np
     from sentence_transformers import SentenceTransformer
-
     from src.eda_schemas import BaselineBgeM3Summary
-
     if top_k < 1:
         raise ValueError(f"top_k must be >= 1, got {top_k}")
     if encode_batch_size < 1:
@@ -417,13 +349,11 @@ def main(
     for path in required_inputs:
         if not Path(path).is_file():
             raise FileNotFoundError(f"input missing: {path}")
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _seed_all(seed)
     device = _detect_device()
     device_name = _device_name(device)
-
     rank_suffix = f".rank{rank:03d}" if world_size > 1 else ""
     index_path = out_dir / f"bge_m3_index{rank_suffix}.faiss"
     meta_path = out_dir / f"bge_m3_index_meta{rank_suffix}.jsonl"
@@ -431,11 +361,9 @@ def main(
     summary_path = out_dir / f"bge_m3_summary{rank_suffix}.json"
     ckpt_path = out_dir / f"bge_m3_ckpt{rank_suffix}.json"
     partial_index_path = out_dir / f"bge_m3_index{rank_suffix}.partial.faiss"
-
     logger.info("=" * 60)
     logger.info(f"MS3 BGE-M3 corpus-shard  (rank={rank}/{world_size}, device={device_name}, top_k={top_k})")
     logger.info("=" * 60)
-
     # --- Load encoder ---
     logger.info("\n[1/5] Loading encoder")
     t0 = time.perf_counter()
@@ -443,14 +371,12 @@ def main(
     encoder.max_seq_length = MAX_LENGTH
     encoder_load_seconds = time.perf_counter() - t0
     logger.info(f"  encoder loaded in: {encoder_load_seconds:.2f}s")
-
     # --- Corpus shard range ---
     logger.info("\n[2/5] Computing corpus shard range")
     n_total = sum(1 for _ in _iter_corpus(corpus_path))
     shard_start, shard_end = _shard_range(n_total, rank, world_size)
     logger.info(f"  corpus (total)   : {n_total:,}")
     logger.info(f"  shard range      : [{shard_start:,}, {shard_end:,})  ({shard_end - shard_start:,} chunks)")
-
     # In verified mode chunk_meta stores (cluster_id, chunk_index); else (opinion_id, chunk_index).
     id_field = "cluster_id" if verified else "opinion_id"
     chunk_meta: list[tuple[int, int]] = []
@@ -462,7 +388,6 @@ def main(
     n_chunks = len(chunk_meta)
     unique_opinions = len({m[0] for m in chunk_meta})
     logger.info(f"  shard opinions   : {unique_opinions:,}")
-
     # --- Build or reuse/resume FAISS index ---
     reuse_index = False
     if index_path.exists() and meta_path.exists():
@@ -476,7 +401,6 @@ def main(
                     logger.info(f"\n[3/5] Reusing FAISS index ({index.ntotal:,} vectors)")
             except Exception as e:
                 logger.info(f"  could not load existing index: {e}")
-
     if reuse_index:
         index_build_seconds = 0.0
     else:
@@ -484,7 +408,6 @@ def main(
             f"\n[3/5] Encoding shard + building FAISS index "
             f"(batch={encode_batch_size}, checkpoint every {CHECKPOINT_INTERVAL_BATCHES} batches)"
         )
-
         # Attempt resume
         resume_from = 0
         index: Any = None  # faiss index handle
@@ -513,9 +436,7 @@ def main(
                 index = faiss.IndexFlatIP(EMBEDDING_DIM)
         if index is None:
             index = faiss.IndexFlatIP(EMBEDDING_DIM)
-
         t0 = time.perf_counter()
-
         def _iter_shard_batches() -> Iterator[list[str]]:
             batch: list[str] = []
             absolute_start = shard_start + resume_from
@@ -530,7 +451,6 @@ def main(
                     batch = []
             if batch:
                 yield batch
-
         n_encoded = resume_from
         batches_since_ckpt = 0
         for batch_texts in _iter_shard_batches():
@@ -546,7 +466,6 @@ def main(
             index.add(embs)
             n_encoded += len(batch_texts)
             batches_since_ckpt += 1
-
             if batches_since_ckpt >= CHECKPOINT_INTERVAL_BATCHES:
                 faiss.write_index(index, str(partial_index_path))
                 _write_checkpoint(
@@ -562,11 +481,9 @@ def main(
                 batches_since_ckpt = 0
             elif n_encoded % (encode_batch_size * 100) == 0:
                 logger.info(f"    encoded {n_encoded:,} / {n_chunks:,}")
-
         index_build_seconds = time.perf_counter() - t0
         logger.info(f"  index size       : {index.ntotal:,}")
         logger.info(f"  index build      : {index_build_seconds:.2f}s")
-
         # Final atomic write of index + meta; clean up partial artifacts
         faiss.write_index(index, str(index_path))
         with meta_path.open("w", encoding="utf-8") as f:
@@ -576,7 +493,6 @@ def main(
             partial_index_path.unlink()
         if ckpt_path.exists():
             ckpt_path.unlink()
-
     # --- Load + encode queries ---
     logger.info("\n[4/5] Loading + encoding queries")
     queries = _load_queries_verified(gold_pairs_path) if verified else _load_queries(gold_pairs_path, lepard_path)
@@ -592,13 +508,11 @@ def main(
     ).astype(np.float32)
     query_encode_seconds = time.perf_counter() - t0
     logger.info(f"  encode time      : {query_encode_seconds:.2f}s")
-
     # --- Retrieval with dynamic k-expansion ---
     logger.info(f"\n[5/5] FAISS search top-{top_k} per query (shard-local)")
     t0 = time.perf_counter()
     initial_k = min(top_k * RETRIEVAL_K_MULTIPLIER, n_chunks)
     results_tmp = results_path.with_suffix(".jsonl.tmp")
-
     def _retrieve_and_aggregate(q_emb: np.ndarray) -> list[dict[str, Any]]:
         current_k = initial_k
         while True:
@@ -616,7 +530,6 @@ def main(
             if len(aggregated) >= top_k or current_k >= n_chunks:
                 return aggregated
             current_k = min(current_k * 2, n_chunks)
-
     with results_tmp.open("w", encoding="utf-8") as fout:
         for batch_start in range(0, len(queries), query_batch_size):
             batch_end = min(batch_start + query_batch_size, len(queries))
@@ -654,11 +567,9 @@ def main(
                         "retrieved": aggregated,
                     }
                 fout.write(json.dumps(out_row, allow_nan=False) + "\n")
-
     os.replace(results_tmp, results_path)
     retrieval_seconds = time.perf_counter() - t0
     logger.info(f"  retrieval done in: {retrieval_seconds:.2f}s")
-
     # --- Summary ---
     results_hash = hashlib.sha256(results_path.read_bytes()).hexdigest()
     validated = BaselineBgeM3Summary(
@@ -691,13 +602,9 @@ def main(
         encoding="utf-8",
     )
     logger.info(f"\nWrote summary -> {summary_path}")
-
     if log_to_wandb:
         _log_to_wandb(validated.model_dump(), out_dir)
-
     return validated
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="MS3 BGE-M3 dense baseline retrieval.")
     ap.add_argument("--corpus-path", type=Path, default=DEFAULT_CORPUS)
@@ -718,8 +625,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="verified pipeline: cleaned gold (no lepard lookup), match by cluster_id",
     )
     return ap
-
-
 if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     if args.dry_run:

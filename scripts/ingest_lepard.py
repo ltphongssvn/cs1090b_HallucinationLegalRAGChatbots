@@ -171,22 +171,13 @@ def _manifest_path(output_path: Path) -> Path:
 
 
 def _git_sha() -> str:
+    """Thin wrapper around src.repro.get_git_sha for full-40 SHA.
+
+    LePaRD provenance manifest stores the full commit SHA (not short-12)
+    so manifests can be cross-referenced with git logs unambiguously.
     """
-    Return current git commit SHA or 'unknown'.
-    Checks GIT_COMMIT_SHA environment variable first — container-safe.
-    Falls back to subprocess for local development.
-    Narrows to specific subprocess exceptions:
-      FileNotFoundError  — git not installed
-      CalledProcessError — not a git repo or git error
-      OSError            — OS-level failure
-    """
-    env_sha = os.environ.get("GIT_COMMIT_SHA", "").strip()
-    if env_sha:
-        return env_sha
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
-        return "unknown"
+    from src.repro import get_git_sha
+    return get_git_sha(short=False)
 
 
 def _python_version() -> str:

@@ -234,12 +234,46 @@ def _call_judge_with_retries(
 
 
 def _git_sha() -> str:
+    """Thin wrapper around src.repro.get_git_sha for short-12 SHA.
+
+    Kept as a module-local function to preserve existing call sites
+    (``_git_sha()``) without rippling import changes through the file.
+    """
+    from src.repro import get_git_sha
+    return get_git_sha(short=True)
+
+
+def _link_upstream_lineage() -> None:
+    """Connect upstream RAG generation artifact to this judge run for W&B lineage.
+
+    Hallucination judgments consume RAG generations from each ablation
+    (no_rag / bm25_rag / bge_m3_rag / rrf_rag / reranker_rag). Calls
+    ``run.use_artifact("rag-generations:latest")`` via
+    :func:`src.wandb_lineage.link_input_artifacts` so the W&B lineage graph
+    shows ``rag -> hallucination-judge`` edge. No-op when wandb is offline /
+    inactive.
+    """
+    from src.wandb_lineage import link_input_artifacts
+    link_input_artifacts(["rag-generations:latest"], artifact_type="dataset")
+
+
+def _log_output_artifact(out_dir: Path) -> None:
+    """Log hallucination judgments as W&B artifact (terminal pipeline node).
+
+    Calls ``run.log_artifact(...)`` so the W&B lineage DAG terminates on
+    a versioned output rather than a dangling run. No-op when wandb is
+    offline / inactive.
+    """
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()[:12]
-    except Exception:
-        return "unknown"
+        import wandb
+    except ImportError:
+        return
+    run = wandb.run
+    if run is None or getattr(run, "offline", False):
+        return
+    art = wandb.Artifact("hallucination-judgments", type="dataset")
+    art.add_dir(str(out_dir))
+    run.log_artifact(art)
 
 
 # ---------- main ----------
