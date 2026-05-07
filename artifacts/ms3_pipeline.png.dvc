@@ -1,0 +1,5 @@
+outs:
+- md5: bc486cc72d9fb277ec31f9f3b7f4a422
+  size: 95676
+  hash: md5
+  path: ms3_pipeline.png

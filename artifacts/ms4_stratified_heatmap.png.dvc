@@ -1,0 +1,5 @@
+outs:
+- md5: cf897f1115c6fd554c427192509205d2
+  size: 258019
+  hash: md5
+  path: ms4_stratified_heatmap.png

@@ -56,3 +56,6 @@ wandb/
 
 # Hyperscan cache (local, regenerable)
 .hyperscan_cache/
+
+# DVC-tracked figure artifacts
+artifacts/*.png

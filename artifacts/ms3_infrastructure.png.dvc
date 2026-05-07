@@ -1,0 +1,5 @@
+outs:
+- md5: e43a8f1a534f8ba489812c0a7e83ba5a
+  size: 99231
+  hash: md5
+  path: ms3_infrastructure.png
