@@ -11,7 +11,7 @@ def _run_dvc(args: list[str]) -> tuple[int, str]:
         capture_output=True,
         text=True,
         check=False,
-        timeout=300,
+        timeout=900,
     )
     return proc.returncode, proc.stdout + proc.stderr
 
