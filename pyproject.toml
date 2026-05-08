@@ -83,6 +83,9 @@ line-length = 120
 per-file-ignores = {"tests/*.py" = ["E402"], "notebooks/*.ipynb" = ["E402", "E702"]}
 select = ["E", "F", "I"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["wandb"]
 [tool.mypy]
 ignore_missing_imports = false
 [[tool.mypy.overrides]]
