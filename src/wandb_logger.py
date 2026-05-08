@@ -108,7 +108,6 @@ def log_run_start(
         The initialised :class:`wandb.Run` object.
     """
     import wandb
-
     from src.repro import get_git_sha, get_run_group
 
     provenance = loader.get_provenance()
