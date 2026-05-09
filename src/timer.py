@@ -15,6 +15,30 @@ import time
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
+# Module-level accumulator: total seconds across all cell_timer invocations
+_ACCUMULATED_SECONDS: float = 0.0
+
+
+def get_accumulated_seconds() -> float:
+    """Return total elapsed seconds across every cell_timer block run so far."""
+    return _ACCUMULATED_SECONDS
+
+
+def reset_accumulated() -> None:
+    """Reset the accumulator. Called by Cell 0 to start fresh on kernel restart."""
+    global _ACCUMULATED_SECONDS
+    _ACCUMULATED_SECONDS = 0.0
+
+
+def format_accumulated(seconds: float | None = None) -> str:
+    """Format accumulated seconds as 'Xh Ym SSs' or 'Xm SSs'."""
+    s = seconds if seconds is not None else _ACCUMULATED_SECONDS
+    hours, remainder = divmod(s, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours >= 1:
+        return f"{int(hours)}h {int(minutes)}m {int(secs):02d}s"
+    return f"{int(minutes)}m {int(secs):02d}s"
+
 
 @contextmanager
 def cell_timer(
@@ -50,6 +74,8 @@ def cell_timer(
         yield
     finally:
         elapsed = _override_elapsed if _override_elapsed is not None else (time.time() - start)
+        global _ACCUMULATED_SECONDS
+        _ACCUMULATED_SECONDS += elapsed
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours >= 1:
