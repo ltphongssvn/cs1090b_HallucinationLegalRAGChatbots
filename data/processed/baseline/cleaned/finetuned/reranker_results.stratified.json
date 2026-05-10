@@ -1,5 +1,5 @@
 {
-  "git_sha": "5d664f1e6014",
+  "git_sha": "4347307eed65",
   "gold_field": "source_cluster_id",
   "label": "reranker_finetuned",
   "match_field": "cluster_id",
